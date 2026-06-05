@@ -86,13 +86,16 @@ fn ensure_firstcolumn_is_aligned() { crate::winio::ensure_firstcolumn_is_aligned
 fn ensure_firstcolumn_is_aligned() {}
 
 #[inline] fn warn_and_briefly_pause(msg: &str) { crate::winio::warn_and_briefly_pause(msg); }
-fn ask_user(_yesno: bool, _msg: &str) -> i32 { YES }  // stub: real impl TBD
-fn in_restricted_mode() -> bool { false }  // stub: real impl is in nano.rs but with different sig
-fn breadth(_s: &str) -> usize { _s.len() }
-fn display_string(_s: &str, _from: usize, _room: usize, _a: bool, _b: bool) -> String {
-    _s.to_string()
+fn ask_user(yesno: bool, msg: &str) -> i32 { crate::prompt::ask_user(yesno, msg) }
+fn in_restricted_mode() -> bool { crate::ISSET!(crate::definitions::RESTRICTED) }
+fn breadth(s: &str) -> usize { crate::utils::breadth(s) }
+fn display_string(s: &str, from: usize, room: usize, isdata: bool, isprompt: bool) -> String {
+    crate::winio::display_string(s, from, room, isdata, isprompt)
 }
-fn mbstrcasecmp(_a: &str, _b: &str) -> i32 { _a.cmp(_b) as i32 }
+fn mbstrcasecmp(a: &str, b: &str) -> i32 {
+    let a_lc = a.to_lowercase(); let b_lc = b.to_lowercase();
+    a_lc.cmp(&b_lc) as i32
+}
 
 // Stub for restoring terminal state — no real equivalent exists yet.
 fn reconnect_and_store_state() {}  // stub: function not yet ported
@@ -104,13 +107,15 @@ fn isendwin() -> bool { false }  // stub: no crate::winio::isendwin exists
 #[inline] fn restore_handler_for_Ctrl_C() { crate::nano::restore_handler_for_Ctrl_C(); }
 #[inline] fn block_sigwinch(block: bool) { crate::nano::block_sigwinch(block); }
 fn enable_kb_interrupt() { crate::nano::enable_kb_interrupt(); }
-fn close_and_go() {}
-fn finish() {}
+fn close_and_go() { crate::nano::close_and_go() }
+fn finish() { crate::nano::finish() }
 
 // Undo record delegation
 #[inline] fn add_undo(utype: UndoType, msg: Option<&str>) { crate::text::add_undo(utype, msg); }
 #[inline] fn update_undo(utype: UndoType) { crate::text::update_undo(utype); }
-fn discard_until(_target: *mut crate::definitions::UndoStruct) {}
+fn discard_until(target: *mut crate::definitions::UndoStruct) {
+    crate::text::discard_until(target as *const crate::definitions::UndoStruct)
+}
 fn copy_marked_region() {}
 fn do_snip(_a: bool, _b: bool, _c: bool) {}
 fn get_region(
