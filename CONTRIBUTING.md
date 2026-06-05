@@ -20,8 +20,8 @@ This project follows the Rust community's [Code of Conduct](https://www.rust-lan
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nano-rs.git
-cd nano-rs/rust
+git clone https://github.com/faratech/nano-rs.git
+cd nano-rs
 
 # Run tests to verify setup
 cargo test
