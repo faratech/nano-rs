@@ -1008,65 +1008,67 @@ pub fn do_cancel() {}
 pub fn do_help() { crate::help::do_help() }
 
 // From move.c
-pub fn do_page_up()    {}
-pub fn do_page_down()  {}
-pub fn to_first_line() {}
-pub fn to_last_line()  {}
-pub fn do_up()         {}
-pub fn do_down()       {}
-pub fn do_left()       {}
-pub fn do_right()      {}
-pub fn do_home()       {}
-pub fn do_end()        {}
-pub fn to_prev_word()  {}
-pub fn to_next_word()  {}
-pub fn to_prev_block() {}
-pub fn to_next_block() {}
+pub fn do_page_up()    { crate::move_::do_page_up() }
+pub fn do_page_down()  { crate::move_::do_page_down() }
+pub fn to_first_line() { crate::move_::to_first_line() }
+pub fn to_last_line()  { crate::move_::to_last_line() }
+pub fn do_up()         { crate::move_::do_up() }
+pub fn do_down()       { crate::move_::do_down() }
+pub fn do_left()       { crate::move_::do_left() }
+pub fn do_right()      { crate::move_::do_right() }
+pub fn do_home()       { crate::move_::do_home() }
+pub fn do_end()        { crate::move_::do_end() }
+pub fn to_prev_word()  { crate::move_::to_prev_word() }
+pub fn to_next_word()  { crate::move_::to_next_word() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_scroll_up()    {}
+pub fn to_prev_block() { crate::move_::to_prev_block() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_scroll_down()  {}
+pub fn to_next_block() { crate::move_::to_next_block() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_scroll_left()  {}
+pub fn do_scroll_up()    { crate::move_::do_scroll_up() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_scroll_right() {}
+pub fn do_scroll_down()  { crate::move_::do_scroll_down() }
 #[cfg(not(feature = "tiny"))]
-pub fn to_top_row()    {}
+pub fn do_scroll_left()  { crate::move_::do_scroll_left() }
 #[cfg(not(feature = "tiny"))]
-pub fn to_bottom_row() {}
+pub fn do_scroll_right() { crate::move_::do_scroll_right() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_cycle()      {}
+pub fn to_top_row()    { crate::move_::to_top_row() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_center()     {}
+pub fn to_bottom_row() { crate::move_::to_bottom_row() }
+#[cfg(not(feature = "tiny"))]
+pub fn do_cycle()      { crate::move_::do_cycle() }
+#[cfg(not(feature = "tiny"))]
+pub fn do_center()     { crate::move_::do_center() }
 #[cfg(feature = "justify")]
-pub fn to_para_begin() {}
+pub fn to_para_begin() { crate::move_::to_para_begin() }
 #[cfg(feature = "justify")]
-pub fn to_para_end()   {}
+pub fn to_para_end()   { crate::move_::to_para_end() }
 #[cfg(feature = "multibuffer")]
-pub fn switch_to_prev_buffer() {}
+pub fn switch_to_prev_buffer() { crate::files::switch_to_prev_buffer() }
 #[cfg(feature = "multibuffer")]
-pub fn switch_to_next_buffer() {}
+pub fn switch_to_next_buffer() { crate::files::switch_to_next_buffer() }
 
 // From cut.c
-pub fn cut_text()  {}
-pub fn paste_text() {}
-pub fn copy_text() {}
+pub fn cut_text()  { crate::cut::cut_text() }
+pub fn paste_text() { crate::cut::paste_text() }
+pub fn copy_text() { crate::cut::copy_text() }
 #[cfg(not(feature = "tiny"))]
-pub fn cut_till_eof() {}
+pub fn cut_till_eof() { crate::cut::cut_till_eof() }
 #[cfg(not(feature = "tiny"))]
-pub fn zap_text()  {}
+pub fn zap_text()  { crate::cut::zap_text() }
 
 // From search.c
-pub fn do_search_forward()  {}
-pub fn do_search_backward() {}
-pub fn do_findprevious()    {}
-pub fn do_findnext()        {}
-pub fn do_replace()         {}
-pub fn do_gotolinecolumn()  {}
+pub fn do_search_forward()  { crate::search::do_search_forward() }
+pub fn do_search_backward() { crate::search::do_search_backward() }
+pub fn do_findprevious()    { crate::search::do_findprevious() }
+pub fn do_findnext()        { crate::search::do_findnext() }
+pub fn do_replace()         { crate::search::do_replace() }
+pub fn do_gotolinecolumn()  { crate::search::do_gotolinecolumn() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_find_bracket()    {}
+pub fn do_find_bracket()    { crate::search::do_find_bracket() }
 #[cfg(not(feature = "tiny"))]
-pub fn put_or_lift_anchor() {}
+pub fn put_or_lift_anchor() { crate::search::put_or_lift_anchor() }
 #[cfg(not(feature = "tiny"))]
 pub fn to_prev_anchor()     { crate::search::to_prev_anchor() }
 #[cfg(not(feature = "tiny"))]
