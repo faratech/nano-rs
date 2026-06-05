@@ -195,7 +195,7 @@ Contributions to this Rust port are welcome! Please ensure:
 
 ## Authors & Attribution
 
-**Rust Port (Independent Project)**: Claude (Anthropic) - Educational Rust transliteration  
+**Rust Port (Independent Project)**: Community contributors  
 **Original GNU nano**: Chris Allegretta and the official nano contributors
 
 This Rust port is not created, maintained, or endorsed by the GNU nano project or its maintainers. It is an independent educational project that transliterates the original C code into Rust for learning and demonstration purposes.

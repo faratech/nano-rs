@@ -136,9 +136,9 @@ Include any relevant context or issue references.
 
 If this fixes an issue, reference it:
 Fixes #123
-
-Co-Authored-By: Your Name <your.email@example.com>
 ```
+
+Note: This is a community project. Include your own name in commits if you wish.
 
 Commit types:
 - `feat`: New feature
