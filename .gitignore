@@ -4,6 +4,7 @@
 *.orig
 *.patch
 *.swp
+/rust/target/
 .deps
 .libs
 Makefile
