@@ -472,9 +472,13 @@ pub fn save_history() {
     };
 
     // Don't allow others to read or write the history file.
-    if let Err(e) = fs::set_permissions(&historyname,
-            fs::Permissions::from_mode(0o600)) {
-        eprintln!("Cannot limit permissions on {}: {}", historyname, e);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(&historyname,
+                fs::Permissions::from_mode(0o600)) {
+            eprintln!("Cannot limit permissions on {}: {}", historyname, e);
+        }
     }
 
     let (search_items, replace_items, execute_items) = STATE.with(|s| {
@@ -705,9 +709,13 @@ pub fn save_positions_register() {
     };
 
     // Don't allow others to read or write the positions-register file.
-    if let Err(e) = fs::set_permissions(&regname,
-            fs::Permissions::from_mode(0o600)) {
-        eprintln!("Cannot limit permissions on {}: {}", regname, e);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(&regname,
+                fs::Permissions::from_mode(0o600)) {
+            eprintln!("Cannot limit permissions on {}: {}", regname, e);
+        }
     }
 
     let records = POSITIONS_REGISTER.with(|pr| pr.borrow().clone());

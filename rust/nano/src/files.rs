@@ -240,7 +240,7 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
         return false;
     }
 
-    let pid = unsafe { libc::getpid() } as u32;
+    let pid = std::process::id();
 
     // Get username
     let username: String = {
@@ -260,22 +260,22 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
     };
 
     // Get hostname
+    #[cfg(unix)]
     let hostname: String = {
         let mut buf = [0u8; 32];
         let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, 31) };
         if ret < 0 {
-            // errno check: if not ENAMETOOLONG, return false
-            let errno = unsafe { *libc::__errno_location() };
-            if errno != libc::ENAMETOOLONG {
-                statusline(MessageType::Mild,
-                    &format!("Couldn't determine hostname: {}", io::Error::last_os_error()));
-                return false;
-            }
+            statusline(MessageType::Mild,
+                &format!("Couldn't determine hostname: {}", io::Error::last_os_error()));
+            return false;
         }
         buf[31] = 0;
         let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char) };
         cstr.to_string_lossy().into_owned()
     };
+
+    #[cfg(not(unix))]
+    let hostname: String = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
 
     // Build lock data (1024 bytes)
     let mut lockdata = vec![0u8; LOCKSIZE];
@@ -550,11 +550,14 @@ pub fn has_valid_path(filename: &str) -> bool {
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            let x_ok = unsafe { libc::access(cpath.as_ptr(), libc::X_OK) };
-            if x_ok < 0 {
-                statusline(MessageType::Alert,
-                    &format!("Path '{}' is not accessible", parentdir_str));
-                return false;
+            #[cfg(unix)]
+            {
+                let x_ok = unsafe { libc::access(cpath.as_ptr(), libc::X_OK) };
+                if x_ok < 0 {
+                    statusline(MessageType::Alert,
+                        &format!("Path '{}' is not accessible", parentdir_str));
+                    return false;
+                }
             }
 
             // Check for write access if locking is enabled
@@ -563,10 +566,13 @@ pub fn has_valid_path(filename: &str) -> bool {
                 let locking = ISSET!(LOCKING);
                 let view_mode = ISSET!(VIEW_MODE);
                 if locking && !view_mode {
-                    let w_ok = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
-                    if w_ok < 0 {
-                        statusline(MessageType::Mild,
-                            &format!("Directory '{}' is not writable", parentdir_str));
+                    #[cfg(unix)]
+                    {
+                        let w_ok = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
+                        if w_ok < 0 {
+                            statusline(MessageType::Mild,
+                                &format!("Directory '{}' is not writable", parentdir_str));
+                        }
                     }
                 }
             }
@@ -986,7 +992,7 @@ pub fn encode_data(buf: &[u8]) -> String {
 // read_file_impl — read an open file into the current buffer
 // C: void read_file(FILE *f, int fd, const char *filename, bool undoable)
 // ---------------------------------------------------------------------------
-pub fn read_file_impl(mut f: File, fd: i32, filename: &str, undoable: bool) {
+pub fn read_file_impl(mut f: File, is_new_file: bool, filename: &str, undoable: bool) {
     let was_lineno = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.current.as_ref())
@@ -1064,9 +1070,16 @@ pub fn read_file_impl(mut f: File, fd: i32, filename: &str, undoable: bool) {
 
     // Check writability
     let writable = if !is_new_file && !undoable && !ISSET!(VIEW_MODE) {
-        let cname = std::ffi::CString::new(filename).unwrap_or_default();
-        let access_ret = unsafe { libc::access(cname.as_ptr(), libc::W_OK) };
-        access_ret == 0
+        #[cfg(unix)]
+        {
+            let cname = std::ffi::CString::new(filename).unwrap_or_default();
+            let access_ret = unsafe { libc::access(cname.as_ptr(), libc::W_OK) };
+            access_ret == 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
     } else {
         true
     };
@@ -1256,8 +1269,11 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
         }
         Ok(f) => {
             // Get the file descriptor
-            use std::os::unix::io::AsRawFd;
-            let fd = f.as_raw_fd();
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let _fd = f.as_raw_fd();
+            }
 
             let zero = ISSET!(ZERO);
             let we_are_running = with_state(|s| s.we_are_running);
@@ -1894,9 +1910,12 @@ pub fn check_writable_directory(path: &str) -> Option<String> {
     }
 
     let cpath = std::ffi::CString::new(full_path.as_str()).ok()?;
-    let ret = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
-    if ret != 0 {
-        return None;
+    #[cfg(unix)]
+    {
+        let ret = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
+        if ret != 0 {
+            return None;
+        }
     }
 
     Some(full_path)
@@ -1938,33 +1957,20 @@ pub fn safe_tempfile() -> Option<(String, File)> {
     // Build template: <tempdir>nano.XXXXXX<ext>
     let template = format!("{}nano.XXXXXX{}", tempdir, extension);
 
-    // Use mkstemp equivalent via tempfile crate pattern (manual approach)
-    let template_cstr = std::ffi::CString::new(template.clone()).ok()?;
-    let mut template_bytes = template_cstr.into_bytes_with_nul();
+    // Use tempfile crate (cross-platform)
+    let temp_builder = tempfile::Builder::new()
+        .prefix("nano.")
+        .suffix(&extension)
+        .tempfile_in(&tempdir);
 
-    let fd = unsafe {
-        libc::mkstemps(
-            template_bytes.as_mut_ptr() as *mut libc::c_char,
-            extension.len() as libc::c_int,
-        )
-    };
-
-    if fd < 0 {
-        return None;
+    match temp_builder {
+        Ok(temp_file) => {
+            let (file, path) = temp_file.keep().ok()?;
+            let tempfile_name = path.to_string_lossy().into_owned();
+            Some((tempfile_name, file))
+        }
+        Err(_) => None,
     }
-
-    // Get the actual filename
-    let tempfile_name = {
-        let end = template_bytes.iter().position(|&b| b == 0).unwrap_or(template_bytes.len());
-        String::from_utf8_lossy(&template_bytes[..end]).into_owned()
-    };
-
-    let file = unsafe {
-        use std::os::unix::io::FromRawFd;
-        File::from_raw_fd(fd)
-    };
-
-    Some((tempfile_name, file))
 }
 
 // ---------------------------------------------------------------------------
