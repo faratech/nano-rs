@@ -1,0 +1,45 @@
+[package]
+name = "nano"
+version = "9.0.0"
+edition = "2021"
+
+[[bin]]
+name = "nano"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.28"
+regex = "1"
+libc = "0.2"
+signal-hook = "0.3"
+clap = { version = "4", features = ["derive"] }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+infer = { version = "0.16", optional = true }
+
+[features]
+default = ["color", "nanorc", "utf8", "browser", "help", "histories",
+           "justify", "multibuffer", "wrapping", "mouse",
+           "linenumbers", "linter", "formatter", "speller",
+           "tabcomp", "wordcomp", "comment", "libmagic", "operatingdir", "extra"]
+tiny         = []
+color        = []
+nanorc       = []
+utf8         = []
+browser      = []
+help         = []
+histories    = []
+justify      = []
+multibuffer  = []
+wrapping     = []
+mouse        = []
+linenumbers  = []
+linter       = []
+formatter    = []
+speller      = []
+tabcomp      = []
+wordcomp     = []
+comment      = []
+libmagic     = ["dep:infer"]
+operatingdir = []
+extra        = []

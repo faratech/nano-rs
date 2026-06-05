@@ -1,0 +1,3 @@
+[workspace]
+members = ["nano"]
+resolver = "2"
