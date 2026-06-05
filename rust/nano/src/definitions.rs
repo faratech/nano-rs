@@ -779,6 +779,37 @@ impl Default for PositionStruct {
     }
 }
 
+// --- file metadata ---
+
+/// Cross-platform file stat information (replacing libc::stat).
+#[derive(Debug, Clone)]
+pub struct FileStat {
+    /// Time of last modification (seconds since epoch).
+    pub st_mtime: i64,
+    /// Device ID.
+    pub st_dev: u64,
+    /// Inode number.
+    pub st_ino: u64,
+    /// User ID (Unix only).
+    #[cfg(unix)]
+    pub st_uid: u32,
+    /// Group ID (Unix only).
+    #[cfg(unix)]
+    pub st_gid: u32,
+    /// File mode (permissions + type) (Unix only).
+    #[cfg(unix)]
+    pub st_mode: u32,
+    /// Time of last access (Unix only).
+    #[cfg(unix)]
+    pub st_atime: i64,
+    /// Nanoseconds of last access (Unix only).
+    #[cfg(unix)]
+    pub st_atime_nsec: i64,
+    /// Nanoseconds of last modification (Unix only).
+    #[cfg(unix)]
+    pub st_mtime_nsec: i64,
+}
+
 // --- open file (buffer) ---
 
 /// All the state associated with one open file / buffer.
@@ -808,7 +839,7 @@ pub struct OpenFileStruct {
     /// The row within the edit window that the cursor occupies.
     pub cursor_row: isize,
     /// File metadata from the last open or save (used for change detection).
-    pub statinfo: Option<Box<libc::stat>>,
+    pub statinfo: Option<FileStat>,
     /// The line used to prepend overflow text during hard-wrapping.
     #[cfg(feature = "wrapping")]
     pub spillage_line: Option<LinePtr>,

@@ -1,0 +1,134 @@
+FileTree {
+    files: [],
+    dirs: [
+        (
+            "lib",
+            FileTree {
+                files: [],
+                dirs: [
+                    (
+                        "arm64",
+                        FileTree {
+                            files: [
+                                (
+                                    "libcmt.arm64.pdb",
+                                    356352,
+                                ),
+                                (
+                                    "libcmt.lib",
+                                    18717300,
+                                ),
+                                (
+                                    "libconcrt1.arm64.pdb",
+                                    2838528,
+                                ),
+                                (
+                                    "msvcmrt_netcore.lib",
+                                    2565920,
+                                ),
+                                (
+                                    "libcpmt.arm64.pdb",
+                                    3158016,
+                                ),
+                                (
+                                    "libomp.lib",
+                                    160216,
+                                ),
+                                (
+                                    "libompd.lib",
+                                    161032,
+                                ),
+                                (
+                                    "libcpmt1.arm64.pdb",
+                                    3182592,
+                                ),
+                                (
+                                    "msvcmrt.lib",
+                                    2544268,
+                                ),
+                                (
+                                    "pgocr.lib",
+                                    2417866,
+                                ),
+                                (
+                                    "diaguids.lib",
+                                    4508046,
+                                ),
+                                (
+                                    "libcpmt.lib",
+                                    42923080,
+                                ),
+                                (
+                                    "msdia140.lib",
+                                    2208,
+                                ),
+                                (
+                                    "msvcmrtd_netcore.lib",
+                                    2629084,
+                                ),
+                                (
+                                    "libconcrt.arm64.pdb",
+                                    2838528,
+                                ),
+                                (
+                                    "libconcrt1.lib",
+                                    16570150,
+                                ),
+                                (
+                                    "libvcruntime.arm64.pdb",
+                                    372736,
+                                ),
+                                (
+                                    "pgocrk.lib",
+                                    1476632,
+                                ),
+                                (
+                                    "libvcruntime.lib",
+                                    4738304,
+                                ),
+                                (
+                                    "pgosweepsysapi.lib",
+                                    84232,
+                                ),
+                                (
+                                    "libconcrt.lib",
+                                    16567864,
+                                ),
+                                (
+                                    "libcpmt1.lib",
+                                    44820412,
+                                ),
+                            ],
+                            dirs: [
+                                (
+                                    "enclave",
+                                    FileTree {
+                                        files: [
+                                            (
+                                                "libvcruntime.arm64.enclave.pdb",
+                                                364544,
+                                            ),
+                                            (
+                                                "libvcruntime.lib",
+                                                4686200,
+                                            ),
+                                            (
+                                                "libcmt.lib",
+                                                18700376,
+                                            ),
+                                            (
+                                                "libcmt.arm64.enclave.pdb",
+                                                356352,
+                                            ),
+                                        ],
+                                        dirs: [],
+                                    },
+                                ),
+                            ],
+                        },
+                    ),
+                ],
+            },
+        ),
+    ],
+}

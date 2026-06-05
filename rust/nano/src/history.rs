@@ -21,6 +21,7 @@ use crate::{ISSET, SET, UNSET, TOGGLE};
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as IoWrite};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::SystemTime;
 

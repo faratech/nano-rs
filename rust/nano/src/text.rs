@@ -3535,7 +3535,7 @@ pub fn construct_argument_list(command: &str, filename: &str) -> Vec<String> {
 }
 
 /* C: bool replace_buffer(const char *filename, undo_type action, const char *operation) */
-#[cfg(any(feature = "speller", feature = "formatter"))]
+#[cfg(all(any(feature = "speller", feature = "formatter"), unix))]
 pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool {
     use std::fs::File;
 
@@ -3588,6 +3588,12 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
     add_undo(UndoType::CoupleEnd, Some(operation));
 
     true
+}
+
+/* Windows stub for replace_buffer */
+#[cfg(all(any(feature = "speller", feature = "formatter"), not(unix)))]
+pub fn replace_buffer(_filename: &str, _action: UndoType, _operation: &str) -> bool {
+    false  // Not supported on Windows
 }
 
 /* C: void treat(char *tempfile_name, char *theprogram, bool spelling) */

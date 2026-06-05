@@ -39,6 +39,32 @@ fn wipe_statusbar() { crate::winio::wipe_statusbar(); }
 fn beep() {}  // stub: no winio::beep exposed as pub yet
 fn napms(_ms: i32) {}  // stub: no direct equivalent
 
+// Helper: check if file is a special file (char device, block device, or socket)
+fn is_special_file(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        meta.file_type().is_char_device() || meta.file_type().is_block_device() || meta.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+// Helper: check if file is a FIFO
+fn is_fifo_file(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        meta.file_type().is_fifo()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
     use std::rc::Rc;
     use std::cell::RefCell;
@@ -288,13 +314,14 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
     lockdata[1007] = if modified { 0x55 } else { 0x00 };
 
     // Create file exclusively
-    use std::os::unix::fs::OpenOptionsExt;
-    let file_result = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o666) // RW_FOR_ALL
-        .open(lockfilename);
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o666); // RW_FOR_ALL
+    }
+    let file_result = opts.open(lockfilename);
 
     match file_result {
         Err(e) => {
@@ -442,17 +469,42 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
  * Perform a stat call on the given filename.  On success, *pstat points to
  * the stat's result.  On failure, *pstat is freed and made NULL. */
 #[cfg(not(feature = "tiny"))]
-pub fn stat_with_alloc(filename: &str) -> Option<Box<libc::stat>> {
-    let cname = match std::ffi::CString::new(filename) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::stat(cname.as_ptr(), &mut st) };
-    if ret == 0 {
-        Some(Box::new(st))
-    } else {
-        None
+pub fn stat_with_alloc(filename: &str) -> Option<FileStat> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::metadata(filename) {
+            Ok(meta) => {
+                Some(FileStat {
+                    st_mtime: meta.mtime(),
+                    st_dev: meta.dev(),
+                    st_ino: meta.ino(),
+                    st_uid: meta.uid(),
+                    st_gid: meta.gid(),
+                    st_mode: meta.mode(),
+                    st_atime: meta.atime(),
+                    st_atime_nsec: meta.atime_nsec() as i64,
+                    st_mtime_nsec: meta.mtime_nsec() as i64,
+                })
+            }
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match std::fs::metadata(filename) {
+            Ok(meta) => {
+                Some(FileStat {
+                    st_mtime: meta.modified().ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    st_dev: 0,
+                    st_ino: 0,
+                })
+            }
+            Err(_) => None,
+        }
     }
 }
 
@@ -628,15 +680,13 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                 statusline(MessageType::Alert, &format!("\"{}\" is a directory", realname));
                 return false;
             }
-            // Check for block/char device (requires libc)
-            use std::os::unix::fs::FileTypeExt;
-            let ft = meta.file_type();
-            if ft.is_char_device() || ft.is_block_device() {
+            // Check for block/char device and FIFO (requires libc)
+            if is_special_file(&meta) {
                 statusline(MessageType::Alert, &format!("\"{}\" is a device file", realname));
                 return false;
             }
             #[cfg(feature = "tiny")]
-            if ft.is_fifo() {
+            if is_fifo_file(&meta) {
                 statusline(MessageType::Alert, &format!("\"{}\" is a FIFO", realname));
                 return false;
             }
@@ -1175,9 +1225,8 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
     // Check if it's a FIFO
     #[cfg(not(feature = "tiny"))]
     {
-        use std::os::unix::fs::FileTypeExt;
         if let Ok(meta) = std::fs::metadata(&resolved) {
-            if meta.file_type().is_fifo() {
+            if is_fifo_file(&meta) {
                 statusbar("Reading from FIFO...");
             }
         }
@@ -1263,15 +1312,23 @@ static SHOULD_PIPE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
  * Send an unconditional kill signal to the running external command. */
 #[cfg(not(feature = "tiny"))]
 pub fn cancel_the_command(signal: i32) {
-    let pid_cmd = PID_OF_COMMAND.load(Ordering::SeqCst);
-    let pid_snd = PID_OF_SENDER.load(Ordering::SeqCst);
-    let piping = SHOULD_PIPE.load(Ordering::SeqCst);
+    #[cfg(unix)]
+    {
+        let pid_cmd = PID_OF_COMMAND.load(Ordering::SeqCst);
+        let pid_snd = PID_OF_SENDER.load(Ordering::SeqCst);
+        let piping = SHOULD_PIPE.load(Ordering::SeqCst);
 
-    if pid_cmd > 0 {
-        unsafe { libc::kill(pid_cmd, libc::SIGKILL); }
+        if pid_cmd > 0 {
+            unsafe { libc::kill(pid_cmd, libc::SIGKILL); }
+        }
+        if piping && pid_snd > 0 {
+            unsafe { libc::kill(pid_snd, libc::SIGKILL); }
+        }
     }
-    if piping && pid_snd > 0 {
-        unsafe { libc::kill(pid_snd, libc::SIGKILL); }
+    #[cfg(not(unix))]
+    {
+        // No-op on non-Unix platforms
+        let _ = signal;
     }
 }
 
@@ -1279,231 +1336,245 @@ pub fn cancel_the_command(signal: i32) {
  * Send the text that starts at the given line to file descriptor fd. */
 #[cfg(not(feature = "tiny"))]
 pub fn send_data(line: Option<LinePtr>, fd: i32) {
-    use std::os::unix::io::FromRawFd;
-    let mut tube = unsafe { File::from_raw_fd(fd) };
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+        let mut tube = unsafe { File::from_raw_fd(fd) };
 
-    let mut current = line;
-    while let Some(node) = current {
-        let (data, has_next) = {
-            let b = node.borrow();
-            (b.data.clone(), b.next.is_some())
-        };
+        let mut current = line;
+        while let Some(node) = current {
+            let (data, has_next) = {
+                let b = node.borrow();
+                (b.data.clone(), b.next.is_some())
+            };
 
-        // Don't write a final empty line
-        let next_node = node.borrow().next.clone();
-        if next_node.is_none() && data.is_empty() {
-            break;
-        }
-
-        // Recode LF as NUL before writing
-        let recoded: Vec<u8> = data.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
-        if tube.write_all(&recoded).is_err() {
-            std::process::exit(5);
-        }
-
-        if has_next {
-            if tube.write_all(b"\n").is_err() {
-                std::process::exit(6);
+            // Don't write a final empty line
+            let next_node = node.borrow().next.clone();
+            if next_node.is_none() && data.is_empty() {
+                break;
             }
-        }
 
-        current = node.borrow().next.clone();
+            // Recode LF as NUL before writing
+            let recoded: Vec<u8> = data.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+            if tube.write_all(&recoded).is_err() {
+                std::process::exit(5);
+            }
+
+            if has_next {
+                if tube.write_all(b"\n").is_err() {
+                    std::process::exit(6);
+                }
+            }
+
+            current = node.borrow().next.clone();
+        }
+        // Don't close here — the fd will be closed by the OS when the process exits
+        std::mem::forget(tube);
     }
-    // Don't close here — the fd will be closed by the OS when the process exits
-    std::mem::forget(tube);
+    #[cfg(not(unix))]
+    {
+        // No-op on non-Unix platforms
+    }
 }
 
 /* C: void execute_command(const char *command)
  * Execute the given command in a shell. */
 #[cfg(not(feature = "tiny"))]
 pub fn execute_command(command: &str) {
-    use std::process::{Command, Stdio};
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    #[cfg(unix)]
+    {
+        use std::process::{Command, Stdio};
+        use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    let should_pipe = command.starts_with('|');
-    let capture_output = !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
+        let should_pipe = command.starts_with('|');
+        let capture_output = !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
 
-    SHOULD_PIPE.store(should_pipe, Ordering::SeqCst);
+        SHOULD_PIPE.store(should_pipe, Ordering::SeqCst);
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
-    // The actual command string passed to the shell
-    let cmd_str = if should_pipe {
-        if capture_output { &command[1..] } else { &command[2..] }
-    } else {
-        command
-    };
+        // The actual command string passed to the shell
+        let cmd_str = if should_pipe {
+            if capture_output { &command[1..] } else { &command[2..] }
+        } else {
+            command
+        };
 
-    // Create from_fd pipe (output from command)
-    let (from_read_fd, from_write_fd) = {
-        let mut fds = [0i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-            statusline(MessageType::Alert,
-                &format!("Could not create pipe: {}", io::Error::last_os_error()));
-            return;
-        }
-        (fds[0], fds[1])
-    };
-
-    // Create to_fd pipe (input to command) if piping
-    let (to_read_fd, to_write_fd) = if should_pipe {
-        let mut fds = [0i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-            statusline(MessageType::Alert,
-                &format!("Could not create pipe: {}", io::Error::last_os_error()));
-            unsafe { libc::close(from_read_fd); libc::close(from_write_fd); }
-            return;
-        }
-        (fds[0], fds[1])
-    } else {
-        (-1, -1)
-    };
-
-    // Fork the child process
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // Child process
-        unsafe {
-            libc::close(from_read_fd);
-            if capture_output {
-                libc::dup2(from_write_fd, libc::STDOUT_FILENO);
+        // Create from_fd pipe (output from command)
+        let (from_read_fd, from_write_fd) = {
+            let mut fds = [0i32; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+                statusline(MessageType::Alert,
+                    &format!("Could not create pipe: {}", io::Error::last_os_error()));
+                return;
             }
-            libc::dup2(from_write_fd, libc::STDERR_FILENO);
-            libc::close(from_write_fd);
+            (fds[0], fds[1])
+        };
 
-            if should_pipe {
-                libc::dup2(to_read_fd, libc::STDIN_FILENO);
-                libc::close(to_read_fd);
-                libc::close(to_write_fd);
+        // Create to_fd pipe (input to command) if piping
+        let (to_read_fd, to_write_fd) = if should_pipe {
+            let mut fds = [0i32; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+                statusline(MessageType::Alert,
+                    &format!("Could not create pipe: {}", io::Error::last_os_error()));
+                unsafe { libc::close(from_read_fd); libc::close(from_write_fd); }
+                return;
             }
+            (fds[0], fds[1])
+        } else {
+            (-1, -1)
+        };
 
-            let shell_cstr = std::ffi::CString::new(shell.as_str()).unwrap();
-            let shell_tail = std::ffi::CString::new(
-                crate::utils::tail(&shell)).unwrap();
-            let minus_c = std::ffi::CString::new("-c").unwrap();
-            let cmd_cstr = std::ffi::CString::new(cmd_str).unwrap();
+        // Fork the child process
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // Child process
+            unsafe {
+                libc::close(from_read_fd);
+                if capture_output {
+                    libc::dup2(from_write_fd, libc::STDOUT_FILENO);
+                }
+                libc::dup2(from_write_fd, libc::STDERR_FILENO);
+                libc::close(from_write_fd);
 
-            libc::execl(
-                shell_cstr.as_ptr(),
-                shell_tail.as_ptr(),
-                minus_c.as_ptr(),
-                cmd_cstr.as_ptr(),
-                std::ptr::null::<libc::c_char>(),
-            );
-            libc::_exit(6);
-        }
-    }
+                if should_pipe {
+                    libc::dup2(to_read_fd, libc::STDIN_FILENO);
+                    libc::close(to_read_fd);
+                    libc::close(to_write_fd);
+                }
 
-    // Parent
-    unsafe { libc::close(from_write_fd); }
+                let shell_cstr = std::ffi::CString::new(shell.as_str()).unwrap();
+                let shell_tail = std::ffi::CString::new(
+                    crate::utils::tail(&shell)).unwrap();
+                let minus_c = std::ffi::CString::new("-c").unwrap();
+                let cmd_cstr = std::ffi::CString::new(cmd_str).unwrap();
 
-    if pid < 0 {
-        statusline(MessageType::Alert,
-            &format!("Could not fork: {}", io::Error::last_os_error()));
-        unsafe { libc::close(from_read_fd); }
-        if should_pipe {
-            unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
-        }
-        return;
-    }
-
-    PID_OF_COMMAND.store(pid, Ordering::SeqCst);
-    statusbar("Executing...");
-
-    // If the command starts with "|", pipe buffer or region to the command.
-    let pid_sender;
-    if should_pipe {
-        // Get the lines to pipe
-        let lines_to_send = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.filetop.clone())
-        });
-
-        pid_sender = unsafe { libc::fork() };
-        if pid_sender == 0 {
-            // Child sender process
-            unsafe { libc::close(to_read_fd); }
-            send_data(lines_to_send, to_write_fd);
-            unsafe { libc::_exit(0); }
+                libc::execl(
+                    shell_cstr.as_ptr(),
+                    shell_tail.as_ptr(),
+                    minus_c.as_ptr(),
+                    cmd_cstr.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(6);
+            }
         }
 
-        if pid_sender < 0 {
+        // Parent
+        unsafe { libc::close(from_write_fd); }
+
+        if pid < 0 {
             statusline(MessageType::Alert,
                 &format!("Could not fork: {}", io::Error::last_os_error()));
+            unsafe { libc::close(from_read_fd); }
+            if should_pipe {
+                unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
+            }
+            return;
         }
 
-        PID_OF_SENDER.store(pid_sender, Ordering::SeqCst);
-        unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
-    } else {
-        pid_sender = -1;
-    }
+        PID_OF_COMMAND.store(pid, Ordering::SeqCst);
+        statusbar("Executing...");
 
-    // Set up signal handler
-    enable_kb_interrupt();
-
-    // Read command output
-    let stream = unsafe { File::from_raw_fd(from_read_fd) };
-    read_file_impl(stream, 0, "pipe", true);
-
-    // Wait for processes
-    let mut command_status: i32 = 0;
-    unsafe { libc::waitpid(pid, &mut command_status, 0); }
-
-    let mut sender_status: i32 = 0;
-    if should_pipe && pid_sender > 0 {
-        unsafe { libc::waitpid(pid_sender, &mut sender_status, 0); }
-    }
-
-    // Check exit status
-    let cmd_ok = unsafe {
-        libc::WIFEXITED(command_status) && libc::WEXITSTATUS(command_status) == 0
-    };
-    let cmd_signaled = unsafe { libc::WIFSIGNALED(command_status) };
-
-    if !cmd_ok {
-        if cmd_signaled {
-            statusline(MessageType::Alert, "Cancelled");
-        } else {
-            // Try to extract error message from last line
-            let err_detail = with_state(|s| {
-                s.openfile.as_ref()
-                    .and_then(|of| of.current.as_ref())
-                    .and_then(|c| {
-                        let b = c.borrow();
-                        b.prev.as_ref()
-                            .and_then(|pw| pw.upgrade())
-                            .map(|prev| {
-                                let pb = prev.borrow();
-                                if let Some(pos) = pb.data.find(": ") {
-                                    pb.data[pos + 2..].to_string()
-                                } else {
-                                    "---".to_string()
-                                }
-                            })
-                    })
-                    .unwrap_or_else(|| "---".to_string())
+        // If the command starts with "|", pipe buffer or region to the command.
+        let pid_sender;
+        if should_pipe {
+            // Get the lines to pipe
+            let lines_to_send = with_state(|s| {
+                s.openfile.as_ref().and_then(|of| of.filetop.clone())
             });
-            statusline(MessageType::Alert, &format!("Error: {}", err_detail));
+
+            pid_sender = unsafe { libc::fork() };
+            if pid_sender == 0 {
+                // Child sender process
+                unsafe { libc::close(to_read_fd); }
+                send_data(lines_to_send, to_write_fd);
+                unsafe { libc::_exit(0); }
+            }
+
+            if pid_sender < 0 {
+                statusline(MessageType::Alert,
+                    &format!("Could not fork: {}", io::Error::last_os_error()));
+            }
+
+            PID_OF_SENDER.store(pid_sender, Ordering::SeqCst);
+            unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
+        } else {
+            pid_sender = -1;
         }
-    } else if should_pipe && pid_sender > 0 {
-        let sender_ok = unsafe {
-            libc::WIFEXITED(sender_status) && libc::WEXITSTATUS(sender_status) == 0
+
+        // Set up signal handler
+        enable_kb_interrupt();
+
+        // Read command output
+        let stream = unsafe { File::from_raw_fd(from_read_fd) };
+        read_file_impl(stream, 0, "pipe", true);
+
+        // Wait for processes
+        let mut command_status: i32 = 0;
+        unsafe { libc::waitpid(pid, &mut command_status, 0); }
+
+        let mut sender_status: i32 = 0;
+        if should_pipe && pid_sender > 0 {
+            unsafe { libc::waitpid(pid_sender, &mut sender_status, 0); }
+        }
+
+        // Check exit status
+        let cmd_ok = unsafe {
+            libc::WIFEXITED(command_status) && libc::WEXITSTATUS(command_status) == 0
         };
-        if !sender_ok {
-            statusline(MessageType::Alert, "Piping failed");
+        let cmd_signaled = unsafe { libc::WIFSIGNALED(command_status) };
+
+        if !cmd_ok {
+            if cmd_signaled {
+                statusline(MessageType::Alert, "Cancelled");
+            } else {
+                // Try to extract error message from last line
+                let err_detail = with_state(|s| {
+                    s.openfile.as_ref()
+                        .and_then(|of| of.current.as_ref())
+                        .and_then(|c| {
+                            let b = c.borrow();
+                            b.prev.as_ref()
+                                .and_then(|pw| pw.upgrade())
+                                .map(|prev| {
+                                    let pb = prev.borrow();
+                                    if let Some(pos) = pb.data.find(": ") {
+                                        pb.data[pos + 2..].to_string()
+                                    } else {
+                                        "---".to_string()
+                                    }
+                                })
+                        })
+                        .unwrap_or_else(|| "---".to_string())
+                });
+                statusline(MessageType::Alert, &format!("Error: {}", err_detail));
+            }
+        } else if should_pipe && pid_sender > 0 {
+            let sender_ok = unsafe {
+                libc::WIFEXITED(sender_status) && libc::WEXITSTATUS(sender_status) == 0
+            };
+            if !sender_ok {
+                statusline(MessageType::Alert, "Piping failed");
+            }
         }
-    }
 
-    // If there was an error, undo and discard what the command did.
-    let last_msg = with_state(|s| s.lastmessage);
-    if last_msg == MessageType::Alert {
-        do_undo();
-        let current_undo = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.current_undo).unwrap_or(std::ptr::null_mut())
-        });
-        discard_until(current_undo);
-    }
+        // If there was an error, undo and discard what the command did.
+        let last_msg = with_state(|s| s.lastmessage);
+        if last_msg == MessageType::Alert {
+            do_undo();
+            let current_undo = with_state(|s| {
+                s.openfile.as_ref().map(|of| of.current_undo).unwrap_or(std::ptr::null_mut())
+            });
+            discard_until(current_undo);
+        }
 
-    terminal_init();
+        terminal_init();
+    }
+    #[cfg(not(unix))]
+    {
+        statusline(MessageType::Alert, "Command execution not supported on this platform");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,9 +2232,8 @@ pub fn write_file(
     #[cfg(not(feature = "tiny"))]
     if ISSET!(MAKE_BACKUP) && is_existing_file {
         // Check it's not a FIFO
-        use std::os::unix::fs::FileTypeExt;
         let is_fifo = std::fs::metadata(&realname)
-            .map(|m| m.file_type().is_fifo())
+            .map(|m| is_fifo_file(&m))
             .unwrap_or(false);
         if !is_fifo {
             if let Some(st) = stat_with_alloc(&realname) {
@@ -2177,9 +2247,8 @@ pub fn write_file(
     // When prepending, first copy existing file to a temporary file
     #[cfg(not(feature = "tiny"))]
     if method == KindOfWritingType::Prepend {
-        use std::os::unix::fs::FileTypeExt;
         let is_fifo = std::fs::metadata(&realname)
-            .map(|m| m.file_type().is_fifo())
+            .map(|m| is_fifo_file(&m))
             .unwrap_or(false);
         if is_fifo {
             statusline(MessageType::Alert, &format!("Error writing {}: FIFO", realname));
@@ -2222,9 +2291,8 @@ pub fn write_file(
 
     #[cfg(not(feature = "tiny"))]
     {
-        use std::os::unix::fs::FileTypeExt;
         let is_fifo = std::fs::metadata(&realname)
-            .map(|m| m.file_type().is_fifo())
+            .map(|m| is_fifo_file(&m))
             .unwrap_or(false);
         if is_existing_file && is_fifo {
             statusbar("Writing to FIFO...");
@@ -2242,26 +2310,37 @@ pub fn write_file(
             #[cfg(not(feature = "tiny"))]
             if normal { install_handler_for_Ctrl_C(); }
 
-            use std::os::unix::fs::OpenOptionsExt;
             let open_result = match method {
                 KindOfWritingType::Append => {
-                    OpenOptions::new()
-                        .write(true).create(true).append(true)
-                        .mode(permissions)
-                        .open(&realname)
+                    let mut opts = OpenOptions::new();
+                    opts.write(true).create(true).append(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(permissions);
+                    }
+                    opts.open(&realname)
                 }
                 KindOfWritingType::Emergency => {
                     // O_EXCL — fail if exists
-                    OpenOptions::new()
-                        .write(true).create_new(true)
-                        .mode(permissions)
-                        .open(&realname)
+                    let mut opts = OpenOptions::new();
+                    opts.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(permissions);
+                    }
+                    opts.open(&realname)
                 }
                 _ => {
-                    OpenOptions::new()
-                        .write(true).create(true).truncate(true)
-                        .mode(permissions)
-                        .open(&realname)
+                    let mut opts = OpenOptions::new();
+                    opts.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(permissions);
+                    }
+                    opts.open(&realname)
                 }
             };
 
@@ -2399,14 +2478,11 @@ pub fn write_file(
     // Flush and sync (not for FIFOs)
     #[cfg(not(feature = "tiny"))]
     {
-        use std::os::unix::fs::FileTypeExt;
         let is_fifo = std::fs::metadata(&realname)
-            .map(|m| m.file_type().is_fifo())
+            .map(|m| is_fifo_file(&m))
             .unwrap_or(false);
         if !is_fifo {
-            use std::os::unix::io::AsRawFd;
-            let fd = the_file.as_raw_fd();
-            if the_file.flush().is_err() || unsafe { libc::fsync(fd) } != 0 {
+            if the_file.flush().is_err() || the_file.sync_all().is_err() {
                 let e = io::Error::last_os_error();
                 statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
                 drop(the_file);
@@ -2424,20 +2500,27 @@ pub fn write_file(
 
         // Check for ENOSPC
         #[cfg(not(feature = "tiny"))]
-        if e.raw_os_error() == Some(libc::ENOSPC) && normal {
-            napms(3200);
-            with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
-            statusline(MessageType::Alert, "File on disk has been truncated!");
-            napms(3200);
-            with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
-            statusline(MessageType::Alert,
-                "Maybe ^T^Z, make room on disk, resume, then ^S^X");
-            let st = stat_with_alloc(&realname);
-            with_state_mut(|s| {
-                if let Some(ref mut of) = s.openfile {
-                    of.statinfo = st;
-                }
-            });
+        {
+            #[cfg(unix)]
+            let is_enospc = e.raw_os_error() == Some(libc::ENOSPC);
+            #[cfg(not(unix))]
+            let is_enospc = false;
+
+            if is_enospc && normal {
+                napms(3200);
+                with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+                statusline(MessageType::Alert, "File on disk has been truncated!");
+                napms(3200);
+                with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+                statusline(MessageType::Alert,
+                    "Maybe ^T^Z, make room on disk, resume, then ^S^X");
+                let st = stat_with_alloc(&realname);
+                with_state_mut(|s| {
+                    if let Some(ref mut of) = s.openfile {
+                        of.statinfo = st;
+                    }
+                });
+            }
         }
 
         return false;

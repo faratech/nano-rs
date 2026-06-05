@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
 infer = { version = "0.16", optional = true }
+tempfile = "3"
 
 [features]
 default = ["color", "nanorc", "utf8", "browser", "help", "histories",
