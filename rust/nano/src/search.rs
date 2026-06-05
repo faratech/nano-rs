@@ -143,26 +143,26 @@ fn napms(_ms: i32) {
 }
 
 fn do_prompt(
-    _menu: u32,
-    _initial: &str,
-    _history: Option<&LinePtr>,
-    _refresh_fn: fn(),
-    _prompt: &str,
+    menu: u32,
+    initial: &str,
+    _history: Option<&LinePtr>,  // unused: search.rs passes LinePtr but prompt uses HistoryKind
+    refresh_fn: fn(),
+    prompt: &str,
 ) -> i32 {
-    // C: do_prompt() — prompt.c
-    -1
+    crate::prompt::do_prompt(menu, Some(initial), None, Some(refresh_fn), prompt)
 }
 
-fn ask_user(_yesorallorno: bool, _question: &str) -> i32 {
-    // C: ask_user() — winio.c / prompt.c
-    CANCEL
+fn ask_user(yesorallorno: bool, question: &str) -> i32 {
+    crate::prompt::ask_user(yesorallorno, question)
 }
 
 #[inline] fn set_modified() { crate::files::set_modified() }
 
-fn parse_line_column(_input: &str, _line: &mut isize, _col: &mut isize) -> bool {
-    // C: parse_line_column() — utils.c
-    false
+fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
+    let (l, c) = crate::utils::parse_line_column(input);
+    if let Some(ln) = l { *line = ln; }
+    if let Some(cn) = c { *col = cn; }
+    l.is_some()
 }
 
 #[inline] fn adjust_viewport(mode: UpdateType) { crate::winio::adjust_viewport(mode) }
@@ -520,12 +520,9 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
             String::new()
         };
 
-        // We'd call do_prompt here; for now we use the stub that returns -1 (cancel).
         let search_hist = with_state(|s| s.search_history.clone());
-        let response = {
-            // Simplified: always cancelled in this stub environment.
-            -1i32
-        };
+        let response = do_prompt(menu, &initial,
+            None, crate::winio::edit_refresh, &prompt);
 
         let last_search_empty = with_state(|s| s.last_search.is_empty());
 
@@ -1344,8 +1341,9 @@ pub fn ask_for_and_do_replacements() {
     let replacee = with_state(|s| s.last_search.clone());
 
     // Prompt for replacement string.
-    // (Stub: response will be -1 = cancelled.)
-    let response = -1i32; // do_prompt(MREPLACEWITH, "", ...)
+    let response = do_prompt(MREPLACEWITH, "",
+        None, crate::winio::edit_refresh,
+        "Replace with");
 
     // Restore the search string (it may have changed at the prompt).
     with_state_mut(|s| s.last_search = replacee.clone());
@@ -1474,8 +1472,9 @@ pub fn ask_for_line_and_column(provided: &str) {
     let mut line = cur_line;
     let mut column = cur_col;
 
-    // response = do_prompt(MGOTOLINE, provided, NULL, edit_refresh, ...)
-    let response = -1i32; // stub
+    let response = do_prompt(MGOTOLINE, provided,
+        None, crate::winio::edit_refresh,
+        "Enter line number, column number");
 
     if response < 0 {
         statusbar("Cancelled");
