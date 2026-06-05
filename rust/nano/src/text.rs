@@ -43,13 +43,14 @@ use crate::search::goto_line_posx;
 // These forward to the real implementations once all modules are wired.
 // ---------------------------------------------------------------------------
 
-/// C: make_new_node(prev) — create a new, empty LineNode linked after prev.
+/// C: make_new_node(prev) — create a new, empty LineNode.
+/// Sets only the back-pointer (prev); forward-linking into the list is the
+/// caller's responsibility (typically via splice_node).
 fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
-    // Determine line number: prev.lineno + 1, or 1 if no prev.
     let lineno = prev.as_ref()
         .map(|p| p.borrow().lineno + 1)
         .unwrap_or(1);
-    let node = Rc::new(RefCell::new(LineNode {
+    Rc::new(RefCell::new(LineNode {
         data: String::new(),
         lineno,
         next: None,
@@ -58,12 +59,7 @@ fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
         multidata: Vec::new(),
         #[cfg(not(feature = "tiny"))]
         has_anchor: false,
-    }));
-    // Wire the forward link.
-    if let Some(ref p) = prev {
-        p.borrow_mut().next = Some(node.clone());
-    }
-    node
+    }))
 }
 
 /// C: splice_node(node, newnode) — insert newnode after node in the list.

@@ -1861,8 +1861,9 @@ pub fn blank_row(win: &NanoWindow, row: u16) {
 pub fn blank_titlebar() {
     let (topwin_x, topwin_y, cols) = with_state(|s| (s.topwin.x, s.topwin.y, s.topwin.cols));
     let spaces = " ".repeat(cols as usize);
-    let mut stdout = stdout();
-    let _ = queue!(stdout, MoveTo(topwin_x, topwin_y), Print(&spaces));
+    // NOTE: intentionally uses the global stdout so the fill inherits whatever
+    // attributes are already queued onto stdout by the caller (e.g. Reverse in titlebar).
+    let _ = queue!(stdout(), MoveTo(topwin_x, topwin_y), Print(&spaces));
 }
 
 /* C: void blank_edit(void) */
@@ -2222,30 +2223,39 @@ pub fn show_states_at_win(win: &NanoWindow, cur_y: u16, cur_x: u16) {
 // Color pair helpers
 // ---------------------------------------------------------------------------
 
-/// Decode an interface_color_pair i32 value into crossterm colors.
-/// In the C code these are ncurses color pair + attribute bits.
-/// In the Rust port we store pair index in the low 16 bits and
-/// attributes (A_BOLD, A_REVERSE, A_ITALIC) in bits above.
-pub fn apply_interface_color(pair: i32) {
-    let mut stdout = stdout();
-    // For now, map pair index to simple color effects.
-    // Full color support would need color_combo array entries.
+/// Write the color/attribute commands for `pair` onto `w`.
+/// Called by apply_interface_color and by callers that already hold a stdout handle.
+pub fn queue_interface_color<W: Write>(w: &mut W, pair: i32) {
     let reverse = (pair & A_REVERSE) != 0;
     if reverse {
-        let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
+        let _ = queue!(w, SetAttribute(Attribute::Reverse));
     }
-    // Additional color support when color feature is on
-    #[cfg(feature = "color")]
-    {
-        let pair_idx = (pair & 0xFFFF) as usize;
-        // Use stored color combos if available
-        // (full implementation deferred to color.rs)
+    let bold = (pair & crate::color::A_BOLD) != 0;
+    if bold {
+        let _ = queue!(w, SetAttribute(Attribute::Bold));
+    }
+    let italic = (pair & crate::color::A_ITALIC) != 0;
+    if italic {
+        let _ = queue!(w, SetAttribute(Attribute::Italic));
     }
 }
 
-/// Reset colors/attributes.
+/// Apply interface color pair by writing to the global stdout immediately.
+/// Use queue_interface_color when you already hold a stdout handle.
+pub fn apply_interface_color(pair: i32) {
+    let mut out = stdout();
+    queue_interface_color(&mut out, pair);
+}
+
+/// Reset colors/attributes onto the given writer.
+pub fn queue_reset_color<W: Write>(w: &mut W) {
+    let _ = queue!(w, ResetColor, SetAttribute(Attribute::Reset));
+}
+
+/// Reset colors/attributes on global stdout.
 pub fn reset_color() {
-    let _ = queue!(stdout(), ResetColor, SetAttribute(Attribute::Reset));
+    let mut out = stdout();
+    queue_reset_color(&mut out);
 }
 
 /* C: void set_color(const colortype *varnish) — for syntax highlighting */
@@ -2322,14 +2332,18 @@ pub fn titlebar(path: Option<&str>) {
 
     let mut stdout = stdout();
 
-    // Apply title bar color
+    // Apply title bar color — all on the SAME stdout handle so
+    // the attribute is guaranteed to precede the fill in the output stream.
     let title_pair = with_state(|s| s.interface_color_pair[TITLE_BAR]);
-    apply_interface_color(title_pair);
-    if title_pair & A_REVERSE != 0 {
-        let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
-    }
+    queue_interface_color(&mut stdout, title_pair);
 
-    blank_titlebar();
+    // Fill the entire top row with the title-bar background.
+    let (topwin_x, topwin_y, cols) = with_state(|s| (s.topwin.x, s.topwin.y, s.topwin.cols));
+    let spaces = " ".repeat(cols as usize);
+    let _ = queue!(stdout, MoveTo(topwin_x, topwin_y), Print(&spaces));
+    // Move back to start to overprint with actual title text.
+    let _ = queue!(stdout, MoveTo(topwin_x, topwin_y));
+
     with_state_mut(|s| s.as_an_at = false);
 
     // Determine what to show
@@ -2420,7 +2434,7 @@ pub fn titlebar(path: Option<&str>) {
         print_state_word(&state, stat_use, cols, topwin_x, topwin_y);
     }
 
-    reset_color();
+    queue_reset_color(&mut stdout);
     let _ = stdout.flush();
 }
 
@@ -2816,14 +2830,13 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
     let width = width as usize;
     let mut stdout = stdout();
 
+    // Key name in KEY_COMBO color (reverse video by default).
     let key_pair = with_state(|s| s.interface_color_pair[KEY_COMBO]);
-    apply_interface_color(key_pair);
-
+    queue_interface_color(&mut stdout, key_pair);
     let ks_len = actual_x(keystroke, width);
     let ks_display = &keystroke[..ks_len];
     let _ = queue!(stdout, Print(ks_display));
-
-    reset_color();
+    queue_reset_color(&mut stdout);
 
     let ks_width = breadth(keystroke);
     let remaining = width.saturating_sub(ks_width);
@@ -2831,13 +2844,13 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
 
     let _ = queue!(stdout, Print(" "));
 
+    // Function name in FUNCTION_TAG color (normal by default).
     let func_pair = with_state(|s| s.interface_color_pair[FUNCTION_TAG]);
-    apply_interface_color(func_pair);
-
+    queue_interface_color(&mut stdout, func_pair);
     let tag_len = actual_x(tag, remaining - 1);
     let tag_display = &tag[..tag_len];
     let _ = queue!(stdout, Print(tag_display));
-    reset_color();
+    queue_reset_color(&mut stdout);
 }
 
 /// Internal: post_one_key with explicit row/col positioning (used by bottombars).

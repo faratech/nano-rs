@@ -1068,48 +1068,48 @@ pub fn do_find_bracket()    {}
 #[cfg(not(feature = "tiny"))]
 pub fn put_or_lift_anchor() {}
 #[cfg(not(feature = "tiny"))]
-pub fn to_prev_anchor()     {}
+pub fn to_prev_anchor()     { crate::search::to_prev_anchor() }
 #[cfg(not(feature = "tiny"))]
-pub fn to_next_anchor()     {}
+pub fn to_next_anchor()     { crate::search::to_next_anchor() }
 
-// From text.c
-pub fn do_tab()       {}
-pub fn do_enter()     {}
-pub fn do_backspace() {}
-pub fn do_delete()    {}
-pub fn do_undo()      {}
-pub fn do_redo()      {}
-pub fn do_verbatim_input() {}
+// From text.c / cut.c / winio.c
+pub fn do_tab()            { crate::text::do_tab() }
+pub fn do_enter()          { crate::text::do_enter() }
+pub fn do_backspace()      { crate::cut::do_backspace() }
+pub fn do_delete()         { crate::cut::do_delete() }
+pub fn do_undo()           { crate::text::do_undo() }
+pub fn do_redo()           { crate::text::do_redo() }
+pub fn do_verbatim_input() { crate::text::do_verbatim_input() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_mark()           {}
+pub fn do_mark()           { crate::text::do_mark() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_indent()         {}
+pub fn do_indent()         { crate::text::do_indent() }
 #[cfg(not(feature = "tiny"))]
-pub fn do_unindent()       {}
+pub fn do_unindent()       { crate::text::do_unindent() }
 #[cfg(not(feature = "tiny"))]
-pub fn chop_previous_word() {}
+pub fn chop_previous_word() { crate::cut::chop_previous_word() }
 #[cfg(not(feature = "tiny"))]
-pub fn chop_next_word()    {}
+pub fn chop_next_word()    { crate::cut::chop_next_word() }
 #[cfg(not(feature = "tiny"))]
-pub fn record_macro()      {}
+pub fn record_macro()      { crate::winio::record_macro() }
 #[cfg(not(feature = "tiny"))]
-pub fn run_macro()         {}
+pub fn run_macro()         { crate::winio::run_macro() }
 #[cfg(not(feature = "tiny"))]
-pub fn count_lines_words_and_characters() {}
+pub fn count_lines_words_and_characters() { crate::text::count_lines_words_and_characters() }
 #[cfg(feature = "justify")]
-pub fn do_justify()        {}
+pub fn do_justify()        { crate::text::do_justify() }
 #[cfg(feature = "justify")]
-pub fn do_full_justify()   {}
+pub fn do_full_justify()   { crate::text::do_full_justify() }
 #[cfg(feature = "speller")]
-pub fn do_spell()          {}
+pub fn do_spell()          { crate::text::do_spell() }
 #[cfg(feature = "linter")]
-pub fn do_linter()         {}
+pub fn do_linter()         { crate::text::do_linter() }
 #[cfg(feature = "formatter")]
-pub fn do_formatter()      {}
+pub fn do_formatter()      { crate::text::do_formatter() }
 #[cfg(feature = "comment")]
-pub fn do_comment()        {}
+pub fn do_comment()        { crate::text::do_comment() }
 #[cfg(feature = "wordcomp")]
-pub fn complete_a_word()   {}
+pub fn complete_a_word()   { crate::text::complete_a_word() }
 
 // From files.c
 pub fn do_writeout()     { crate::files::do_writeout() }
