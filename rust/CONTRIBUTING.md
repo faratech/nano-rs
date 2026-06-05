@@ -255,10 +255,21 @@ All checks must pass before merging.
 
 ## Reporting Issues
 
+### Where to Report
+
+- ✅ **nano-rs bugs**: Report to https://github.com/faratech/nano-rs/issues
+- ❌ **NOT to official nano**: Do not report nano-rs bugs to the official GNU nano project
+
+This project is independent. Reporting issues here keeps the official nano tracker clean and ensures your bug gets the right attention.
+
+### How to Report
+
 - Check existing issues first
 - Provide minimal reproducible example
 - Include platform (Linux/Windows/macOS)
 - Include output of `cargo --version` and `rustc --version`
+- Clarify which nano-rs features are affected
+- Test if the issue also exists in official nano (if relevant)
 
 ## Getting Help
 

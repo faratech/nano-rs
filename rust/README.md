@@ -13,6 +13,14 @@ This is a **1:1 module-by-module educational port** of nano from C to Rust, crea
 - **Same performance**: Direct translation maintains nano's efficient design
 - **Cross-platform**: Single codebase compiles on Linux, macOS, Windows, and more
 
+## ⚠️ Bug Reports
+
+**This is an independent project.** If you encounter bugs:
+- ✅ **Report to nano-rs**: https://github.com/faratech/nano-rs/issues
+- ❌ **DO NOT report to official nano**: Use only for bugs in the official C nano
+
+Bugs in nano-rs should not be reported to the official GNU nano project at https://www.nano-editor.org/ - they maintain the official C implementation separately.
+
 ## Supported Platforms
 
 - ✅ Linux (aarch64, x86_64)
