@@ -770,7 +770,7 @@ extern "C" fn make_a_note_trampoline(sig: libc::c_int) {
 pub fn scoop_stdin() -> bool {
     restore_terminal();
 
-    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         eprintln!("Reading data from keyboard; type ^D or ^D^D to finish.");
     }
 
@@ -785,7 +785,7 @@ pub fn scoop_stdin() -> bool {
         Ok(f) => {
             install_handler_for_Ctrl_C();
             files::make_new_buffer();
-            files::read_file_impl(f, 0, "stdin", false);
+            files::read_file_impl(f, true, "stdin", false);
             #[cfg(feature = "color")]
             color::find_and_prime_applicable_syntax();
             restore_handler_for_Ctrl_C();
@@ -808,6 +808,7 @@ pub fn scoop_stdin() -> bool {
 // ---------------------------------------------------------------------------
 
 /* C: void handle_hupterm(int signal) */
+#[cfg(unix)]
 extern "C" fn handle_hupterm(_signal: libc::c_int) {
     // Cannot call die() safely from a signal handler (thread_local issue).
     // Store a flag; main loop will call die() on next iteration.
@@ -818,7 +819,7 @@ extern "C" fn handle_hupterm(_signal: libc::c_int) {
 }
 
 /* C: void handle_crash(int signal) */
-#[cfg(all(not(feature = "tiny"), not(debug_assertions)))]
+#[cfg(all(unix, not(feature = "tiny"), not(debug_assertions)))]
 extern "C" fn handle_crash(signal: libc::c_int) {
     let _ = winio::terminal_exit();
     eprintln!("Sorry! Nano crashed!  Code: {}.  Please report a bug.", signal);
@@ -853,6 +854,7 @@ pub fn do_suspend() {
 }
 
 /* C: void continue_nano(int signal) */
+#[cfg(unix)]
 extern "C" fn continue_nano(_signal: libc::c_int) {
     #[cfg(feature = "mouse")]
     {
@@ -884,7 +886,7 @@ pub fn block_sigwinch(blockit: bool) {
 }
 
 /* C: void handle_sigwinch(int signal) */
-#[cfg(not(feature = "tiny"))]
+#[cfg(all(unix, not(feature = "tiny")))]
 extern "C" fn handle_sigwinch(_signal: libc::c_int) {
     THE_WINDOW_RESIZED.store(true, Ordering::SeqCst);
     with_state_mut(|s| {
@@ -1919,10 +1921,14 @@ pub fn nano_main() {
             }
         }
     }
-    #[cfg(not(feature = "utf8"))]
+    #[cfg(all(not(feature = "utf8"), unix))]
     unsafe {
         let locale_str = std::ffi::CString::new("").unwrap();
         libc::setlocale(libc::LC_ALL, locale_str.as_ptr());
+    }
+    #[cfg(not(unix))]
+    {
+        with_state_mut(|s| s.using_utf8 = true);
     }
 
     // ----------------------------------------------------------------
@@ -2308,12 +2314,7 @@ pub fn nano_main() {
 
     // Ensure TERM is set.
     if std::env::var("TERM").is_err() {
-        // SAFETY: putenv is unsafe but acceptable here at startup.
-        #[cfg(unix)]
-        unsafe {
-            let s = std::ffi::CString::new("TERM=vt220").unwrap();
-            libc::putenv(s.into_raw());
-        }
+        std::env::set_var("TERM", "vt220");
     }
 
     // Set up keybinding and function tables.
@@ -2853,7 +2854,7 @@ pub fn nano_main() {
     UNSET!(NOREAD_MODE);
 
     // Nano needs a keyboard (stdin must be a terminal).
-    if unsafe { libc::isatty(libc::STDIN_FILENO) } == 0 {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         die("Standard input is not a terminal");
     }
 

@@ -21,9 +21,9 @@ use crate::{ISSET, SET, UNSET, TOGGLE};
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write as IoWrite};
+use std::time::SystemTime;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::time::SystemTime;
 
 const SEARCH_HISTORY: &str = "search_history";
 const POSITION_HISTORY: &str = "filepos_history";

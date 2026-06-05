@@ -745,7 +745,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     if descriptor > 0 {
         if let Some(f) = file_handle {
             install_handler_for_Ctrl_C();
-            read_file_impl(f, descriptor, &realname, !new_one);
+            read_file_impl(f, new_one, &realname, !new_one);
             restore_handler_for_Ctrl_C();
 
             #[cfg(not(feature = "tiny"))]
@@ -1063,7 +1063,7 @@ pub fn read_file_impl(mut f: File, fd: i32, filename: &str, undoable: bool) {
     }
 
     // Check writability
-    let writable = if fd > 0 && !undoable && !ISSET!(VIEW_MODE) {
+    let writable = if !is_new_file && !undoable && !ISSET!(VIEW_MODE) {
         let cname = std::ffi::CString::new(filename).unwrap_or_default();
         let access_ret = unsafe { libc::access(cname.as_ptr(), libc::W_OK) };
         access_ret == 0
@@ -1508,7 +1508,7 @@ pub fn execute_command(command: &str) {
 
         // Read command output
         let stream = unsafe { File::from_raw_fd(from_read_fd) };
-        read_file_impl(stream, 0, "pipe", true);
+        read_file_impl(stream, true, "pipe", true);
 
         // Wait for processes
         let mut command_status: i32 = 0;
@@ -2077,7 +2077,7 @@ pub fn copy_file(mut inn: File, mut out: File, close_out: bool) -> i32 {
 // C: bool make_backup_of(char *realname, struct stat fileinfo)
 // ---------------------------------------------------------------------------
 #[cfg(not(feature = "tiny"))]
-pub fn make_backup_of(realname: &str, fileinfo: &libc::stat) -> bool {
+pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
     statusbar("Making backup...");
 
     let backup_dir = with_state(|s| s.backup_dir.clone());

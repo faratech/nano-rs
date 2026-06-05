@@ -249,8 +249,8 @@ fn open_file_fd(filename: &str, new_one: bool) -> Option<std::fs::File> {
 }
 
 /// C: read_file(stream, fd, filename, undoable) — read file into buffer.
-fn read_file(file: std::fs::File, fd: i32, filename: &str, undoable: bool) {
-    crate::files::read_file_impl(file, fd, filename, undoable);
+fn read_file(file: std::fs::File, is_new_file: bool, filename: &str, undoable: bool) {
+    crate::files::read_file_impl(file, is_new_file, filename, undoable);
 }
 
 /// C: write_file(name, stream, temporary, kind, notes) — write buffer to file.
@@ -3573,16 +3573,13 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
     free_lines(new_cut);
     set_cutbuffer(was_cutbuffer);
 
-    // Use libc fd.
-    use std::os::unix::io::IntoRawFd;
-    let fd = file.into_raw_fd();
-    // Re-open for reading.
-    let file2 = unsafe {
-        use std::os::unix::io::FromRawFd;
-        std::fs::File::from_raw_fd(fd)
-    };
+    // Cross-platform file clone instead of fd round-trip.
+    let file2 = file.try_clone().unwrap_or_else(|_| {
+        // If clone fails, create a new file handle
+        std::fs::File::open(filename).unwrap_or_else(|_| file)
+    });
 
-    read_file(file2, fd, filename, true);
+    read_file(file2, true, filename, true);
 
     #[cfg(not(feature = "tiny"))]
     add_undo(UndoType::CoupleEnd, Some(operation));
