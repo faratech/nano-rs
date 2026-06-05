@@ -1,10 +1,10 @@
 # nano-rs: Rust Port of GNU nano
 
-A faithful Rust transliteration of the [GNU nano](https://www.nano-editor.org/) text editor - the canonical C implementation lives in the parent directory.
+⚠️ **Disclaimer**: This is an **independent, unofficial Rust transliteration** of the [GNU nano](https://www.nano-editor.org/) text editor. This project is **NOT affiliated with or endorsed by the official GNU nano project**. For the official nano, visit https://www.nano-editor.org/.
 
 ## Overview
 
-This is a **1:1 module-by-module port** of nano from C to Rust, preserving the original architecture and behavior while leveraging Rust's type safety and memory guarantees.
+This is a **1:1 module-by-module educational port** of nano from C to Rust, created to preserve the original architecture and behavior while leveraging Rust's type safety and memory guarantees. This is a community project, not an official GNU nano release.
 
 ### Why Rust?
 
@@ -161,11 +161,11 @@ cargo fmt
 
 ## License
 
-GNU General Public License v3 or later (GPL-3.0+). See `../COPYING` and `../COPYING.DOC`.
+GNU General Public License v3 or later (GPL-3.0+). This Rust port maintains the same license as the original GNU nano project. See `../COPYING` and `../COPYING.DOC`.
 
 ## Contributing
 
-Contributions are welcome! Please ensure:
+Contributions to this Rust port are welcome! Please ensure:
 
 - Code follows Rust idioms and conventions
 - Changes preserve nano's functionality and behavior
@@ -173,15 +173,17 @@ Contributions are welcome! Please ensure:
 - Code is formatted: `cargo fmt`
 - No clippy warnings: `cargo clippy`
 
+**Note**: This is an independent community project. For contributions to the official GNU nano, visit https://www.nano-editor.org/
+
 ## See Also
 
-- [GNU nano](https://www.nano-editor.org/) - The original C implementation
-- [nano on GitHub](https://github.com/torvalds/linux) - Development repository
+- **[GNU nano (Official)](https://www.nano-editor.org/)** - The original and official C implementation
+- **[nano Repository](https://git.savannah.gnu.org/git/nano.git)** - Official development repository (Savannah)
 - The C source in the parent directory for reference implementation details
 
 ## Status
 
-**Stable**: The Rust port is feature-complete and suitable for general use. All core functionality works as expected.
+**Educational Project**: This Rust port is feature-complete and demonstrates a 1:1 translation of nano's architecture. It is suitable for learning and study purposes, but should not be considered an official GNU nano release.
 
 **Platform Support**:
 - Linux: ✅ Fully supported
@@ -191,7 +193,9 @@ Contributions are welcome! Please ensure:
 **Known Issues**:
 - On Windows, history file initialization may require manual directory creation (`%USERPROFILE%\.nano\`)
 
-## Authors
+## Authors & Attribution
 
-**Rust Port**: Claude (Anthropic)  
-**Original nano**: Chris Allegretta and contributors
+**Rust Port (Independent Project)**: Claude (Anthropic) - Educational Rust transliteration  
+**Original GNU nano**: Chris Allegretta and the official nano contributors
+
+This Rust port is not created, maintained, or endorsed by the GNU nano project or its maintainers. It is an independent educational project that transliterates the original C code into Rust for learning and demonstration purposes.

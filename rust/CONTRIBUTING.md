@@ -1,6 +1,8 @@
 # Contributing to nano-rs
 
-Thank you for your interest in contributing to the Rust port of GNU nano!
+Thank you for your interest in contributing to this Rust port of GNU nano!
+
+**⚠️ Important**: This is an **independent, unofficial educational project**, not affiliated with the official GNU nano project. If you're looking to contribute to the official nano, visit https://www.nano-editor.org/
 
 ## Code of Conduct
 
