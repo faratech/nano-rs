@@ -730,6 +730,10 @@ pub fn show_help() {
 
     curs_set(0);
 
+    // Save the current editing buffer: wrap_help_text_into_buffer() calls
+    // make_new_buffer() which replaces openfile. We restore it on exit.
+    let saved_openfile = crate::global::with_state_mut(|s| s.openfile.take());
+
     // Compose the help text from all the relevant pieces.
     help_init();
 
@@ -867,8 +871,9 @@ pub fn show_help() {
         }
     }
 
-    // Discard the help-text buffer.
+    // Discard the help-text buffer and restore the original editing buffer.
     crate::files::close_buffer_impl();
+    crate::global::with_state_mut(|s| s.openfile = saved_openfile);
 
     // Restore the settings of all flags.
     STATE.with(|s| s.borrow_mut().flags = stash);

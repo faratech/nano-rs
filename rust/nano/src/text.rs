@@ -39,6 +39,27 @@ use crate::cut::{expunge, do_snip};
 use crate::search::goto_line_posx;
 
 // ---------------------------------------------------------------------------
+// UTF-8 boundary helpers
+// The C nano uses raw byte offsets everywhere; Rust requires that string slices
+// start and end on valid UTF-8 char boundaries. These helpers clip a byte
+// offset to the nearest valid boundary rather than panicking.
+// ---------------------------------------------------------------------------
+
+/// Return the largest index ≤ `pos` that is a valid UTF-8 char boundary in `s`.
+#[inline]
+fn safe_char_boundary(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    (0..=pos).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
+
+/// Return the smallest index ≥ `pos` that is a valid UTF-8 char boundary in `s`.
+#[inline]
+fn safe_char_boundary_end(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    (pos..=s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(s.len())
+}
+
+// ---------------------------------------------------------------------------
 // Local helper stubs for functions not yet imported from other modules.
 // These forward to the real implementations once all modules are wired.
 // ---------------------------------------------------------------------------
@@ -2265,7 +2286,12 @@ pub fn update_undo(action: UndoType) {
             UndoType::Add => {
                 let newlen = if current_x >= u.head_x { current_x - u.head_x } else { 0 };
                 if u.head_x <= data.len() {
-                    u.strdata = Some(data[u.head_x..u.head_x + newlen.min(data.len() - u.head_x)].to_string());
+                    // Clip byte offsets to valid UTF-8 char boundaries (C nano uses raw bytes;
+                    // Rust requires char-boundary slices).
+                    let start = safe_char_boundary(&data, u.head_x);
+                    let raw_end = u.head_x + newlen.min(data.len() - u.head_x);
+                    let end = safe_char_boundary_end(&data, raw_end);
+                    u.strdata = Some(data[start..end].to_string());
                 }
                 u.tail_x = current_x;
             }
@@ -2274,14 +2300,17 @@ pub fn update_undo(action: UndoType) {
                 u.tail_x = current_x;
             }
             UndoType::Back | UndoType::Del => {
-                let text_at_pos = if current_x <= data.len() { &data[current_x..] } else { "" };
+                let cur_safe = safe_char_boundary(&data, current_x);
+                let text_at_pos = &data[cur_safe..];
                 let charlen = char_length(text_at_pos);
                 let datalen = u.strdata.as_deref().map(|s| s.len()).unwrap_or(0);
 
                 if current_x == u.head_x {
                     // Deleted more forward.
-                    let addition = if charlen > 0 && current_x + charlen <= data.len() {
-                        data[current_x..current_x + charlen].to_string()
+                    let addition = if charlen > 0 {
+                        let s = safe_char_boundary(&data, current_x);
+                        let e = safe_char_boundary_end(&data, current_x + charlen);
+                        data[s..e].to_string()
                     } else {
                         String::new()
                     };

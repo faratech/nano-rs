@@ -487,10 +487,12 @@ pub fn read_keys_from() {
         }
     }
 
-    // Drain any additional events that are already available (non-blocking)
-    // This replaces: nodelay(frame, TRUE); while wgetch != ERR; nodelay(frame, FALSE)
+    // Drain any additional events already available.
+    // Use 50ms: PTY delivery can lag behind; this keeps typing responsive
+    // while still allowing same-write bursts (e.g. pasted text or escape
+    // sequences) to be read together.
     loop {
-        match event::poll(Duration::ZERO) {
+        match event::poll(Duration::from_millis(50)) {
             Ok(true) => {
                 match event::read() {
                     Ok(ev) => translate_event(ev),
@@ -582,8 +584,13 @@ fn translate_key_event(ke: KeyEvent) {
                 };
                 push_keycode(ESC);
                 push_keycode(ch as i32);
+            } else if c.is_ascii() {
+                // Plain ASCII character — use the byte value directly.
+                push_keycode(c as i32);
             } else {
-                // Plain character — encode as UTF-8 bytes
+                // Non-ASCII Unicode character (multi-byte UTF-8).
+                // Push each UTF-8 byte as a separate keycode so they accumulate
+                // in the PUDDLE together and are injected as one valid sequence.
                 let mut buf = [0u8; 4];
                 let s = c.encode_utf8(&mut buf);
                 for &b in s.as_bytes() {
@@ -2709,11 +2716,9 @@ fn compute_cursor_hex() -> String {
 
 /* C: void statusline(message_type importance, const char *msg, ...) */
 pub fn statusline(importance: MessageType, msg: &str) {
-    // Drop waiting keycodes on any error
-    if importance >= MessageType::Ahem {
-        WAITING_CODES.with(|wc| *wc.borrow_mut() = 0);
-        NEXTCODES_IDX.with(|ni| *ni.borrow_mut() = 0);
-    }
+    // NOTE: do NOT reset WAITING_CODES here.
+    // The C nano's statusline() never touched the key buffer; clearing it
+    // destroys pending multi-byte character bytes (e.g. UTF-8 emoji continuations).
 
     let lastmessage = with_state(|s| s.lastmessage);
 
@@ -2981,16 +2986,14 @@ pub fn place_the_cursor() {
     let page_col = get_page_start(column);
     let display_col = column - page_col;
 
-    if row < editwinrows as isize {
-        let _ = queue!(stdout(), MoveTo(
-            midwin_x + margin as u16 + display_col as u16,
-            midwin_y + row as u16
-        ));
-        with_state_mut(|s| { s.openfile.as_mut().map(|f| f.cursor_row = row); });
-    } else {
-        #[cfg(not(feature = "tiny"))]
-        statusline(MessageType::Alert, "Misplaced cursor -- please report a bug");
-    }
+    // Clamp row to the visible edit window — cursor may temporarily appear out
+    // of range if the viewport hasn't caught up with a buffer modification.
+    let clamped_row = row.min(editwinrows as isize - 1).max(0);
+    let _ = queue!(stdout(), MoveTo(
+        midwin_x + margin as u16 + display_col as u16,
+        midwin_y + clamped_row as u16
+    ));
+    with_state_mut(|s| { s.openfile.as_mut().map(|f| f.cursor_row = clamped_row); });
     let _ = stdout().flush();
 }
 

@@ -1360,7 +1360,13 @@ pub fn inject(burst: &[u8]) {
         let cur = of.current.as_ref().unwrap().clone();
         let mut b = cur.borrow_mut();
         let insert_str = String::from_utf8_lossy(&data).into_owned();
-        b.data.insert_str(of.current_x, &insert_str);
+        // Clamp current_x to a valid UTF-8 char boundary so insert_str never panics.
+        let safe_x = {
+            let pos = of.current_x.min(b.data.len());
+            (0..=pos).rev().find(|&i| b.data.is_char_boundary(i)).unwrap_or(0)
+        };
+        of.current_x = safe_x;
+        b.data.insert_str(safe_x, &insert_str);
         // Update mark position if needed.
         #[cfg(not(feature = "tiny"))]
         {

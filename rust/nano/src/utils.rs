@@ -389,12 +389,13 @@ pub fn get_page_start(column: usize) -> usize {
         let softwrap_flag = softwrap;
         let editwincols_val = editwincols;
 
-        if column == 0 || column + 2 < editwincols_val || softwrap_flag {
+        let ecols = editwincols_val.max(2) as usize; // guard against <=0 editwincols
+        if column == 0 || column + 2 < ecols || softwrap_flag {
             return 0;
-        } else if editwincols_val > 8 {
-            return column - 6 - (column - 6) % (editwincols_val - 8);
+        } else if ecols > 8 {
+            return column.saturating_sub(6) - column.saturating_sub(6) % (ecols - 8);
         } else {
-            return column - (editwincols_val - 2);
+            return column.saturating_sub(ecols.saturating_sub(2));
         }
     }
 
