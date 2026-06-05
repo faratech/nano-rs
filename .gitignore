@@ -5,6 +5,8 @@
 *.patch
 *.swp
 /rust/target/
+/rust/.xwin-cache/
+/rust/.cargo/config.local
 .deps
 .libs
 Makefile

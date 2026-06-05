@@ -1,0 +1,55 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+*.rlib
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.cargo/config.local
+
+# OS files
+Thumbs.db
+.DS_Store
+ehthumbs.db
+
+# xwin Windows SDK cache (large, regenerated)
+.xwin-cache/
+/xwin-cache/
+
+# Build directories (for non-Cargo builds)
+/build/
+/dist/
+
+# Local development
+*.log
+.env
+.env.local
+.env.*.local
+
+# Generated files
+*.profraw
+*.profdata
+/coverage/
+
+# clippy and rustfmt
+.rustfmt.toml.bak
+
+# Documentation
+/target/doc/
+
+# Temporary files
+*.tmp
+*.temp
+.#*
