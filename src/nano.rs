@@ -644,6 +644,9 @@ pub fn usage() {
         print_opt("-1", "--solosidescroll", "Scroll only the current line sideways");
     }
     print_opt("-/", "--modernbindings", "Use better-known key bindings");
+    print_opt("", "--install", "Install nano to a directory on your PATH");
+    print_opt("", "--update", "Download and install the latest release from GitHub");
+    print_opt("", "--force", "With --install/--update: act even if up to date");
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +655,7 @@ pub fn usage() {
 /* C: void version(void) */
 pub fn version() {
     println!(" GNU nano, version {}", env!("CARGO_PKG_VERSION"));
+    println!(" nano-rs (Rust port) \u{2014} https://github.com/faratech/nano-rs");
     #[cfg(not(feature = "tiny"))]
     println!(" (C) 2026 the Free Software Foundation and various contributors");
     print!(" Compiled options:");
@@ -1872,6 +1876,10 @@ pub fn process_a_keystroke() {
 // ---------------------------------------------------------------------------
 /* C: int main(int argc, char **argv) */
 pub fn nano_main() {
+    // Apply any previously-downloaded update before doing anything else (this
+    // may swap the executable on disk so the new version is used next launch).
+    let _ = crate::installer::apply_pending_update();
+
     // Parse command-line arguments.
     let args: Vec<String> = std::env::args().collect();
     let argv0 = args.first().map(|s| s.as_str()).unwrap_or("nano");
@@ -2123,6 +2131,21 @@ pub fn nano_main() {
                     s.flags[crate::global::flag_index(SOLO_SIDESCROLL)]
                         |= crate::global::flag_mask(SOLO_SIDESCROLL);
                 }); }
+                "install"        => {
+                    let force = std::env::args().any(|a| a == "--force");
+                    match crate::installer::install_to_path(force) {
+                        Ok(()) => process::exit(0),
+                        Err(e) => { eprintln!("nano: install failed: {}", e); process::exit(1); }
+                    }
+                }
+                "update"         => {
+                    let force = std::env::args().any(|a| a == "--force");
+                    match crate::installer::update_from_github(force) {
+                        Ok(()) => process::exit(0),
+                        Err(e) => { eprintln!("nano: update failed: {}", e); process::exit(1); }
+                    }
+                }
+                "force"          => { /* consumed by --install / --update via env scan */ }
                 "modernbindings" => { SET!(MODERN_BINDINGS); }
                 other => {
                     eprintln!("Type '{} -h' for a list of available options.", argv0);
@@ -2919,10 +2942,24 @@ pub fn nano_main() {
 
     with_state_mut(|s| s.we_are_running = true);
 
+    // Kick off a background check for a newer release (set NANO_NO_UPDATE_CHECK
+    // to disable). Best-effort and silent on failure; never blocks startup.
+    let update_rx = crate::installer::spawn_update_check();
+
     // ----------------------------------------------------------------
     // Main input loop
     // ----------------------------------------------------------------
     loop {
+        // Surface a completed background update, if any.
+        if let Ok(status) = update_rx.try_recv() {
+            if let crate::installer::UpdateStatus::Downloaded { version, .. } = status {
+                winio::statusline(
+                    MessageType::Notice,
+                    &format!("Update v{} downloaded \u{2014} restart nano to apply.", version),
+                );
+            }
+        }
+
         #[cfg(feature = "linenumbers")]
         confirm_margin();
 

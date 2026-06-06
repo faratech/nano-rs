@@ -17,6 +17,7 @@ pub mod rcfile;
 pub mod color;
 pub mod browser;
 pub mod nano;
+mod installer;
 
 /// Minimal gettext pass-through macro.
 /// C: _("string") or P_("singular","plural",n)

@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.0.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows (native MSVC on the windows runner; arm64 cross-compiles).
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: nano-amd64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            asset: nano-arm64.exe
+          # Linux (native on each runner; musl = fully static, portable across
+          # distros — important for a self-updating binary).
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: nano-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: nano-linux-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *windows* ]]; then ext=".exe"; else ext=""; fi
+          cp "target/${{ matrix.target }}/release/nano${ext}" "${{ matrix.asset }}"
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v4
+        continue-on-error: true  # Attestation only works for public repos
+        with:
+          subject-path: ${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # Need full history to access tag annotations
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get tag message
+        id: tag_message
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          # Get the tag annotation message (excludes the tag name line)
+          MESSAGE=$(git tag -l --format='%(contents)' "$TAG")
+          # Write to file to preserve newlines
+          echo "$MESSAGE" > release_notes.md
+          echo "Generated release notes for $TAG"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: nano-rs ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/nano-amd64.exe
+            artifacts/nano-arm64.exe
+            artifacts/nano-linux-amd64
+            artifacts/nano-linux-arm64
+          body_path: release_notes.md

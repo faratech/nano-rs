@@ -44,3 +44,20 @@ comment      = []
 libmagic     = ["dep:infer"]
 operatingdir = []
 extra        = []
+
+# Windows-only: native GitHub-release self-updater (src/installer.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+] }
+
+# Embeds Windows version metadata (media/nano.rc) via build.rs on Windows.
+[build-dependencies]
+embed-resource = "3"
+
+# Speed-tuned release build (keeps opt-level at the default 3).
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

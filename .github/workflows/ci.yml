@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [master, rust-port]
+  pull_request:
+    branches: [master, rust-port]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (default features)
+        run: cargo build --verbose
+
+      - name: Build (no default features — feature-flag hygiene)
+        run: cargo build --no-default-features --verbose
+
+      - name: Build (release)
+        run: cargo build --release --verbose
+
+  windows-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust (with Windows MSVC target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Type-check Windows target
+        run: cargo check --target x86_64-pc-windows-msvc
