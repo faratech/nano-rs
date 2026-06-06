@@ -279,10 +279,11 @@ pub fn restore_terminal() {
     let _ = winio::terminal_exit();
     #[cfg(not(feature = "tiny"))]
     {
-        // Disable bracketed-paste mode.
-        print!("\x1B[?2004l");
+        // Disable bracketed-paste mode (through the shared buffer, so it is
+        // ordered after any pending paint).
         use std::io::Write;
-        let _ = std::io::stdout().flush();
+        let _ = write!(crate::winio::out(), "\x1B[?2004l");
+        crate::winio::flush_out();
     }
 }
 
@@ -463,13 +464,13 @@ pub fn window_init() {
 pub fn disable_mouse_support() {
     // crossterm: mouse support is toggled via event::DisableMouseCapture
     use crossterm::{execute, event::DisableMouseCapture};
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(crate::winio::out(), DisableMouseCapture);
 }
 
 #[cfg(feature = "mouse")]
 pub fn enable_mouse_support() {
     use crossterm::{execute, event::EnableMouseCapture};
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let _ = execute!(crate::winio::out(), EnableMouseCapture);
 }
 
 #[cfg(feature = "mouse")]
@@ -1009,10 +1010,10 @@ pub fn terminal_init() {
     disable_kb_interrupt();
     #[cfg(not(feature = "tiny"))]
     {
-        // Enable bracketed-paste mode.
-        print!("\x1B[?2004h");
+        // Enable bracketed-paste mode (through the shared buffer).
         use std::io::Write;
-        let _ = std::io::stdout().flush();
+        let _ = write!(crate::winio::out(), "\x1B[?2004h");
+        crate::winio::flush_out();
     }
 }
 

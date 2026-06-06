@@ -147,7 +147,7 @@ pub fn browser_refresh() {
 
     let filelist_snapshot: Vec<String> = FILELIST.with(|fl| fl.borrow().clone());
 
-    let mut stdout = stdout();
+    let mut stdout = crate::winio::out();
 
     let mut index = start_index;
     while index < list_length && row < usable_rows {

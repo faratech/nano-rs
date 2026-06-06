@@ -53,6 +53,47 @@ use crate::utils::{
 };
 
 // ---------------------------------------------------------------------------
+// Shared buffered terminal writer.
+//
+// Every byte we paint goes through this one BufWriter instead of a fresh
+// `std::io::out()` handle per call. `out()`'s LineWriter has only a ~1KB
+// buffer and acquires the process-wide stdout lock on every write, so a full
+// repaint or a scroll used to issue several write() syscalls mid-frame. A
+// single 64KB BufWriter collapses a frame's worth of escape sequences into one
+// write at flush time.
+//
+// IMPORTANT: because nothing reaches the terminal until an explicit flush, any
+// code that blocks waiting for input MUST flush first (see read_keys_from),
+// otherwise the last painted frame would sit buffered and the screen would look
+// stale until the next keypress — the very symptom the poll fix removed.
+//
+// Re-entrancy: nano's draw functions call one another while "holding" the
+// writer, exactly like they do with AppState. We therefore use the same
+// UnsafeCell-in-a-Sync-static idiom as `NanoCell`; this is sound only because
+// nano is strictly single-threaded.
+// ---------------------------------------------------------------------------
+struct OutCell(std::cell::UnsafeCell<Option<std::io::BufWriter<std::io::Stdout>>>);
+// SAFETY: nano is strictly single-threaded; no concurrent access ever occurs.
+unsafe impl Sync for OutCell {}
+static OUT: OutCell = OutCell(std::cell::UnsafeCell::new(None));
+
+/// Return the shared buffered writer, initialising it on first use.
+#[inline]
+pub fn out() -> &'static mut std::io::BufWriter<std::io::Stdout> {
+    // SAFETY: single-threaded; matches the NanoCell re-entrant-access pattern.
+    unsafe {
+        let slot = &mut *OUT.0.get();
+        slot.get_or_insert_with(|| std::io::BufWriter::with_capacity(64 * 1024, stdout()))
+    }
+}
+
+/// Flush the shared buffered writer to the real terminal.
+#[inline]
+pub fn flush_out() {
+    let _ = out().flush();
+}
+
+// ---------------------------------------------------------------------------
 // Module-level statics (equivalent to file-scope C statics in winio.c)
 // ---------------------------------------------------------------------------
 
@@ -151,14 +192,14 @@ const INVALID_DIGIT: i64 = -77;
 /* C: (new in Rust port) terminal_init: replaces initscr() + refresh() */
 pub fn terminal_init() -> io::Result<()> {
     terminal::enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, Hide)?;
+    execute!(out(), EnterAlternateScreen, Hide)?;
     Ok(())
 }
 
 /* C: (new in Rust port) terminal_exit: replaces endwin() */
 pub fn terminal_exit() -> io::Result<()> {
     terminal::disable_raw_mode()?;
-    execute!(stdout(), Show, LeaveAlternateScreen)?;
+    execute!(out(), Show, LeaveAlternateScreen)?;
     Ok(())
 }
 
@@ -436,7 +477,7 @@ pub fn get_input(frame: Option<()>) -> i32 {
 
 /* C: void read_keys_from(WINDOW *frame) */
 pub fn read_keys_from() {
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // Flush any pending output before blocking
     let _ = stdout.flush();
@@ -487,12 +528,15 @@ pub fn read_keys_from() {
         }
     }
 
-    // Drain any additional events already available.
-    // Use 50ms: PTY delivery can lag behind; this keeps typing responsive
-    // while still allowing same-write bursts (e.g. pasted text or escape
-    // sequences) to be read together.
+    // Drain only the events that are already buffered; do NOT wait for new
+    // input. A non-zero timeout here is a "wait for the next keystroke" that
+    // stalls the whole loop during fast typing or held keys (each repeat
+    // arrives within the window, so we never return to repaint until you
+    // pause). ZERO grabs same-write bursts (paste, escape sequences) that have
+    // already arrived, then returns immediately — matching the idiom used
+    // elsewhere in this file (see the non-blocking drains below).
     loop {
-        match event::poll(Duration::from_millis(50)) {
+        match event::poll(Duration::ZERO) {
             Ok(true) => {
                 match event::read() {
                     Ok(ev) => translate_event(ev),
@@ -1403,7 +1447,7 @@ pub fn get_verbatim_kbinput(count: &mut usize) -> String {
     #[cfg(not(feature = "tiny"))]
     {
         let _ = print!("\x1B[?2004l");
-        let _ = stdout().flush();
+        let _ = out().flush();
     }
 
     tl_set!(LINGER_AFTER_ESCAPE, true);
@@ -1429,7 +1473,7 @@ pub fn get_verbatim_kbinput(count: &mut usize) -> String {
     #[cfg(not(feature = "tiny"))]
     {
         let _ = print!("\x1B[?2004h");
-        let _ = stdout().flush();
+        let _ = out().flush();
     }
 
     if *count < 999 {
@@ -1855,7 +1899,7 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
 
 /* C: void blank_row(WINDOW *window, int row) */
 pub fn blank_row(win: &NanoWindow, row: u16) {
-    let mut stdout = stdout();
+    let mut stdout = out();
     let cols = win.cols;
     let abs_y = win.y + row;
     let _ = queue!(stdout,
@@ -1870,7 +1914,7 @@ pub fn blank_titlebar() {
     let spaces = " ".repeat(cols as usize);
     // NOTE: intentionally uses the global stdout so the fill inherits whatever
     // attributes are already queued onto stdout by the caller (e.g. Reverse in titlebar).
-    let _ = queue!(stdout(), MoveTo(topwin_x, topwin_y), Print(&spaces));
+    let _ = queue!(out(), MoveTo(topwin_x, topwin_y), Print(&spaces));
 }
 
 /* C: void blank_edit(void) */
@@ -1878,7 +1922,7 @@ pub fn blank_edit() {
     let (editwinrows, midwin_y, midwin_x, midwin_cols) = with_state(|s| {
         (s.editwinrows, s.midwin.y, s.midwin.x, s.midwin.cols)
     });
-    let mut stdout = stdout();
+    let mut stdout = out();
     for row in 0..editwinrows {
         let _ = queue!(stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
@@ -1890,7 +1934,7 @@ pub fn blank_edit() {
 /* C: void blank_statusbar(void) */
 pub fn blank_statusbar() {
     let (footwin_x, footwin_y) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let mut stdout = stdout();
+    let mut stdout = out();
     let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Clear(ClearType::UntilNewLine));
 }
 
@@ -1910,7 +1954,7 @@ pub fn wipe_statusbar() {
     }
 
     blank_statusbar();
-    let _ = stdout().flush();
+    let _ = out().flush();
 }
 
 /* C: void blank_bottombars(void) */
@@ -1923,7 +1967,7 @@ pub fn blank_bottombars() {
     ));
 
     if !no_help && lines > 5 {
-        let mut stdout = stdout();
+        let mut stdout = out();
         let _ = queue!(stdout,
             MoveTo(footwin_x, footwin_y + 1),
             Clear(ClearType::UntilNewLine),
@@ -1949,7 +1993,7 @@ pub fn blank_it_when_expired() {
     let (currmenu, zero, lines) = with_state(|s| (s.currmenu, s.flag_isset(ZERO), s.midwin.rows + s.topwin.rows + s.footwin.rows));
     if currmenu == MMAIN && (zero || lines == 1) {
         // Redraw last row of edit window
-        let _ = stdout().flush();
+        let _ = out().flush();
     }
 }
 
@@ -2206,7 +2250,7 @@ pub fn buffer_number() -> i32 {
 /* C: void show_states_at(WINDOW *window) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn show_states_at_win(win: &NanoWindow, cur_y: u16, cur_x: u16) {
-    let mut stdout = stdout();
+    let mut stdout = out();
     let (autoindent, has_mark, break_long, recording, softwrap) = with_state(|s| (
         s.flag_isset(AUTOINDENT),
         s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some(),
@@ -2250,7 +2294,7 @@ pub fn queue_interface_color<W: Write>(w: &mut W, pair: i32) {
 /// Apply interface color pair by writing to the global stdout immediately.
 /// Use queue_interface_color when you already hold a stdout handle.
 pub fn apply_interface_color(pair: i32) {
-    let mut out = stdout();
+    let mut out = out();
     queue_interface_color(&mut out, pair);
 }
 
@@ -2261,14 +2305,14 @@ pub fn queue_reset_color<W: Write>(w: &mut W) {
 
 /// Reset colors/attributes on global stdout.
 pub fn reset_color() {
-    let mut out = stdout();
+    let mut out = out();
     queue_reset_color(&mut out);
 }
 
 /* C: void set_color(const colortype *varnish) — for syntax highlighting */
 #[cfg(feature = "color")]
 pub fn set_color(varnish: &ColorType) {
-    let mut stdout = stdout();
+    let mut stdout = out();
     // Apply foreground color
     if varnish.fg >= 0 {
         let color = ncurses_color_to_crossterm(varnish.fg);
@@ -2337,7 +2381,7 @@ pub fn titlebar(path: Option<&str>) {
         return;
     }
 
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // Apply title bar color — all on the SAME stdout handle so
     // the attribute is guaranteed to precede the fill in the output stream.
@@ -2447,7 +2491,7 @@ pub fn titlebar(path: Option<&str>) {
 
 fn print_state_word(state: &str, statelen: usize, cols: usize, x: u16, y: u16) {
     if statelen > 0 {
-        let mut stdout = stdout();
+        let mut stdout = out();
         if statelen <= cols {
             let col = (cols - statelen) as u16;
             let _ = queue!(stdout, MoveTo(x + col, y), Print(state));
@@ -2560,7 +2604,7 @@ pub fn minibar() {
 
     if cols == 0 { return; }
 
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // Draw colored bar
     let mini_pair = with_state(|s| s.interface_color_pair[MINI_INFOBAR]);
@@ -2737,7 +2781,7 @@ pub fn statusline(importance: MessageType, msg: &str) {
         s.currmenu,
     ));
 
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // If multiple ALERT messages, add trailing dots
     if lastmessage == MessageType::Alert {
@@ -2833,7 +2877,7 @@ pub fn warn_and_briefly_pause(msg: &str) {
 /// The caller is responsible for positioning the cursor beforehand.
 pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
     let width = width as usize;
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // Key name in KEY_COMBO color (reverse video by default).
     let key_pair = with_state(|s| s.interface_color_pair[KEY_COMBO]);
@@ -2861,7 +2905,7 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
 /// Internal: post_one_key with explicit row/col positioning (used by bottombars).
 fn post_one_key_at(keystroke: &str, tag: &str, width: usize, row: u16, col: u16) {
     let (footwin_x, footwin_y) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let mut stdout = stdout();
+    let mut stdout = out();
     let _ = queue!(stdout, MoveTo(footwin_x + col, footwin_y + row));
     post_one_key(keystroke, tag, width as i32);
 }
@@ -2922,7 +2966,7 @@ pub fn bottombars(menu: u32) {
         post_one_key_at(keystr, tag, this_width, 1 + row, col_pos);
     }
 
-    let _ = stdout().flush();
+    let _ = out().flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -2961,7 +3005,7 @@ pub fn place_the_cursor() {
         let col = column - leftedge;
 
         if row >= 0 && row < editwinrows as isize {
-            let _ = queue!(stdout(), MoveTo(midwin_x + margin as u16 + col as u16,
+            let _ = queue!(out(), MoveTo(midwin_x + margin as u16 + col as u16,
                 midwin_y + row as u16));
             with_state_mut(|s| s.openfile.as_mut().map(|f| f.cursor_row = row));
         } else {
@@ -2989,12 +3033,12 @@ pub fn place_the_cursor() {
     // Clamp row to the visible edit window — cursor may temporarily appear out
     // of range if the viewport hasn't caught up with a buffer modification.
     let clamped_row = row.min(editwinrows as isize - 1).max(0);
-    let _ = queue!(stdout(), MoveTo(
+    let _ = queue!(out(), MoveTo(
         midwin_x + margin as u16 + display_col as u16,
         midwin_y + clamped_row as u16
     ));
     with_state_mut(|s| { s.openfile.as_mut().map(|f| f.cursor_row = clamped_row); });
-    let _ = stdout().flush();
+    let _ = out().flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -3387,7 +3431,7 @@ pub fn draw_row(row: i32, converted: &str, line_lineno: isize, line_data: &str,
     let (midwin_x, midwin_y, margin, cols, sidebar, editwincols) = with_state(|s| {
         (s.midwin.x, s.midwin.y, s.margin, s.midwin.cols as usize, s.sidebar, s.editwincols as usize)
     });
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     let abs_y = midwin_y + row as u16;
 
@@ -3527,7 +3571,7 @@ fn apply_syntax_highlighting(
         let mut varnish: Option<&ColorType> = syntax.color.as_deref();
         while let Some(v) = varnish {
             let attrs = v.attributes;
-            let mut stdout = stdout();
+            let mut stdout = out();
 
             if v.end.is_none() {
                 // Single-line rule
@@ -3661,7 +3705,7 @@ fn apply_mark_highlighting(
         let selected_pair = with_state(|s| s.interface_color_pair[SELECTED_TEXT]);
         apply_interface_color(selected_pair);
 
-        let mut stdout = stdout();
+        let mut stdout = out();
         let _ = queue!(stdout, MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y));
         match paintlen {
             Some(n) => { let _ = queue!(stdout, Print(&converted[thetext_x..thetext_x + n])); }
@@ -3717,7 +3761,7 @@ pub fn update_line(line_lineno: isize, line_data: &str,
     let (midwin_x, midwin_y, margin, sidebar, hilite) = with_state(|s| (
         s.midwin.x, s.midwin.y, s.margin, s.sidebar, s.hilite_attribute,
     ));
-    let mut stdout = stdout();
+    let mut stdout = out();
 
     // Left-scroll indicator
     if from_col > 0 && !converted.is_empty() {
@@ -3870,7 +3914,7 @@ pub fn draw_scrollbar() {
     let (midwin_x, midwin_y, cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
     let bar_pair = with_state(|s| s.interface_color_pair[SCROLL_BAR]);
 
-    let mut stdout = stdout();
+    let mut stdout = out();
     let mut bardata = Vec::with_capacity(editwinrows as usize);
 
     for row in 0..editwinrows {
@@ -3930,7 +3974,7 @@ pub fn edit_scroll(direction: bool) {
 
     // Scroll the terminal
     let (midwin_y, editwinrows) = with_state(|s| (s.midwin.y, s.editwinrows));
-    let mut stdout = stdout();
+    let mut stdout = out();
     if direction == BACKWARD {
         let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollDown(1));
     } else {
@@ -4128,7 +4172,7 @@ pub fn edit_refresh() {
 
     // Blank remaining rows
     let (midwin_x, midwin_y, midwin_cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
-    let mut stdout = stdout();
+    let mut stdout = out();
     while row < editwinrows {
         let _ = queue!(stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
@@ -4334,7 +4378,7 @@ pub fn spotlight(from_col: usize, to_col: usize) {
     let spot_pair = with_state(|s| s.interface_color_pair[SPOTLIGHTED]);
     apply_interface_color(spot_pair);
 
-    let mut stdout = stdout();
+    let mut stdout = out();
     let _ = queue!(stdout, Print(&word[..actual_x(&word, to_col_eff)]));
 
     if overshoots {
@@ -4385,7 +4429,7 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
         };
 
         apply_interface_color(spot_pair);
-        let mut stdout = stdout();
+        let mut stdout = out();
         let _ = queue!(stdout, Print(&word[..actual_x(&word, break_col)]));
         reset_color();
 
@@ -4485,7 +4529,7 @@ pub fn do_credits() {
     let cols = with_state(|s| s.midwin.cols) as usize;
 
     blank_edit();
-    let _ = stdout().flush();
+    let _ = out().flush();
     std::thread::sleep(std::time::Duration::from_millis(600));
 
     let mut xlpos = 0usize;
@@ -4504,7 +4548,7 @@ pub fn do_credits() {
             let col = if text_width < cols { (cols - text_width) / 2 } else { 0 };
             let row = editwinrows - 1;
             let (midwin_x, midwin_y) = with_state(|s| (s.midwin.x, s.midwin.y));
-            let mut stdout = stdout();
+            let mut stdout = out();
             let _ = queue!(stdout, MoveTo(midwin_x + col as u16, midwin_y + row as u16), Print(text));
             let _ = stdout.flush();
         }
@@ -4518,16 +4562,16 @@ pub fn do_credits() {
 
         // Scroll up
         let (midwin_y, midwin_x) = with_state(|s| (s.midwin.y, s.midwin.x));
-        let _ = queue!(stdout(), MoveTo(0, midwin_y), ScrollUp(1));
-        let _ = stdout().flush();
+        let _ = queue!(out(), MoveTo(0, midwin_y), ScrollUp(1));
+        let _ = out().flush();
 
         if event::poll(std::time::Duration::ZERO).unwrap_or(false) {
             break;
         }
 
         std::thread::sleep(std::time::Duration::from_millis(600));
-        let _ = queue!(stdout(), MoveTo(0, midwin_y), ScrollUp(1));
-        let _ = stdout().flush();
+        let _ = queue!(out(), MoveTo(0, midwin_y), ScrollUp(1));
+        let _ = out().flush();
     }
 
     if with_interface {
@@ -4583,7 +4627,7 @@ pub fn suck_up_input_and_paste_it() {
 
 /* C: (new) do_curses_move(y, x) */
 pub fn do_curses_move(y: u16, x: u16) {
-    let _ = queue!(stdout(), MoveTo(x, y));
+    let _ = queue!(out(), MoveTo(x, y));
 }
 
 // (All imports are at the top of the file.)
@@ -4596,7 +4640,7 @@ pub fn do_curses_move(y: u16, x: u16) {
 /// Terminal bell (equivalent to ncurses beep()).
 pub fn beep() {
     let _ = print!("\x07");
-    let _ = stdout().flush();
+    let _ = out().flush();
 }
 
 /// Return the number of columns in the terminal (COLS equivalent).
@@ -4607,7 +4651,7 @@ pub fn get_cols() -> usize {
 /// Move the cursor within the footwin to (row, col).
 pub fn footwin_wmove(row: i32, col: i32) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(stdout(),
+    let _ = queue!(out(),
         MoveTo(fx + col as u16, fy + row as u16),
     );
 }
@@ -4624,18 +4668,18 @@ pub fn footwin_wattroff(_pair: i32) {
 
 /// Print a string at the current cursor position in footwin.
 pub fn footwin_waddstr(s: &str) {
-    let _ = queue!(stdout(), Print(s));
+    let _ = queue!(out(), Print(s));
 }
 
 /// Print a single character at the current cursor position in footwin.
 pub fn footwin_waddch(c: char) {
-    let _ = queue!(stdout(), Print(c));
+    let _ = queue!(out(), Print(c));
 }
 
 /// Move to (row, col) in footwin and print a string.
 pub fn footwin_mvwaddstr(row: i32, col: i32, s: &str) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(stdout(),
+    let _ = queue!(out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(s),
     );
@@ -4645,7 +4689,7 @@ pub fn footwin_mvwaddstr(row: i32, col: i32, s: &str) {
 pub fn footwin_mvwaddnstr(row: i32, col: i32, s: &str, n: usize) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
     let truncated = &s[..actual_x(s, n).min(s.len())];
-    let _ = queue!(stdout(),
+    let _ = queue!(out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(truncated),
     );
@@ -4654,7 +4698,7 @@ pub fn footwin_mvwaddnstr(row: i32, col: i32, s: &str, n: usize) {
 /// Move to (row, col) in footwin and print a single character.
 pub fn footwin_mvwaddch(row: i32, col: i32, c: char) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(stdout(),
+    let _ = queue!(out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(c),
     );
@@ -4664,7 +4708,7 @@ pub fn footwin_mvwaddch(row: i32, col: i32, c: char) {
 pub fn footwin_mvwprintw_spaces(row: i32, col: i32, cols: usize) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
     let spaces = " ".repeat(cols);
-    let _ = queue!(stdout(),
+    let _ = queue!(out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(&spaces),
     );
@@ -4672,7 +4716,7 @@ pub fn footwin_mvwprintw_spaces(row: i32, col: i32, cols: usize) {
 
 /// Flush footwin output (wnoutrefresh equivalent — writes to stdout buffer).
 pub fn footwin_wnoutrefresh() {
-    let _ = stdout().flush();
+    let _ = out().flush();
 }
 
 /// Return the number of edit window rows.

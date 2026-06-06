@@ -201,7 +201,7 @@ fn terminal_init() {
 fn doupdate() {
     // Crossterm: flush stdout.
     use std::io::Write;
-    let _ = std::io::stdout().flush();
+    crate::winio::flush_out();
 }
 
 /// C: beep() — ring the terminal bell.

@@ -9,7 +9,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /* C: void get_homedir(void)
  * Set global `homedir` to the user's home directory.
- * First try $HOME; if that is unset or we are root, consult the passwd database. */
+ * First try $HOME; if that is unset or we are root, consult the passwd database.
+ * On Windows there is no $HOME or passwd database, so fall back to the
+ * standard %USERPROFILE% (then %HOMEDRIVE%%HOMEPATH%) variables. */
 pub fn get_homedir() {
     let already_set = STATE.with(|s| s.borrow().homedir.is_some());
     if already_set {
@@ -34,6 +36,23 @@ pub fn get_homedir() {
                         homenv = Some(s.to_string());
                     }
                 }
+            }
+        }
+    }
+
+    // On Windows, $HOME is normally unset and there is no passwd database.
+    // Resolve the home directory the way the platform expects: %USERPROFILE%
+    // first, then the %HOMEDRIVE% + %HOMEPATH% pair.
+    #[cfg(windows)]
+    {
+        if homenv.is_none() {
+            homenv = std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty());
+        }
+        if homenv.is_none() {
+            let drive = std::env::var("HOMEDRIVE").ok().filter(|s| !s.is_empty());
+            let path = std::env::var("HOMEPATH").ok().filter(|s| !s.is_empty());
+            if let (Some(drive), Some(path)) = (drive, path) {
+                homenv = Some(format!("{}{}", drive, path));
             }
         }
     }
