@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types)]
+#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/nano.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
@@ -749,7 +749,7 @@ pub fn install_handler_for_Ctrl_C() {
     // Signal handling via libc for compatibility.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGINT, make_a_note_trampoline as libc::sighandler_t);
+        libc::signal(libc::SIGINT, make_a_note_trampoline as *const () as libc::sighandler_t);
     }
 }
 
@@ -906,7 +906,7 @@ pub fn set_up_sigwinch_handler() {
     #[cfg(all(unix, target_os = "linux"))]
     unsafe {
         let mut deed: libc::sigaction = std::mem::zeroed();
-        deed.sa_sigaction = handle_sigwinch as libc::sighandler_t;
+        deed.sa_sigaction = handle_sigwinch as *const () as libc::sighandler_t;
         libc::sigaction(libc::SIGWINCH, &deed, std::ptr::null_mut());
     }
     // crossterm handles SIGWINCH automatically via Event::Resize.
@@ -920,24 +920,24 @@ pub fn set_up_signal_handlers() {
         libc::signal(libc::SIGINT,  libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
         // SIGHUP and SIGTERM.
-        libc::signal(libc::SIGHUP,  handle_hupterm as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_hupterm as libc::sighandler_t);
+        libc::signal(libc::SIGHUP,  handle_hupterm as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_hupterm as *const () as libc::sighandler_t);
         // SIGTSTP / suspend.
         #[cfg(not(feature = "tiny"))]
         {
             extern "C" fn suspend_trampoline(sig: libc::c_int) {
                 suspend_nano(sig);
             }
-            libc::signal(libc::SIGTSTP, suspend_trampoline as libc::sighandler_t);
+            libc::signal(libc::SIGTSTP, suspend_trampoline as *const () as libc::sighandler_t);
         }
         // SIGCONT.
-        libc::signal(libc::SIGCONT, continue_nano as libc::sighandler_t);
+        libc::signal(libc::SIGCONT, continue_nano as *const () as libc::sighandler_t);
         // SIGSEGV / SIGABRT crash handler (not debug, not tiny).
         #[cfg(all(not(feature = "tiny"), not(debug_assertions)))]
         {
             if std::env::var("NANO_NOCATCH").is_err() {
-                libc::signal(libc::SIGSEGV, handle_crash as libc::sighandler_t);
-                libc::signal(libc::SIGABRT, handle_crash as libc::sighandler_t);
+                libc::signal(libc::SIGSEGV, handle_crash as *const () as libc::sighandler_t);
+                libc::signal(libc::SIGABRT, handle_crash as *const () as libc::sighandler_t);
             }
         }
     }

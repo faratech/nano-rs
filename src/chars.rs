@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types)]
+#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 use crate::definitions::*;
 use crate::global::STATE;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types)]
+#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 //! Installation and update functionality for nano-rs.
 //!
 //! Supports self-install / self-update on both Windows and Unix:
