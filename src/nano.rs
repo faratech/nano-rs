@@ -654,8 +654,8 @@ pub fn usage() {
 // ---------------------------------------------------------------------------
 /* C: void version(void) */
 pub fn version() {
-    println!(" GNU nano, version {}", env!("CARGO_PKG_VERSION"));
-    println!(" nano-rs (Rust port) \u{2014} https://github.com/faratech/nano-rs");
+    println!(" GNU nano, version {}", GNU_NANO_VERSION);
+    println!(" nano-rs {} (Rust port) \u{2014} https://github.com/faratech/nano-rs", env!("CARGO_PKG_VERSION"));
     #[cfg(not(feature = "tiny"))]
     println!(" (C) 2026 the Free Software Foundation and various contributors");
     print!(" Compiled options:");

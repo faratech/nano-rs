@@ -8,6 +8,16 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// Version constants
+// ---------------------------------------------------------------------------
+
+/// The GNU nano release this port mirrors (shown as "GNU nano, version X" and
+/// written into lock files / the credits screen for compatibility). This is
+/// distinct from the nano-rs release version, which is the crate version
+/// (`CARGO_PKG_VERSION`) and is what release tags and the self-updater track.
+pub const GNU_NANO_VERSION: &str = "9.0.0";
+
+// ---------------------------------------------------------------------------
 // Platform / path constants
 // ---------------------------------------------------------------------------
 

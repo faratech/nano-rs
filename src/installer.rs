@@ -189,19 +189,26 @@ pub fn get_installed_version() -> Option<String> {
     parse_installed_version(&version_output)
 }
 
-/// Parse nano's multi-line `--version` output.
+/// Parse nano-rs's own release version from its `--version` output.
 ///
-/// nano prints e.g. ` GNU nano, version 9.0.0` on the FIRST line, followed by
-/// further lines ending with a "Compiled options:" line. htop's
-/// `.split_whitespace().last()` would grab a token from the LAST line, so we
-/// instead take only the first line and extract the token immediately
-/// following the word "version". Returns None if not parseable.
+/// The output has two version lines:
+///   ` GNU nano, version 9.0.0`            (the upstream nano this port mirrors)
+///   ` nano-rs 0.0.1 (Rust port) — <url>`  (the nano-rs release version)
+/// The self-updater tracks the nano-rs version (it matches the release tags),
+/// so we extract the token following "nano-rs". Returns None if not present.
 fn parse_installed_version(version_output: &str) -> Option<String> {
-    let first_line = version_output.lines().next()?;
-    let mut tokens = first_line.split_whitespace();
-    while let Some(tok) = tokens.next() {
-        if tok == "version" {
-            return tokens.next().map(|s| s.to_string());
+    for line in version_output.lines() {
+        let mut tokens = line.split_whitespace();
+        while let Some(tok) = tokens.next() {
+            if tok == "nano-rs" {
+                if let Some(v) = tokens.next() {
+                    // Only accept a version-looking token (starts with a digit),
+                    // not e.g. "(Rust" if the line format changes.
+                    if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                        return Some(v.to_string());
+                    }
+                }
+            }
         }
     }
     None

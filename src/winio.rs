@@ -4461,7 +4461,7 @@ pub fn do_credits() {
     let credits: &[Option<&str>] = &[
         None,  // "The nano text editor"
         None,  // "version"
-        Some(env!("CARGO_PKG_VERSION")),
+        Some(GNU_NANO_VERSION),
         Some(""),
         None,  // "Brought to you by:"
         Some("Chris Allegretta"),

@@ -118,9 +118,29 @@ RUSTFLAGS="-C target-feature=+crt-static" \
 This avoids the `VCRUNTIME140.dll` dependency so the binary runs on a clean
 Windows install with no redistributable.
 
+## Two version numbers
+
+nano-rs surfaces two distinct versions in `--version`:
+
+```
+ GNU nano, version 9.0.0                                   <- upstream compatibility
+ nano-rs 0.0.1 (Rust port) — https://github.com/faratech/nano-rs   <- nano-rs release
+```
+
+- **GNU nano version** (`GNU_NANO_VERSION` in `src/definitions.rs`) is the
+  upstream GNU nano release this port mirrors. It only changes when the port is
+  rebased onto a newer GNU nano, and it's also what goes into lock files and the
+  credits screen for compatibility.
+- **nano-rs version** is the crate version (`Cargo.toml` → `CARGO_PKG_VERSION`).
+  **This is the one that matters for releases**: git tags (`vX.Y.Z`) and the
+  self-updater's version comparison both track it, so a release tag must match
+  the crate version.
+
 ## Bumping the version
 
-`bump-version.py` keeps the version in sync across files:
+`bump-version.py` bumps the **nano-rs** release version (Cargo.toml + the Windows
+resource); the upstream `GNU_NANO_VERSION` const is edited by hand only when
+rebasing onto a new GNU nano. Keep the tag equal to the crate version:
 
 ```sh
 python3 bump-version.py patch          # 9.0.0 -> 9.0.1

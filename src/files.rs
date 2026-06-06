@@ -284,7 +284,7 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
     lockdata[1] = 0x30;
 
     // bytes 2-11: program name "nano VERSION" (truncated to 10 bytes)
-    let progname = format!("nano {}", env!("CARGO_PKG_VERSION"));
+    let progname = format!("nano {}", GNU_NANO_VERSION);
     let progname_bytes = progname.as_bytes();
     let plen = progname_bytes.len().min(10);
     lockdata[2..2+plen].copy_from_slice(&progname_bytes[..plen]);
