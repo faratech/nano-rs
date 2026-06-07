@@ -40,7 +40,7 @@ fn set_have_compiled_regexp(v: bool) {
 // External function stubs (implemented in other modules)
 // ---------------------------------------------------------------------------
 
-extern "Rust" {}
+unsafe extern "Rust" {}
 
 // These are stubs for functions defined in other modules that search.c calls.
 // In a fully ported codebase these will resolve to the real implementations.

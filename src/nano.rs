@@ -2338,7 +2338,8 @@ pub fn nano_main() {
 
     // Ensure TERM is set.
     if std::env::var("TERM").is_err() {
-        std::env::set_var("TERM", "vt220");
+        // Safe: single-threaded startup, before any threads are spawned.
+        unsafe { std::env::set_var("TERM", "vt220"); }
     }
 
     // Set up keybinding and function tables.

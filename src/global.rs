@@ -851,7 +851,7 @@ impl AppState {
     #[cfg(not(feature = "tiny"))]
     pub fn get_region_coords(&self) -> (usize, usize, usize, usize) {
         if let Some(ref of) = self.openfile {
-            if let (Some(ref mark), Some(ref current)) = (&of.mark, &of.current) {
+            if let (Some(mark), Some(current)) = (&of.mark, &of.current) {
                 let mark_lineno = mark.borrow().lineno as usize;
                 let cur_lineno = current.borrow().lineno as usize;
                 let mark_x = of.mark_x;

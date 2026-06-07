@@ -1,21 +1,21 @@
 [package]
 name = "nano"
-version = "0.0.2"
-edition = "2021"
+version = "0.0.3"
+edition = "2024"
 
 [[bin]]
 name = "nano"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = "0.28"
+crossterm = "0.29"
 regex = "1"
 libc = "0.2"
-signal-hook = "0.3"
+signal-hook = "0.4"
 clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
-infer = { version = "0.16", optional = true }
+infer = { version = "0.19", optional = true }
 tempfile = "3"
 
 [features]

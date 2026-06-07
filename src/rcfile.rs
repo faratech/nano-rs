@@ -1869,7 +1869,7 @@ pub fn parse_rcfile<R: BufRead>(reader: R, just_syntax: bool, intros_only: bool)
                             if sx.name == syntaxname {
                                 // Append to augmentations list
                                 let mut tail = &mut sx.augmentations;
-                                while let Some(ref mut a) = tail {
+                                while let Some(a) = tail {
                                     tail = &mut a.next;
                                 }
                                 *tail = Some(new_aug);
