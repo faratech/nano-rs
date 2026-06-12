@@ -323,11 +323,17 @@ pub struct AppState {
     pub keep_cutbuffer: bool,
 
     // --- Open file buffers ---
-    /// The list of all open file buffers (current buffer).
+    /// The current buffer (C: openfile).
     pub openfile: Option<Box<OpenFileStruct>>,
+    /// The other open buffers, in circular order: the front is the buffer
+    /// "after" the current one, the back is the buffer "before" it.
+    /// Together with `openfile` this models C's circular openfilestruct list.
     #[cfg(feature = "multibuffer")]
-    /// The first open buffer.
-    pub startfile: Option<*mut OpenFileStruct>,
+    pub buffer_ring: std::collections::VecDeque<Box<OpenFileStruct>>,
+    /// Monotonic creation counter; the oldest surviving buffer plays the
+    /// role of C's `startfile` for buffer numbering.
+    #[cfg(feature = "multibuffer")]
+    pub buffer_seq_counter: usize,
 
     // --- Bracket matching / whitespace display ---
     #[cfg(not(feature = "tiny"))]
@@ -629,7 +635,9 @@ impl Default for AppState {
 
             openfile: None,
             #[cfg(feature = "multibuffer")]
-            startfile: None,
+            buffer_ring: std::collections::VecDeque::new(),
+            #[cfg(feature = "multibuffer")]
+            buffer_seq_counter: 0,
 
             #[cfg(not(feature = "tiny"))]
             matchbrackets: None,

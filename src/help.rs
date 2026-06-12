@@ -867,7 +867,10 @@ pub fn show_help() {
     }
 
     // Discard the help-text buffer and restore the original editing buffer.
-    crate::files::close_buffer_impl();
+    // (The help buffer was created while `openfile` was taken out, so it is
+    // standalone — not in the buffer ring; overwriting it drops it.  Don't
+    // call close_buffer_impl() here: that would pop a user buffer off the
+    // ring, which the restore below would then leak.)
     crate::global::with_state_mut(|s| s.openfile = saved_openfile);
 
     // Restore the settings of all flags.

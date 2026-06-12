@@ -4211,6 +4211,44 @@ pub fn do_linter() {
             break;
         }
 
+        // When the message is for a different file, switch to (or open)
+        // that file's buffer first (C: the openfile->next walk in do_linter).
+        #[cfg(feature = "multibuffer")]
+        if last_shown != Some(cur_idx) {
+            let entry_filename = lints[cur_idx].filename.clone();
+            let current_name = with_state(|s| {
+                s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
+            });
+            if !entry_filename.is_empty() && entry_filename != current_name {
+                if !crate::files::rotate_to_buffer_named(&entry_filename) {
+                    let choice = ask_user(false, &format!(
+                        tr!("This message is for unopened file {}, open it in a new buffer?"),
+                        entry_filename));
+                    with_state_mut(|s| s.currmenu = MLINTER);
+                    if choice == CANCEL {
+                        statusbar(tr!("Cancelled"));
+                        break;
+                    } else if choice == YES {
+                        crate::files::open_buffer_impl(&entry_filename, true);
+                    } else {
+                        // Skip the messages for that unopened file.
+                        // (C scans in the direction of travel; we skip forward.)
+                        let mut idx = cur_idx;
+                        while idx < lints.len() && lints[idx].filename == entry_filename {
+                            idx += 1;
+                        }
+                        if idx >= lints.len() {
+                            statusline(MessageType::Remark,
+                                tr!("No messages for opened files"));
+                            break;
+                        }
+                        cur_idx = idx;
+                        continue;
+                    }
+                }
+            }
+        }
+
         let entry = &lints[cur_idx];
 
         // Navigate to the lint location.
@@ -4314,9 +4352,6 @@ pub fn do_linter() {
 /// One parsed lint diagnostic.
 #[cfg(feature = "linter")]
 struct LintEntry {
-    // parity: C's do_linter switches buffers via the diagnostic's filename;
-    // the port currently only navigates within the current buffer.
-    #[allow(dead_code)]
     filename: String,
     lineno: isize,
     colno: isize,

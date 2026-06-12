@@ -334,14 +334,27 @@ pub fn close_and_go() {
         }
     }
 
+    // If there is another buffer, close this one; otherwise terminate.
     #[cfg(feature = "multibuffer")]
     {
-        // If there is another buffer, close this one; otherwise terminate.
-        let _has_next = with_state(|s| {
-            s.openfile.is_some() // simplified — full multi-buffer cycle not ported here
-        });
-        // In a full port we'd check openfile != openfile->next.
-        // For now, fall through to finish().
+        let has_other = with_state(|s| !s.buffer_ring.is_empty());
+        if has_other {
+            // C: switch_to_next_buffer(); openfile = openfile->prev;
+            //    close_buffer(); openfile = openfile->next; titlebar(NULL);
+            // i.e. close the current buffer and land on the next one.
+            files::switch_to_next_buffer();
+            with_state_mut(|s| {
+                // Drop the buffer we just left (now at the back of the ring).
+                let _orphan = s.buffer_ring.pop_back();
+                if s.buffer_ring.is_empty() {
+                    if let Some(idx) = s.exitfunc {
+                        s.allfuncs[idx].tag = s.exit_tag;
+                    }
+                }
+            });
+            winio::titlebar(None);
+            return;
+        }
     }
 
     #[cfg(feature = "histories")]
@@ -420,37 +433,48 @@ pub fn emergency_save(filename: &str) {
 /// Delete the lock files of all open buffers and emergency-save every
 /// modified one (C: the buffer loop at the end of die()).
 fn save_all_modified_buffers() {
-    // Collect what to do first, so emergency_save (which re-enters STATE
-    // via write_file) doesn't run inside a with_state closure.
-    let mut work: Vec<(Option<String>, bool, String)> = with_state(|s| {
-        let restricted = (s.flags[crate::global::flag_index(RESTRICTED)]
-            & crate::global::flag_mask(RESTRICTED)) != 0;
-        let collect = |of: &crate::definitions::OpenFileStruct| {
+    let restricted = ISSET!(RESTRICTED);
+
+    // Walk the whole circle of buffers, like C's
+    // `while (openfile) { ...; openfile = openfile->next; }`.
+    // emergency_save writes the *current* buffer, so rotate each one in.
+    let total = {
+        #[cfg(feature = "multibuffer")]
+        { with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some())) }
+        #[cfg(not(feature = "multibuffer"))]
+        { usize::from(with_state(|s| s.openfile.is_some())) }
+    };
+
+    for _ in 0..total {
+        let (lock, save, filename) = with_state(|s| {
+            let of = s.openfile.as_ref();
             #[cfg(not(feature = "tiny"))]
-            let lock = of.lock_filename.clone();
+            let lock = of.and_then(|f| f.lock_filename.clone());
             #[cfg(feature = "tiny")]
             let lock: Option<String> = None;
-            (lock, of.modified && !restricted, of.filename.clone())
-        };
-        let mut v = Vec::new();
-        if let Some(ref of) = s.openfile {
-            v.push(collect(of));
-        }
-        v
-    });
+            (
+                lock,
+                of.map(|f| f.modified).unwrap_or(false) && !restricted,
+                of.map(|f| f.filename.clone()).unwrap_or_default(),
+            )
+        });
 
-    for (lock, save, _) in &work {
-        if let Some(lf) = lock {
+        if let Some(ref lf) = lock {
             files::delete_lockfile(lf);
         }
-        let _ = save;
-    }
-    // NOTE: emergency_save writes the *current* buffer; until the buffer
-    // ring lands, only the current buffer can be saved anyway.
-    for (_, save, filename) in work.drain(..) {
         if save {
             emergency_save(&filename);
         }
+
+        // Rotate to the next buffer in the ring.
+        #[cfg(feature = "multibuffer")]
+        with_state_mut(|s| {
+            if let Some(next) = s.buffer_ring.pop_front() {
+                if let Some(cur) = s.openfile.replace(next) {
+                    s.buffer_ring.push_back(cur);
+                }
+            }
+        });
     }
 }
 
@@ -2748,8 +2772,9 @@ pub fn nano_main() {
     let mut file_idx = 0usize;
     let file_args_count = file_args.len();
 
-    // Check whether we need to open multiple buffers.
-    let read_them_all = ISSET!(MULTIBUFFER);
+    // Check whether we need to open multiple buffers: since nano 2.7.1,
+    // every file named on the command line gets its own buffer.
+    let read_them_all = ISSET!(MULTIBUFFER) || file_args_count > 1;
 
     while file_idx < file_args_count {
         // Check we should keep reading.

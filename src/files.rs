@@ -619,11 +619,15 @@ pub fn make_new_buffer() {
 
         #[cfg(feature = "multibuffer")]
         {
-            // Link into circular list
-            if s.openfile.is_none() {
-                // first buffer — set startfile pointer
-                s.startfile = Some(newnode.as_mut() as *mut OpenFileStruct);
-            } else {
+            newnode.seq = s.buffer_seq_counter;
+            s.buffer_seq_counter += 1;
+
+            // Link into the circular list: C inserts the new buffer after
+            // the current one, so the old current becomes the new one's
+            // predecessor (= the back of the ring).
+            if let Some(old) = s.openfile.take() {
+                s.buffer_ring.push_back(old);
+
                 // More than one buffer: show "Close" in help lines
                 if let Some(idx) = s.exitfunc {
                     s.allfuncs[idx].tag = s.close_tag;
@@ -633,6 +637,11 @@ pub fn make_new_buffer() {
                     s.more_than_one = true;
                 }
             }
+        }
+        #[cfg(not(feature = "multibuffer"))]
+        {
+            // Without multibuffer there is only ever one buffer.
+            s.openfile = None;
         }
 
         // Initialize fields
@@ -942,9 +951,14 @@ pub fn mention_name_and_linecount() {
  * Update title bar and such after switching to another buffer. */
 #[cfg(feature = "multibuffer")]
 pub fn redecorate_after_switch() {
-    // Check if only one file buffer is open (points to itself)
-    // In Rust we track this differently via the openfile linked structure.
-    // For now, we just proceed with the refresh.
+    // If only one file buffer is open, there is nothing to update.
+    if with_state(|s| s.buffer_ring.is_empty()) {
+        statusline(MessageType::Ahem, "No more open file buffers");
+        return;
+    }
+
+    // While in a different buffer, the width of the screen may have changed,
+    // so make sure that the starting column for the first row is fitting.
     #[cfg(not(feature = "tiny"))]
     ensure_firstcolumn_is_aligned();
 
@@ -981,8 +995,13 @@ pub fn redecorate_after_switch() {
  * Switch to the previous entry in the circular list of buffers. */
 #[cfg(feature = "multibuffer")]
 pub fn switch_to_prev_buffer() {
-    // NOTE: full circular list navigation requires Box<OpenFileStruct> with prev pointers.
-    // This is a simplified stub that calls redecorate.
+    with_state_mut(|s| {
+        if let Some(prev) = s.buffer_ring.pop_back() {
+            if let Some(cur) = s.openfile.replace(prev) {
+                s.buffer_ring.push_front(cur);
+            }
+        }
+    });
     redecorate_after_switch();
 }
 
@@ -990,18 +1009,58 @@ pub fn switch_to_prev_buffer() {
  * Switch to the next entry in the circular list of buffers. */
 #[cfg(feature = "multibuffer")]
 pub fn switch_to_next_buffer() {
+    with_state_mut(|s| {
+        if let Some(next) = s.buffer_ring.pop_front() {
+            if let Some(cur) = s.openfile.replace(next) {
+                s.buffer_ring.push_back(cur);
+            }
+        }
+    });
     redecorate_after_switch();
 }
 
+/// Rotate the buffer ring (without redecorating) until the buffer with the
+/// given filename is current.  Returns false (with the original buffer
+/// restored as current) when no open buffer has that name.
+/// C equivalent: the openfile->next walk in do_linter.
+#[cfg(feature = "multibuffer")]
+pub fn rotate_to_buffer_named(name: &str) -> bool {
+    let total = with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some()));
+    for _ in 0..total {
+        let matches = with_state(|s| {
+            s.openfile.as_ref().map(|f| f.filename == name).unwrap_or(false)
+        });
+        if matches {
+            return true;
+        }
+        with_state_mut(|s| {
+            if let Some(next) = s.buffer_ring.pop_front() {
+                if let Some(cur) = s.openfile.replace(next) {
+                    s.buffer_ring.push_back(cur);
+                }
+            }
+        });
+    }
+    false
+}
+
 /* C: void close_buffer(void)
- * Remove the current buffer from the circular list of buffers. */
+ * Remove the current buffer from the circular list of buffers;
+ * the preceding buffer becomes the current one (like C's
+ * `openfile = orphan->prev`), or None when it was the last. */
 #[cfg(feature = "multibuffer")]
 pub fn close_buffer_impl() {
-    // Free resources of current buffer and switch to prev.
     with_state_mut(|s| {
-        // Drop the current openfile.
-        // In a full implementation this would navigate the circular list.
-        s.openfile = None;
+        // Dropping the Box frees the lines, undo stack, and metadata.
+        let _orphan = s.openfile.take();
+        s.openfile = s.buffer_ring.pop_back();
+
+        // When just one buffer remains open, show "Exit" in the help lines.
+        if s.buffer_ring.is_empty() {
+            if let Some(idx) = s.exitfunc {
+                s.allfuncs[idx].tag = s.exit_tag;
+            }
+        }
     });
 }
 

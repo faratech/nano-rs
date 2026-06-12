@@ -2251,12 +2251,33 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
 // buffer_number (ENABLE_MULTIBUFFER)
 // ---------------------------------------------------------------------------
 
-/* C: int buffer_number(openfilestruct *buffer) — #ifdef ENABLE_MULTIBUFFER */
+/* C: int buffer_number(openfilestruct *buffer) — #ifdef ENABLE_MULTIBUFFER
+ * Position of the current buffer, counted from the oldest surviving
+ * buffer (C's startfile) along the circular order. */
 #[cfg(feature = "multibuffer")]
 pub fn buffer_number() -> i32 {
-    // In the Rust port the circular list is not yet fully realised;
-    // return 1 as a stub that compiles.
-    1
+    with_state(|s| {
+        let Some(ref cur) = s.openfile else { return 1 };
+        // Cyclic order is [current, ring[0], ring[1], ...].
+        let mut min_pos = 0usize;
+        let mut min_seq = cur.seq;
+        for (i, b) in s.buffer_ring.iter().enumerate() {
+            if b.seq < min_seq {
+                min_seq = b.seq;
+                min_pos = i + 1;
+            }
+        }
+        let n = s.buffer_ring.len() + 1;
+        ((n - min_pos) % n + 1) as i32
+    })
+}
+
+/// The total number of open buffers (C: buffer_number(startfile->prev)).
+#[cfg(feature = "multibuffer")]
+pub fn buffer_count() -> i32 {
+    with_state(|s| {
+        if s.openfile.is_none() { 0 } else { s.buffer_ring.len() as i32 + 1 }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2542,7 +2563,7 @@ fn compute_titlebar_strings(
         caption = path.unwrap_or("").to_string();
         #[cfg(feature = "multibuffer")]
         {
-            upperleft = format!("[{}/{}]", buffer_number(), buffer_number());
+            upperleft = format!("[{}/{}]", buffer_number(), buffer_count());
         }
         #[cfg(not(feature = "multibuffer"))]
         {
@@ -2557,7 +2578,7 @@ fn compute_titlebar_strings(
         {
             let more_than_one = with_state(|s| s.more_than_one);
             if more_than_one {
-                upperleft = format!("[{}/{}]", buffer_number(), buffer_number());
+                upperleft = format!("[{}/{}]", buffer_number(), buffer_count());
             } else {
                 upperleft = "GNU nano".to_string();
             }
@@ -2668,12 +2689,10 @@ pub fn minibar() {
     // Display buffer ranking or line count
     #[cfg(feature = "multibuffer")]
     {
-        let next_is_self = with_state(|s| {
-            // When there's only one buffer, openfile->next == openfile
-            s.openfile.as_ref().map(|_| false).unwrap_or(true)
-        });
-        if !next_is_self && cols > 35 {
-            let ranking = format!(" [{}/{}]", buffer_number(), buffer_number());
+        // C: openfile != openfile->next — i.e. more than one buffer is open.
+        let multiple = with_state(|s| !s.buffer_ring.is_empty());
+        if multiple && cols > 35 {
+            let ranking = format!(" [{}/{}]", buffer_number(), buffer_count());
             if namewidth + placewidth + breadth(&ranking) + 32 < cols {
                 let _ = queue!(stdout, Print(&ranking));
             }

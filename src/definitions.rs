@@ -887,12 +887,11 @@ pub struct OpenFileStruct {
     /// An ALERT-level message that occurred when the file was opened.
     #[cfg(feature = "multibuffer")]
     pub errormessage: Option<String>,
-    /// The next open buffer in the circular list.
+    /// Creation order; the oldest surviving buffer plays the role of C's
+    /// `startfile` for [n/total] buffer numbering.  (The circular list
+    /// itself is AppState.openfile + AppState.buffer_ring.)
     #[cfg(feature = "multibuffer")]
-    pub next: Option<Box<OpenFileStruct>>,
-    /// The preceding open buffer in the circular list (raw pointer to avoid cycles).
-    #[cfg(feature = "multibuffer")]
-    pub prev: *mut OpenFileStruct,
+    pub seq: usize,
 }
 
 impl Default for OpenFileStruct {
@@ -936,9 +935,7 @@ impl Default for OpenFileStruct {
             #[cfg(feature = "multibuffer")]
             errormessage: None,
             #[cfg(feature = "multibuffer")]
-            next: None,
-            #[cfg(feature = "multibuffer")]
-            prev: std::ptr::null_mut(),
+            seq: 0,
         }
     }
 }
