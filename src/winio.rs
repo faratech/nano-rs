@@ -1810,19 +1810,26 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
         let currmenu = with_state(|s| s.currmenu);
 
         if in_middle && sidebar != 0 && event.x == cols - 1 && currmenu == MMAIN {
-            // Scroll bar click
-            let editwinrows = with_state(|s| s.editwinrows) as i32;
-            let total_lines = with_state(|s| {
-                s.openfile.as_ref()
-                    .and_then(|f| f.filebot.as_ref())
-                    .map(|b| b.borrow().lineno)
-                    .unwrap_or(1)
-            }) as i32;
-            let click_row = (*mouse_y - mid_y as i32).max(0);
-            let _target_line = total_lines * click_row / editwinrows + 1;
-            // goto_line_and_column is in move_.rs; stub here
+            // Clicking in the "scrollbar" goes to the roughly corresponding line.
+            let editwinrows = with_state(|s| s.editwinrows) as isize;
+            let (total_lines, placewewant) = with_state(|s| {
+                let f = s.openfile.as_ref();
+                (
+                    f.and_then(|f| f.filebot.as_ref()).map(|b| b.borrow().lineno).unwrap_or(1),
+                    f.map(|f| f.placewewant).unwrap_or(0) as isize,
+                )
+            });
+            let mut click_row = (*mouse_y - mid_y as i32).max(0) as isize;
+            if click_row != 0 { click_row += 1; }
+            crate::search::goto_line_and_column(
+                total_lines * click_row / editwinrows.max(1) + 1,
+                placewewant + 1,
+                true,
+            );
             with_state_mut(|s| s.refresh_needed = true);
-            return 0;
+            // Fall out as "handled" like C (the click must not also be
+            // treated as an edit-window positioning click).
+            return 2;
         }
 
         if in_footer && !with_state(|s| s.flag_isset(NO_HELP)) && currmenu != MYESNO {

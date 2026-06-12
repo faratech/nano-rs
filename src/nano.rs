@@ -1167,35 +1167,93 @@ pub fn unbound_key(code: i32) {
 // ---------------------------------------------------------------------------
 // process_click — handle a mouse click in the edit window
 // ---------------------------------------------------------------------------
-/* C: int process_click(void) */
+/* C: int process_click(void) — upstream nano.c do_mouse() */
 #[cfg(feature = "mouse")]
 pub fn process_click() -> i32 {
     let mut click_row = 0i32;
     let mut click_col = 0i32;
     let retval = winio::get_mouseinput(&mut click_row, &mut click_col);
 
+    // If the click is wrong or already handled, we're done.
     if retval != 0 {
         return retval;
     }
 
-    // If the click was in the edit window, position the cursor.
-    // (Full implementation mirrors C, abbreviated here for structure.)
     let (editwin_rows, editwin_y) = with_state(|s| {
         (s.editwinrows as i32, s.midwin.y as i32)
     });
 
+    // If the click was in the edit window, put the cursor in that spot.
     if click_row >= editwin_y && click_row < editwin_y + editwin_rows {
         let adj_row = click_row - editwin_y;
-        let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
-        let _row_count = adj_row - cursor_row as i32;
 
-        // Reset cutbuffer on click (cursor moved).
+        let (current, cursor_row, was_x) = with_state(|s| {
+            let f = s.openfile.as_ref();
+            (
+                f.and_then(|f| f.current.clone()),
+                f.map(|f| f.cursor_row).unwrap_or(0),
+                f.map(|f| f.current_x).unwrap_or(0),
+            )
+        });
+        let Some(mut line) = current else { return 2 };
+        let was_current = line.clone();
+
+        let row_count = adj_row - cursor_row as i32;
+
+        let col = crate::utils::xplustabs();
+        #[cfg(not(feature = "tiny"))]
+        let mut leftedge = if with_state(|s| s.flag_isset(SOFTWRAP)) {
+            let b = line.borrow();
+            winio::leftedge_for(col, &b.data)
+        } else {
+            crate::utils::get_page_start(col)
+        };
+        #[cfg(feature = "tiny")]
+        let mut leftedge = crate::utils::get_page_start(col);
+
+        // Move current up or down to the row that was clicked on.
+        if row_count < 0 {
+            winio::go_back_chunks(-row_count, &mut line, &mut leftedge);
+        } else {
+            winio::go_forward_chunks(row_count, &mut line, &mut leftedge);
+        }
+
+        // Make the clicked line current first: actual_last_column() reads
+        // openfile->current internally (as in C, where current has already
+        // been advanced by the chunk walk at this point).
+        with_state_mut(|s| {
+            if let Some(ref mut of) = s.openfile {
+                of.current = Some(line.clone());
+            }
+        });
+        let new_x = {
+            let b = line.borrow();
+            crate::utils::actual_x(&b.data, winio::actual_last_column(leftedge, click_col as usize))
+        };
+        with_state_mut(|s| {
+            if let Some(ref mut of) = s.openfile {
+                of.current_x = new_x;
+            }
+        });
+
+        // Clicking there where the cursor already is toggles the mark.
+        #[cfg(not(feature = "tiny"))]
+        if row_count == 0 && new_x == was_x {
+            crate::text::do_mark();
+            if ISSET!(STATEFLAGS) {
+                winio::titlebar(None);
+            }
+        } else {
+            // The cursor moved; clean the cutbuffer on the next cut.
+            with_state_mut(|s| s.keep_cutbuffer = false);
+        }
+        #[cfg(feature = "tiny")]
         with_state_mut(|s| s.keep_cutbuffer = false);
 
-        // Perform cursor movement: simplified (full port needs go_back/forward_chunks).
-        // For now, mark refresh needed.
-        with_state_mut(|s| s.refresh_needed = true);
+        winio::edit_redraw(&was_current, UpdateType::Centering);
     }
+
+    // No more handling is needed.
     2
 }
 
@@ -1630,7 +1688,7 @@ pub fn process_a_keystroke() {
 
     // Handle mouse click.
     #[cfg(feature = "mouse")]
-    let input = if input == -2 /* KEY_MOUSE placeholder */ {
+    let input = if input == winio::KEY_MOUSE_CODE {
         match process_click() {
             1 => winio::get_kbinput(BLIND),
             _ => return,
