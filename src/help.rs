@@ -52,8 +52,20 @@ mod stubs {
     }
 
     /// Append a new empty line after the current line and advance current.
+    /// C (help.c): openfile->current->next = make_new_node(openfile->current);
+    ///             openfile->current = openfile->current->next;
+    ///             openfile->current->data = copy_of("");
     pub fn append_new_line_after_current() {
-        // Stub: no-op until the buffer manipulation layer is complete.
+        STATE.with(|s| {
+            let st = s.borrow_mut();
+            if let Some(ref mut of) = st.openfile {
+                if let Some(cur) = of.current.clone() {
+                    let new = crate::nano::make_new_node(Some(&cur));
+                    cur.borrow_mut().next = Some(new.clone());
+                    of.current = Some(new);
+                }
+            }
+        });
     }
 
     /// Set filebot to current.
@@ -109,10 +121,25 @@ mod stubs {
         });
     }
 
-    /// Compute byte offset of edittop into the file (used to restore position).
+    /// Compute byte offset of edittop into the file (used to restore the
+    /// scroll position when the help text is re-wrapped or re-entered).
+    /// C (help.c): sums strlen(line->data) from filetop up to edittop.
     pub fn compute_edittop_byte_offset() -> usize {
-        // Stub: return 0 until the line-number / byte-offset infrastructure is done.
-        0
+        STATE.with(|s| {
+            let st = s.borrow();
+            let Some(ref of) = st.openfile else { return 0 };
+            let Some(ref edittop) = of.edittop else { return 0 };
+            let mut sum = 0usize;
+            let mut line = of.filetop.clone();
+            while let Some(l) = line {
+                if std::rc::Rc::ptr_eq(&l, edittop) {
+                    break;
+                }
+                sum += l.borrow().data.len();
+                line = l.borrow().next.clone();
+            }
+            sum
+        })
     }
 
     /// Return the line number of edittop.
