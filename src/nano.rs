@@ -1340,8 +1340,8 @@ pub fn inject(burst: &[u8]) {
     let count = data.len();
 
     let (datalen, lineno, current_x) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        let cur = of.current.as_ref().unwrap();
+        let of = s.openfile.as_ref().expect("an open buffer");
+        let cur = of.current.as_ref().expect("a current line");
         let b = cur.borrow();
         (b.data.len(), b.lineno, of.current_x)
     });
@@ -1350,7 +1350,7 @@ pub fn inject(burst: &[u8]) {
     #[cfg(not(feature = "tiny"))]
     {
         let need_new_undo = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
+            let of = s.openfile.as_ref().expect("an open buffer");
             of.last_action != UndoType::Add
                 || of.current_undo.is_null()
                 || unsafe { (*of.current_undo).tail_lineno != lineno as isize }
@@ -1363,8 +1363,8 @@ pub fn inject(burst: &[u8]) {
 
     // Insert the bytes into the current line.
     with_state_mut(|s| {
-        let of = s.openfile.as_mut().unwrap();
-        let cur = of.current.as_ref().unwrap().clone();
+        let of = s.openfile.as_mut().expect("an open buffer");
+        let cur = of.current.as_ref().expect("a current line").clone();
         let mut b = cur.borrow_mut();
         let insert_str = String::from_utf8_lossy(&data).into_owned();
         // Clamp current_x to a valid UTF-8 char boundary so insert_str never panics.
@@ -1387,7 +1387,7 @@ pub fn inject(burst: &[u8]) {
     });
 
     with_state_mut(|s| {
-        let of = s.openfile.as_mut().unwrap();
+        let of = s.openfile.as_mut().expect("an open buffer");
         of.current_x += count;
         // totsize is character count, but approximate with byte count.
         of.totsize += count;
@@ -1397,8 +1397,8 @@ pub fn inject(burst: &[u8]) {
 
     // If text was added to the magic line, create a new magic line.
     let at_filebot = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        let cur_lineno = of.current.as_ref().unwrap().borrow().lineno;
+        let of = s.openfile.as_ref().expect("an open buffer");
+        let cur_lineno = of.current.as_ref().expect("a current line").borrow().lineno;
         let bot_lineno = of.filebot.as_ref().unwrap().borrow().lineno;
         cur_lineno == bot_lineno && !ISSET!(NO_NEWLINES)
     });
@@ -1416,13 +1416,13 @@ pub fn inject(burst: &[u8]) {
 
     let placewewant = crate::utils::xplustabs();
     with_state_mut(|s| {
-        s.openfile.as_mut().unwrap().placewewant = placewewant;
+        s.openfile.as_mut().expect("an open buffer").placewewant = placewewant;
     });
 
     let refresh = with_state(|s| s.refresh_needed);
     if !refresh {
         let (current, current_x) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
+            let of = s.openfile.as_ref().expect("an open buffer");
             (of.current.clone(), of.current_x)
         });
         if let Some(cur) = current {
@@ -1783,7 +1783,7 @@ pub fn process_a_keystroke() {
     // Save cursor position before executing.
     #[cfg(not(feature = "tiny"))]
     let (was_current_lineno, was_x) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
+        let of = s.openfile.as_ref().expect("an open buffer");
         let lineno = of.current.as_ref().map(|c| c.borrow().lineno).unwrap_or(0);
         (lineno, of.current_x)
     });
@@ -1813,11 +1813,11 @@ pub fn process_a_keystroke() {
     #[cfg(not(feature = "tiny"))]
     {
         let (shift_held, softmark, mark_some) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
+            let of = s.openfile.as_ref().expect("an open buffer");
             (s.shift_held, of.softmark, of.mark.is_some())
         });
         let (cur_lineno, cur_x) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
+            let of = s.openfile.as_ref().expect("an open buffer");
             let ln = of.current.as_ref().map(|c| c.borrow().lineno).unwrap_or(0);
             (ln, of.current_x)
         });

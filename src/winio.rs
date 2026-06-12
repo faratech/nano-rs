@@ -3246,15 +3246,26 @@ pub fn current_is_below_screen() -> bool {
 
     #[cfg(not(feature = "tiny"))]
     if with_state(|s| s.flag_isset(SOFTWRAP)) {
-        // Simplified: just check lineno
-        let (cur_lineno, et_lineno, firstcol) = with_state(|s| {
+        let (edittop, firstcol, current) = with_state(|s| {
             let f = s.openfile.as_ref();
-            let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-            let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-            let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
-            (cl, et, fc)
+            (
+                f.and_then(|f| f.edittop.clone()),
+                f.map(|f| f.firstcolumn).unwrap_or(0),
+                f.and_then(|f| f.current.clone()),
+            )
         });
-        return cur_lineno >= et_lineno + editwinrows as isize - shim;
+        let (Some(mut line), Some(current)) = (edittop, current) else { return false };
+        let mut leftedge = firstcol;
+
+        // If current[current_x] is more than a screen's worth of lines after
+        // edittop at column firstcolumn, it's below the screen.
+        let exhausted = go_forward_chunks(editwinrows - 1 - shim, &mut line, &mut leftedge) == 0;
+        let line_lineno = line.borrow().lineno;
+        let cur_lineno = current.borrow().lineno;
+        return exhausted
+            && (line_lineno < cur_lineno
+                || (line_lineno == cur_lineno
+                    && leftedge < { let b = current.borrow(); leftedge_for(xplustabs(), &b.data) }));
     }
 
     let (cur_lineno, et_lineno) = with_state(|s| {
@@ -3263,7 +3274,7 @@ pub fn current_is_below_screen() -> bool {
         let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
         (cl, et)
     });
-    cur_lineno >= et_lineno + editwinrows as isize - shim
+    cur_lineno >= et_lineno + editwinrows as isize - shim as isize
 }
 
 /* C: bool current_is_offscreen(void) */

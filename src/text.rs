@@ -368,7 +368,7 @@ pub fn do_mark() {
     if !has_mark {
         // Set the mark at the current cursor position.
         let (cur, cur_x) = with_state(|s| {
-            let f = s.openfile.as_ref().unwrap();
+            let f = s.openfile.as_ref().expect("an open buffer");
             (f.current.clone(), f.current_x)
         });
         with_state_mut(|s| {
@@ -1644,8 +1644,8 @@ fn set_current_undo_to(ptr: *mut UndoStruct) {
 /* C: void do_enter(void) */
 pub fn do_enter() {
     let (current_line, current_x) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        (f.current.clone().unwrap(), f.current_x)
+        let f = s.openfile.as_ref().expect("an open buffer");
+        (f.current.clone().expect("a current line"), f.current_x)
     });
 
     let mut extra: usize = 0;
@@ -1827,8 +1827,8 @@ pub fn inject(buf: &str, buf_len: usize) {
     let insertion = if buf_len <= buf.len() { &buf[..buf_len] } else { buf };
 
     let (current_line, current_x) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        (f.current.clone().unwrap(), f.current_x)
+        let f = s.openfile.as_ref().expect("an open buffer");
+        (f.current.clone().expect("a current line"), f.current_x)
     });
 
     #[cfg(not(feature = "tiny"))]
@@ -1883,7 +1883,7 @@ pub fn inject(buf: &str, buf_len: usize) {
 
     // Handle magic last line.
     let (is_filebot, no_newlines) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
+        let f = s.openfile.as_ref().expect("an open buffer");
         let is_bot = f.filebot.as_ref().map(|b| b.as_ptr()) == f.current.as_ref().map(|c| c.as_ptr());
         (is_bot, s.flags[flag_index(NO_NEWLINES)] & flag_mask(NO_NEWLINES) != 0)
     });
@@ -1979,8 +1979,8 @@ pub fn discard_until(thisitem: *const UndoStruct) {
 #[cfg(not(feature = "tiny"))]
 pub fn add_undo(action: UndoType, message: Option<&str>) {
     let (thisline, current_x, totsize, current_undo_ptr) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        let ln = f.current.clone().unwrap();
+        let f = s.openfile.as_ref().expect("an open buffer");
+        let ln = f.current.clone().expect("a current line");
         (ln, f.current_x, f.totsize, f.current_undo)
     });
     let lineno = thisline.borrow().lineno;
@@ -2117,7 +2117,7 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
             }
             UndoType::Zap | UndoType::Cut => {
                 let (mark, mark_x, cut_from_cursor) = with_state(|s| {
-                    let f = s.openfile.as_ref().unwrap();
+                    let f = s.openfile.as_ref().expect("an open buffer");
                     (f.mark.clone(), f.mark_x, s.flags[flag_index(CUT_FROM_CURSOR)] & flag_mask(CUT_FROM_CURSOR) != 0)
                 });
 
@@ -2221,7 +2221,7 @@ fn store_undo_record_fields(action: UndoType, thisline: &LinePtr, current_x: usi
 #[cfg(not(feature = "tiny"))]
 pub fn update_multiline_undo(lineno: isize, indentation: &str) {
     with_state_mut(|s| {
-        let f = s.openfile.as_mut().unwrap();
+        let f = s.openfile.as_mut().expect("an open buffer");
         let u_ptr = f.current_undo;
         if u_ptr.is_null() { return; }
         let u = unsafe { &mut *u_ptr };
@@ -2251,8 +2251,8 @@ pub fn update_multiline_undo(lineno: isize, indentation: &str) {
 #[cfg(not(feature = "tiny"))]
 pub fn update_undo(action: UndoType) {
     let (current_line, current_x, totsize) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        (f.current.clone().unwrap(), f.current_x, f.totsize)
+        let f = s.openfile.as_ref().expect("an open buffer");
+        (f.current.clone().expect("a current line"), f.current_x, f.totsize)
     });
 
     unsafe {
@@ -2398,8 +2398,8 @@ pub fn update_undo(action: UndoType) {
 #[cfg(feature = "wrapping")]
 pub fn do_wrap() {
     let (line, current_x_val) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        (f.current.clone().unwrap(), f.current_x)
+        let f = s.openfile.as_ref().expect("an open buffer");
+        (f.current.clone().expect("a current line"), f.current_x)
     });
 
     let line_data = line.borrow().data.clone();
@@ -2568,7 +2568,7 @@ pub fn do_wrap() {
     #[cfg(not(feature = "tiny"))]
     {
         let (edittop, firstcolumn) = with_state(|s| {
-            let f = s.openfile.as_ref().unwrap();
+            let f = s.openfile.as_ref().expect("an open buffer");
             (f.edittop.clone(), f.firstcolumn)
         });
         if let Some(mut et) = edittop {
@@ -3093,8 +3093,14 @@ pub fn justify_text(whole_buffer: bool) {
             let (sl, sx, el, ex) = {
                 // Adjust region: recede over blanks at start, advance over blanks at end.
                 let (mut s_lineno, mut sx_v, mut e_lineno, mut ex_v) = get_region();
-                let sl_ptr = get_line_from_number(s_lineno as isize).unwrap();
-                let el_ptr = get_line_from_number(e_lineno as isize).unwrap();
+                let (Some(sl_ptr), Some(el_ptr)) = (
+                    get_line_from_number(s_lineno as isize),
+                    get_line_from_number(e_lineno as isize),
+                ) else {
+                    statusline(MessageType::Alert,
+                        "Internal error: region refers to a nonexistent line");
+                    return;
+                };
 
                 let sl_data = sl_ptr.borrow().data.clone();
                 let el_data = el_ptr.borrow().data.clone();
@@ -3113,9 +3119,7 @@ pub fn justify_text(whole_buffer: bool) {
                     ex_v = step_right(&el_data, ex_v);
                 }
 
-                let sl_final = get_line_from_number(s_lineno as isize).unwrap();
-                let el_final = get_line_from_number(e_lineno as isize).unwrap();
-                (sl_final, sx_v, el_final, ex_v)
+                (sl_ptr, sx_v, el_ptr, ex_v)
             };
 
             if sl.as_ptr() == el.as_ptr() && sx == ex {
@@ -3265,7 +3269,7 @@ pub fn justify_text(whole_buffer: bool) {
 
             // After backward-marked justification, swap mark and cursor.
             if marked_backward {
-                let bottom = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).unwrap());
+                let bottom = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
                 let bottom_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
                 let mark = with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.clone()).unwrap());
                 let mark_x = with_state(|s| s.openfile.as_ref().map(|f| f.mark_x).unwrap_or(0));
@@ -3342,25 +3346,33 @@ pub fn justify_text(whole_buffer: bool) {
     });
 }
 
-#[cfg(feature = "justify")]
-fn get_region_as_lines() -> (LinePtr, usize, LinePtr, usize) {
+/// Resolve the marked region to line pointers.  Returns None (after
+/// reporting on the status bar) when a lineno doesn't resolve — that
+/// would mean the mark/undo bookkeeping has become inconsistent, where
+/// C would dereference a stray pointer.
+fn get_region_as_lines() -> Option<(LinePtr, usize, LinePtr, usize)> {
     let (top_lineno, top_x, bot_lineno, bot_x) = get_region();
-    let tl = get_line_from_number(top_lineno as isize).unwrap();
-    let bl = get_line_from_number(bot_lineno as isize).unwrap();
-    (tl, top_x, bl, bot_x)
+    match (get_line_from_number(top_lineno as isize), get_line_from_number(bot_lineno as isize)) {
+        (Some(tl), Some(bl)) => Some((tl, top_x, bl, bot_x)),
+        _ => {
+            statusline(MessageType::Alert,
+                "Internal error: region refers to a nonexistent line");
+            None
+        }
+    }
 }
 
 #[cfg(feature = "justify")]
 fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr, usize, LinePtr, usize) {
     if whole_buffer {
-        let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).unwrap());
+        let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).expect("a top line"));
         with_state_mut(|s| {
             if let Some(ref mut f) = s.openfile {
                 f.current = Some(filetop.clone());
             }
         });
     } else {
-        let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).unwrap());
+        let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
         if inpar_fn(&cur) && !begpar_fn(&cur, 0) {
             let first = do_para_begin(cur.clone());
             with_state_mut(|s| {
@@ -3371,7 +3383,7 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
         }
     }
 
-    let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).unwrap());
+    let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
     let mut firstline = cur.clone();
 
     if !find_paragraph(&mut firstline, linecount) {
@@ -3397,7 +3409,7 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
         }
         with_state_mut(|s| s.refresh_needed = true);
         // Return dummy values; caller checks linecount.
-        let fl = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).unwrap());
+        let fl = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
         return (fl.clone(), 0, fl, 0);
     }
 
@@ -3412,7 +3424,7 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
     let start_x = 0usize;
 
     let (endline, end_x) = if whole_buffer {
-        let fb = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).unwrap());
+        let fb = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
         (fb, 0usize)
     } else {
         let mut el = startline.clone();
@@ -3797,7 +3809,7 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
 #[cfg(feature = "speller")]
 pub fn fix_spello(word: &str) -> bool {
     let was_edittop = with_state(|s| s.openfile.as_ref().and_then(|f| f.edittop.clone()));
-    let was_current = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).unwrap());
+    let was_current = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
     let was_firstcolumn = with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0));
     let was_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     let mut proceed = false;
@@ -3806,7 +3818,7 @@ pub fn fix_spello(word: &str) -> bool {
     {
         let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
         if in_mark {
-            let (top, top_x, bot, bot_x) = get_region_as_lines_coords();
+            let Some((top, top_x, bot, bot_x)) = get_region_as_lines_coords() else { return false };
             let right_side_up = mark_is_before_cursor();
             if right_side_up {
                 with_state_mut(|s| {
@@ -3901,7 +3913,7 @@ pub fn fix_spello(word: &str) -> bool {
         if in_mark {
             // Restore mark and cursor.
             let right_side_up = mark_is_before_cursor();
-            let (top, top_x, bot, bot_x) = get_region_as_lines_coords();
+            let Some((top, top_x, bot, bot_x)) = get_region_as_lines_coords() else { return proceed };
             if right_side_up {
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
@@ -3950,11 +3962,8 @@ pub fn fix_spello(word: &str) -> bool {
 
 /// Helper: get region as (top_line, top_x, bot_line, bot_x).
 #[cfg(feature = "speller")]
-fn get_region_as_lines_coords() -> (LinePtr, usize, LinePtr, usize) {
-    let (top_lineno, top_x, bot_lineno, bot_x) = get_region();
-    let tl = get_line_from_number(top_lineno as isize).unwrap();
-    let bl = get_line_from_number(bot_lineno as isize).unwrap();
-    (tl, top_x, bl, bot_x)
+fn get_region_as_lines_coords() -> Option<(LinePtr, usize, LinePtr, usize)> {
+    get_region_as_lines()
 }
 
 /* C: void spell_check(const char *tempfile_name) */
@@ -3966,19 +3975,28 @@ pub fn spell_check(tempfile_name: &str) {
     statusbar(tr!("Invoking spell checker..."));
 
     // Run: cat tempfile | hunspell -l | sort -f | uniq
-    let hunspell_output = Command::new("hunspell")
-        .arg("-l")
-        .stdin(Stdio::from(std::fs::File::open(tempfile_name).unwrap()))
-        .output();
+    // (C reports tempfile/pipe failures via statusline ALERT and aborts.)
+    let hunspell_output = match std::fs::File::open(tempfile_name) {
+        Ok(f) => Command::new("hunspell").arg("-l").stdin(Stdio::from(f)).output(),
+        Err(e) => {
+            statusline(MessageType::Alert, &format!(tr!("Error invoking \"hunspell\": {}"), e));
+            return;
+        }
+    };
 
     let spell_output = match hunspell_output {
         Ok(o) if o.status.success() || o.status.code().unwrap_or(-1) <= 1 => o.stdout,
         _ => {
-            // Fall back to 'spell'.
-            match Command::new("spell")
-                .stdin(Stdio::from(std::fs::File::open(tempfile_name).unwrap_or_else(|_| unreachable!())))
-                .output()
-            {
+            // Fall back to 'spell'.  The tempfile can legitimately have
+            // vanished between the two opens, so check again.
+            let infile = match std::fs::File::open(tempfile_name) {
+                Ok(f) => f,
+                Err(e) => {
+                    statusline(MessageType::Alert, &format!(tr!("Error invoking \"spell\": {}"), e));
+                    return;
+                }
+            };
+            match Command::new("spell").stdin(Stdio::from(infile)).output() {
                 Ok(o) => o.stdout,
                 Err(e) => {
                     statusline(MessageType::Alert, &format!(tr!("Error invoking \"spell\": {}"), e));
@@ -4458,16 +4476,22 @@ pub fn do_formatter() {
 #[cfg(not(feature = "tiny"))]
 pub fn count_lines_words_and_characters() {
     let (was_current, was_x) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
-        (f.current.clone().unwrap(), f.current_x)
+        let f = s.openfile.as_ref().expect("an open buffer");
+        (f.current.clone().expect("a current line"), f.current_x)
     });
 
     let (topline, top_x, botline, bot_x, chars) = {
         let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
         if in_mark {
             let (top_lineno, tx, bot_lineno, bx) = get_region();
-            let tl = get_line_from_number(top_lineno as isize).unwrap();
-            let bl = get_line_from_number(bot_lineno as isize).unwrap();
+            let (Some(tl), Some(bl)) = (
+                get_line_from_number(top_lineno as isize),
+                get_line_from_number(bot_lineno as isize),
+            ) else {
+                statusline(MessageType::Alert,
+                    "Internal error: region refers to a nonexistent line");
+                return;
+            };
 
             let mut char_count: usize = 0;
             if tl.as_ptr() != bl.as_ptr() {
@@ -4492,8 +4516,8 @@ pub fn count_lines_words_and_characters() {
 
             (tl, tx, bl, bx, char_count)
         } else {
-            let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).unwrap());
-            let filebot = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).unwrap());
+            let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).expect("a top line"));
+            let filebot = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
             let bot_x = filebot.borrow().data.len();
             let total = with_state(|s| s.openfile.as_ref().map(|f| f.totsize).unwrap_or(0));
             (filetop, 0, filebot, bot_x, total)
@@ -4523,7 +4547,7 @@ pub fn count_lines_words_and_characters() {
     let mut words: usize = 0;
     loop {
         let (cur_lineno, cur_x) = with_state(|s| {
-            let f = s.openfile.as_ref().unwrap();
+            let f = s.openfile.as_ref().expect("an open buffer");
             let lineno = f.current.as_ref().map(|c| c.borrow().lineno).unwrap_or(0);
             (lineno, f.current_x)
         });
@@ -4666,7 +4690,7 @@ pub fn complete_a_word() {
 
     // Find word fragment before cursor.
     let (cur_data, current_x) = with_state(|s| {
-        let f = s.openfile.as_ref().unwrap();
+        let f = s.openfile.as_ref().expect("an open buffer");
         let data = f.current.as_ref().map(|c| c.borrow().data.clone()).unwrap_or_default();
         (data, f.current_x)
     });

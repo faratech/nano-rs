@@ -438,9 +438,11 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
                     + breadth(&pidstring);
                 let room = if COLS() > total_fixed + 7 { COLS() - total_fixed + 7 } else { 4 };
                 let postedname = crop_to_fit(filename, room);
-                let promptstr = format!("{}", question
-                    .replace("%s", &postedname).replacen("%s", &lockuser, 1)
-                    .replacen("%s", &lockprog, 1).replacen("%s", &pidstring, 1));
+                let promptstr = question
+                    .replacen("%s", &postedname, 1)
+                    .replacen("%s", &lockuser, 1)
+                    .replacen("%s", &lockprog, 1)
+                    .replacen("%s", &pidstring, 1);
 
                 let choice = ask_user(YESORNO, &promptstr);
 

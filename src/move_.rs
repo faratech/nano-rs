@@ -7,37 +7,9 @@
 // go_forward_chunks, leftedge_for, get_softwrap_breakpoint, chunk_for,
 // extra_chunks_in, actual_last_column, edit_redraw, edit_scroll,
 // adjust_viewport, update_line, line_needs_update, draw_all_subwindows)
-// live in winio.c in the C source.  They are STUBBED locally here as private
-// functions with simplified logic.
-//
-// WARNING: In Rust, these local stubs *permanently shadow* any future
-// crate::winio::X with the same name because calls in this file are resolved
-// at compile time against the local definition.  When winio.rs is fully ported,
-// every stub below MUST be deleted from this file, and each call site updated
-// to use the qualified path `crate::winio::X(...)`.  Until then, the stubs
-// provide correct types so the file compiles, but the windo logic (soft-wrap
-// chunk handling, viewport adjustment, etc.) is intentionally simplified.
-//
-// Similarly, indent_length / begpar / inpar live in text.c and are stubbed here.
-// When text.rs is fully ported they must also be removed and calls qualified.
-// white_string lives in chars.c and is already ported to crate::chars::white_string.
-//
-// Task-spec notes:
-//   - get_column_x is listed in the port spec but is NOT in move.c; it lives in
-//     winio.c. It is intentionally absent from this file.
-//   - actual_last_column: the C signature is (leftedge: usize, column: usize) ->
-//     usize (from winio.c). The port spec lists a different signature; the correct
-//     C signature is used here. It is stubbed locally (see the shadowing warning
-//     above).
-//
-// Integration checklist (NOT done here):
-//   - global.rs lines ~997–1034 have empty stubs for do_page_up, do_up, etc. that
-//     shadow this module's implementations; shortcut_init wires those, not move_::.
-//     The stubs must be replaced with `crate::move_::X` calls for this port to
-//     take effect.
-//   - global.rs stubs do_scroll_up/do_scroll_down as `#[cfg(not(feature="tiny"))]`
-//     but this file gates them `#[cfg(any(not(feature="tiny"), feature="help"))]`
-//     per move.c:615. The global.rs stub gate must be widened to match.
+// live in winio.c in the C source.  The private functions below forward
+// to the real implementations in crate::winio; indent_length / begpar /
+// inpar likewise forward to crate::text.
 
 use crate::definitions::*;
 use crate::global::{STATE, with_state, with_state_mut};
@@ -172,25 +144,25 @@ fn statusline(importance: MessageType, msg: &str) {
 /// C: size_t indent_length(const char *line)
 /// Return the length of the indentation at the start of `line`.
 #[cfg(any(not(feature = "tiny"), feature = "justify"))]
+#[inline]
 fn indent_length(line: &str) -> usize {
-    // Stub — real implementation in text.rs.
-    line.bytes().take_while(|&b| b == b' ' || b == b'\t').count()
+    crate::text::indent_length(line)
 }
 
 /// C: bool begpar(const linestruct *const line, int depth)
 /// Return whether `line` begins a paragraph.
 #[cfg(feature = "justify")]
+#[inline]
 fn begpar(line: &LinePtr, depth: i32) -> bool {
-    // Stub — real implementation in text.rs.
-    false
+    crate::text::begpar_fn(line, depth)
 }
 
 /// C: bool inpar(const linestruct *const line)
 /// Return whether `line` is inside a paragraph.
 #[cfg(feature = "justify")]
+#[inline]
 fn inpar(line: &LinePtr) -> bool {
-    // Stub — real implementation in text.rs.
-    false
+    crate::text::inpar_fn(line)
 }
 
 // ── Helpers from utils.rs / chars.rs ─────────────────────────────────────────
@@ -612,7 +584,7 @@ pub fn to_para_begin() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
     if let Some(wc) = was_current.clone() {
         let new_line = do_para_begin(with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.current.clone()).unwrap()
+            s.openfile.as_ref().and_then(|of| of.current.clone()).expect("a current line")
         }));
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
@@ -633,7 +605,7 @@ pub fn to_para_end() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     let new_line = do_para_end(with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.current.clone()).unwrap()
+        s.openfile.as_ref().and_then(|of| of.current.clone()).expect("a current line")
     }));
 
     // Step beyond the last line of the paragraph, if possible;
@@ -823,8 +795,8 @@ pub fn do_prev_word() {
 
         // Step back one character.
         let (data, cur_x) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
-            (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
         });
         let new_x = step_left(&data, cur_x);
         with_state_mut(|s| {
@@ -834,8 +806,8 @@ pub fn do_prev_word() {
         });
 
         let (data2, cur_x2) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
-            (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
         });
 
         if is_word_char(&data2[cur_x2..], punctuation_as_letters) {
@@ -861,8 +833,8 @@ pub fn do_prev_word() {
     if step_forward {
         // Move one character forward again to sit on the start of the word.
         let (data, cur_x) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
-            (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
         });
         let new_x = step_right(&data, cur_x);
         with_state_mut(|s| {
@@ -879,8 +851,8 @@ pub fn do_prev_word() {
 pub fn do_next_word(after_ends: bool) -> bool {
     let punctuation_as_letters = ISSET!(WORD_BOUNDS);
     let (data0, cur_x0) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+        let of = s.openfile.as_ref().expect("an open buffer");
+        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
     });
     let started_on_word = is_word_char(&data0[cur_x0..], punctuation_as_letters);
     let mut seen_space = !started_on_word;
@@ -890,8 +862,8 @@ pub fn do_next_word(after_ends: bool) -> bool {
     // Move forward until we reach the start of a word.
     loop {
         let (data, cur_x) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
-            (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
         });
 
         // If at the end of a line, move to the beginning of the next one.
@@ -929,8 +901,8 @@ pub fn do_next_word(after_ends: bool) -> bool {
         }
 
         let (data2, cur_x2) = with_state(|s| {
-            let of = s.openfile.as_ref().unwrap();
-            (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
         });
 
         #[cfg(not(feature = "tiny"))]
@@ -1020,8 +992,8 @@ pub fn do_home() {
 
         if ISSET!(SMART_HOME) {
             let (data, cur_x) = with_state(|s| {
-                let of = s.openfile.as_ref().unwrap();
-                (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+                let of = s.openfile.as_ref().expect("an open buffer");
+                (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
             });
             let indent_x = indent_length(&data);
 
@@ -1430,8 +1402,8 @@ pub fn do_right() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     let (data, cur_x) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+        let of = s.openfile.as_ref().expect("an open buffer");
+        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
     });
 
     // If there's a character at the current position, step over it.
@@ -1512,8 +1484,8 @@ pub fn do_scroll_left() {
     ));
 
     let (data, cur_x) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+        let of = s.openfile.as_ref().expect("an open buffer");
+        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
     });
 
     let frame_x = actual_x(&data, brink2 + editwincols.saturating_sub(CUSHION + 1));
@@ -1554,7 +1526,7 @@ pub fn do_scroll_right() {
     });
 
     let (brink, edittop_lineno) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
+        let of = s.openfile.as_ref().expect("an open buffer");
         (
             of.brink,
             of.edittop.as_ref().map(|lp| lp.borrow().lineno).unwrap_or(0),
@@ -1638,8 +1610,8 @@ pub fn do_scroll_right() {
     });
 
     let (data, cur_x) = with_state(|s| {
-        let of = s.openfile.as_ref().unwrap();
-        (of.current.as_ref().unwrap().borrow().data.clone(), of.current_x)
+        let of = s.openfile.as_ref().expect("an open buffer");
+        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
     });
 
     let frame_x = actual_x(&data, brink + CUSHION);

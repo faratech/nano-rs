@@ -183,37 +183,11 @@ fn mbstrchr<'a>(s: &'a str, needle_start: &str) -> Option<&'a str> {
     Some(&s[idx..])
 }
 
-fn mbstrpbrk<'a>(s: &'a str, chars: &str) -> Option<&'a str> {
-    // C: mbstrpbrk(s, chars) — chars.c
-    // Find first occurrence of any char from `chars` in `s`.
-    for (i, c) in s.char_indices() {
-        if chars.contains(c) {
-            return Some(&s[i..]);
-        }
-    }
-    None
-}
-
-fn mbrevstrpbrk<'a>(data: &'a str, chars: &str, pointer: &str) -> Option<&'a str> {
-    // C: mbrevstrpbrk(data, chars, pointer) — chars.c
-    // Search backward from pointer in data for any char in chars.
-    // pointer points inside data.
-    let ptr_offset = pointer.as_ptr() as usize - data.as_ptr() as usize;
-    let prefix = &data[..ptr_offset];
-    // Iterate characters in prefix in reverse.
-    let mut last_found: Option<usize> = None;
-    for (i, c) in prefix.char_indices() {
-        if chars.contains(c) {
-            last_found = Some(i);
-        }
-    }
-    last_found.map(|i| &data[i..])
-}
-
+/// C: bool is_separate_word(size_t position, size_t length, const char *text) — chars.c.
 #[cfg(feature = "speller")]
-fn is_separate_word(_x: usize, _len: usize, _data: &str) -> bool {
-    // C: is_separate_word() — chars.c
-    false
+#[inline]
+fn is_separate_word(position: usize, length: usize, text: &str) -> bool {
+    crate::utils::is_separate_word(position, length, text)
 }
 
 #[cfg(feature = "histories")]
@@ -241,27 +215,6 @@ fn mark_is_before_cursor() -> bool {
 }
 
 #[cfg(not(feature = "tiny"))]
-fn get_region(
-    top: &mut Option<LinePtr>, top_x: &mut usize,
-    bot: &mut Option<LinePtr>, bot_x: &mut usize,
-) {
-    // C: get_region() — search.c / cut.c
-    with_state(|s| {
-        let (tln, tx, bln, bx) = s.get_region_coords();
-        if let Some(ref of) = s.openfile {
-            // Find the lines by number — simplified.
-            *top_x = tx;
-            *bot_x = bx;
-            // We'd need to walk the list; for now we leave the pointers as-is.
-        }
-    });
-}
-
-fn get_input(_win: Option<()>) -> i32 {
-    // C: get_input(win) — winio.c
-    -1 // ERR
-}
-
 // ---------------------------------------------------------------------------
 // strstrwrapper — search for needle in haystack starting from pos
 // ---------------------------------------------------------------------------
@@ -1414,7 +1367,12 @@ pub fn goto_line_posx(linenumber: isize, pos_x: usize) {
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             of.current_x = pos_x;
-            of.placewewant = pos_x; // simplified — should call xplustabs
+        }
+    });
+    let pww = crate::utils::xplustabs();
+    with_state_mut(|s| {
+        if let Some(ref mut of) = s.openfile {
+            of.placewewant = pww;
         }
         s.refresh_needed = true;
     });
@@ -1675,90 +1633,77 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
 /* C: bool find_a_bracket(bool reverse, const char *bracket_pair) */
 #[cfg(not(feature = "tiny"))]
 pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
-    let current_lp: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
+    let Some(mut line) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else {
+        return false;
+    };
     let current_x: usize = with_state(|s| {
         s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0)
     });
 
-    let mut line = current_lp;
+    let found_x: usize;
 
     if reverse {
         // First step away from the current bracket.
-        let pointer_offset: usize;
+        let mut pointer_offset: usize;
         if current_x == 0 {
-            // Move to previous line's end.
-            let prev = line.as_ref().and_then(|l| {
-                l.borrow().prev.as_ref().and_then(|w| w.upgrade())
-            });
-            if prev.is_none() {
-                return false;
+            let prev = { let b = line.borrow(); b.prev.as_ref().and_then(|w| w.upgrade()) };
+            match prev {
+                None => return false,
+                Some(p) => { line = p; }
             }
-            line = prev;
-            pointer_offset = line.as_ref().map(|l| l.borrow().data.len()).unwrap_or(0);
+            pointer_offset = line.borrow().data.len();
         } else {
-            let data = line.as_ref().map(|l| l.borrow().data.clone()).unwrap_or_default();
-            pointer_offset = step_left(&data, current_x);
+            pointer_offset = { let b = line.borrow(); step_left(&b.data, current_x) };
         }
 
-        // Seek for any of the two brackets.
+        // Now seek for any of the two brackets we are interested in.
         loop {
-            let data = line.as_ref().map(|l| l.borrow().data.clone()).unwrap_or_default();
-            let pointer_str = &data[..pointer_offset.min(data.len())];
-            if let Some(found) = mbrevstrpbrk(&data, bracket_pair, pointer_str) {
-                let found_x = found.as_ptr() as usize - data.as_ptr() as usize;
-                with_state_mut(|s| {
-                    if let Some(ref mut of) = s.openfile {
-                        of.current = line.clone();
-                        of.current_x = found_x;
-                    }
-                });
-                return true;
+            let hit = {
+                let b = line.borrow();
+                crate::chars::mbrevstrpbrk(&b.data, bracket_pair, pointer_offset)
+            };
+            if let Some(x) = hit {
+                found_x = x;
+                break;
             }
-
-            let prev = line.as_ref().and_then(|l| {
-                l.borrow().prev.as_ref().and_then(|w| w.upgrade())
-            });
-            if prev.is_none() {
-                return false;
+            let prev = { let b = line.borrow(); b.prev.as_ref().and_then(|w| w.upgrade()) };
+            match prev {
+                None => return false,
+                Some(p) => { line = p; }
             }
-            line = prev;
-            // pointer is now at end of this new line.
-            // (we'll re-compute in the next iteration from data.len())
-            break; // Simplified — in full implementation we'd loop properly.
+            pointer_offset = line.borrow().data.len();
         }
-        false
     } else {
         // Forward search.
-        let data = line.as_ref().map(|l| l.borrow().data.clone()).unwrap_or_default();
-        let start = step_right(&data, current_x);
-        let pointer_str = &data[start.min(data.len())..];
-
-        let mut search_from_offset = start;
+        let mut pointer_offset = { let b = line.borrow(); step_right(&b.data, current_x) };
 
         loop {
-            let data = line.as_ref().map(|l| l.borrow().data.clone()).unwrap_or_default();
-            let search_slice = &data[search_from_offset.min(data.len())..];
-            if let Some(found) = mbstrpbrk(search_slice, bracket_pair) {
-                let found_x = (found.as_ptr() as usize - data.as_ptr() as usize);
-                with_state_mut(|s| {
-                    if let Some(ref mut of) = s.openfile {
-                        of.current = line.clone();
-                        of.current_x = found_x;
-                    }
-                });
-                return true;
+            let hit = {
+                let b = line.borrow();
+                let from = pointer_offset.min(b.data.len());
+                crate::chars::mbstrpbrk(&b.data[from..], bracket_pair).map(|x| from + x)
+            };
+            if let Some(x) = hit {
+                found_x = x;
+                break;
             }
-
-            let next = line.as_ref().and_then(|l| l.borrow().next.clone());
-            if next.is_none() {
-                return false;
+            let next = line.borrow().next.clone();
+            match next {
+                None => return false,
+                Some(n) => { line = n; }
             }
-            line = next;
-            search_from_offset = 0;
+            pointer_offset = 0;
         }
     }
+
+    // Set the current position to the found bracket.
+    with_state_mut(|s| {
+        if let Some(ref mut of) = s.openfile {
+            of.current = Some(line.clone());
+            of.current_x = found_x;
+        }
+    });
+    true
 }
 
 // ---------------------------------------------------------------------------
