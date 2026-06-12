@@ -417,6 +417,43 @@ pub fn emergency_save(filename: &str) {
 // ---------------------------------------------------------------------------
 // die — restore terminal state and save any modified buffers, then exit
 // ---------------------------------------------------------------------------
+/// Delete the lock files of all open buffers and emergency-save every
+/// modified one (C: the buffer loop at the end of die()).
+fn save_all_modified_buffers() {
+    // Collect what to do first, so emergency_save (which re-enters STATE
+    // via write_file) doesn't run inside a with_state closure.
+    let mut work: Vec<(Option<String>, bool, String)> = with_state(|s| {
+        let restricted = (s.flags[crate::global::flag_index(RESTRICTED)]
+            & crate::global::flag_mask(RESTRICTED)) != 0;
+        let collect = |of: &crate::definitions::OpenFileStruct| {
+            #[cfg(not(feature = "tiny"))]
+            let lock = of.lock_filename.clone();
+            #[cfg(feature = "tiny")]
+            let lock: Option<String> = None;
+            (lock, of.modified && !restricted, of.filename.clone())
+        };
+        let mut v = Vec::new();
+        if let Some(ref of) = s.openfile {
+            v.push(collect(of));
+        }
+        v
+    });
+
+    for (lock, save, _) in &work {
+        if let Some(lf) = lock {
+            files::delete_lockfile(lf);
+        }
+        let _ = save;
+    }
+    // NOTE: emergency_save writes the *current* buffer; until the buffer
+    // ring lands, only the current buffer can be saved anyway.
+    for (_, save, filename) in work.drain(..) {
+        if save {
+            emergency_save(&filename);
+        }
+    }
+}
+
 /* C: void die(const char *msg, ...) */
 pub fn die(msg: &str) -> ! {
     static STABS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -431,22 +468,7 @@ pub fn die(msg: &str) -> ! {
 
     eprintln!("{}", msg);
 
-    // Try to save modified buffers.
-    // In a full port with circular buffer list we'd iterate all; here we
-    // handle the current buffer only.
-    with_state(|s| {
-        if let Some(ref of) = s.openfile {
-            #[cfg(not(feature = "tiny"))]
-            if let Some(ref lf) = of.lock_filename {
-                files::delete_lockfile(lf);
-            }
-            let restricted = (s.flags[crate::global::flag_index(RESTRICTED)]
-                & crate::global::flag_mask(RESTRICTED)) != 0;
-            if of.modified && !restricted {
-                emergency_save(&of.filename);
-            }
-        }
-    });
+    save_all_modified_buffers();
 
     process::exit(1);
 }
@@ -818,20 +840,19 @@ pub fn scoop_stdin() -> bool {
 /* C: void handle_hupterm(int signal) */
 #[cfg(unix)]
 extern "C" fn handle_hupterm(_signal: libc::c_int) {
-    // Cannot call die() safely from a signal handler (thread_local issue).
-    // Store a flag; main loop will call die() on next iteration.
-    // For now, restore terminal and exit immediately.
-    // (A production port would use a flag + main-loop check.)
-    let _ = winio::terminal_exit();
-    process::exit(1);
+    // Like C, call die() straight from the handler so modified buffers are
+    // emergency-saved to <name>.save.  The handler runs on the interrupted
+    // (single) thread, so the thread-local STATE is reachable; this carries
+    // the same async-signal re-entrancy hazard C's die-from-handler accepts,
+    // and die()'s recursion guard bails out if state proves unusable.
+    die(crate::tr!("Received SIGHUP or SIGTERM\n"));
 }
 
 /* C: void handle_crash(int signal) */
 #[cfg(all(unix, not(feature = "tiny"), not(debug_assertions)))]
 extern "C" fn handle_crash(signal: libc::c_int) {
-    let _ = winio::terminal_exit();
-    eprintln!("Sorry! Nano crashed!  Code: {}.  Please report a bug.", signal);
-    process::exit(1);
+    // Same rationale as handle_hupterm: match C and try to save work.
+    die(&format!("Sorry! Nano crashed!  Code: {}.  Please report a bug.\n", signal));
 }
 
 /* C: void suspend_nano(int signal) */
@@ -922,6 +943,8 @@ pub fn set_up_signal_handlers() {
         // Trap SIGINT and SIGQUIT (ignore them).
         libc::signal(libc::SIGINT,  libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+        // Don't die when a pipe we write to (e.g. the spell checker) closes.
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         // SIGHUP and SIGTERM.
         libc::signal(libc::SIGHUP,  handle_hupterm as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, handle_hupterm as *const () as libc::sighandler_t);
