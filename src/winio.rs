@@ -3440,12 +3440,12 @@ pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
 /* C: void draw_row(int row, const char *converted, linestruct *line, size_t from_col) */
 pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
 {
-    let node = line.borrow();
-    let line_lineno = node.lineno;
-    let line_data: &str = &node.data;
-    #[cfg(feature = "color")]
-    let multidata: &[i16] = &node.multidata;
-    let has_anchor = node.has_anchor;
+    // Keep node borrows scoped: apply_syntax_highlighting below needs to
+    // borrow_mut the node to update its multidata.
+    let (line_lineno, has_anchor) = {
+        let node = line.borrow();
+        (node.lineno, node.has_anchor)
+    };
 
     let (midwin_x, midwin_y, margin, cols, _sidebar, editwincols) = with_state(|s| {
         (s.midwin.x, s.midwin.y, s.margin, s.midwin.cols as usize, s.sidebar, s.editwincols as usize)
@@ -3524,7 +3524,7 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
 
     // Syntax highlighting
     #[cfg(feature = "color")]
-    apply_syntax_highlighting(row, converted, line_data, multidata, from_col, abs_y, midwin_x, margin);
+    apply_syntax_highlighting(row, converted, line, from_col, abs_y, midwin_x, margin);
 
     // Guide stripe
     #[cfg(not(feature = "tiny"))]
@@ -3556,16 +3556,19 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
 
     // Mark highlighting
     #[cfg(not(feature = "tiny"))]
-    apply_mark_highlighting(row, converted, line_lineno, line_data, from_col, abs_y, midwin_x, margin);
+    {
+        let node = line.borrow();
+        apply_mark_highlighting(row, converted, line_lineno, &node.data, from_col, abs_y, midwin_x, margin);
+    }
 }
 
 /// Apply syntax color rules to a drawn row. (ENABLE_COLOR)
+/* C: the syntax-painting part of edit_draw() — winio.c. */
 #[cfg(feature = "color")]
 fn apply_syntax_highlighting(
     _row: i32,
     converted: &str,
-    line_data: &str,
-    multidata: &[i16],
+    line: &LinePtr,
     from_col: usize,
     abs_y: u16,
     midwin_x: u16,
@@ -3579,91 +3582,179 @@ fn apply_syntax_highlighting(
 
     let no_syntax = with_state(|s| s.flag_isset(NO_SYNTAX));
     if no_syntax { return; }
+    let Some(syntax) = syntax else { return };
 
     let from_x = tl_get!(FROM_X);
     let till_x = tl_get!(TILL_X);
+    const PAINT_LIMIT: usize = 2000;
 
-    if let Some(syntax) = syntax {
-        // Iterate through color rules (pointer-chained in C)
-        // In Rust port we access via the SyntaxType's color list
-        // varnish is Option<&ColorType>
-        let mut varnish: Option<&ColorType> = syntax.color.as_deref();
-        while let Some(v) = varnish {
-            let attrs = v.attributes;
-            let stdout = out();
+    // Paint `piece` (a slice of `converted`) at the given display column,
+    // in the rule's colors and attributes.
+    let paint = |v: &ColorType, start_col: usize, piece: &str| {
+        if piece.is_empty() {
+            return;
+        }
+        set_color(v);
+        let stdout = out();
+        let _ = queue!(stdout,
+            MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y),
+            Print(piece),
+        );
+        reset_color();
+    };
 
-            if v.end.is_none() {
-                // Single-line rule
-                let regex = match &v.start {
-                    Some(r) => r,
-                    None => { varnish = v.next.as_deref(); continue; }
-                };
+    let priorline = line.borrow().prev.as_ref().and_then(|w| w.upgrade());
 
+    let mut varnish: Option<&ColorType> = syntax.color.as_deref();
+    while let Some(v) = varnish {
+        // First case: varnish is a single-line expression.
+        if v.end.is_none() {
+            if let Some(regex) = &v.start {
+                let node = line.borrow();
+                let line_data: &str = &node.data;
                 let mut search_from = from_x;
-                const PAINT_LIMIT: usize = 2000;
 
                 while search_from < PAINT_LIMIT && search_from < till_x {
-                    let search_in = &line_data[search_from..];
-                    let _flags = if search_from == 0 { 0 } else { 1 }; // REG_NOTBOL approx
-                    match regex.find(search_in) {
-                        None => break,
-                        Some(m) => {
-                            let match_so = search_from + m.start();
-                            let match_eo = search_from + m.end();
-                            if match_so >= till_x { break; }
-                            if match_so == match_eo {
-                                if search_from >= line_data.len() { break; }
-                                search_from = step_right(line_data, search_from);
-                                continue;
-                            }
-                            if match_eo <= from_x {
-                                search_from = match_eo;
-                                continue;
-                            }
+                    // find_at gives REG_NOTBOL semantics: ^ only matches
+                    // at the real start of the line.
+                    let Some(m) = regex.find_at(line_data, search_from) else { break };
+                    let match_so = m.start();
+                    let match_eo = m.end();
 
-                            let start_col = if match_so > from_x {
-                                wideness(line_data, match_so).saturating_sub(from_col)
-                            } else { 0 };
+                    if match_so >= till_x { break; }
+                    if match_so == match_eo {
+                        if match_eo >= line_data.len() { break; }
+                        search_from = step_right(line_data, match_eo);
+                        continue;
+                    }
+                    if match_eo <= from_x {
+                        search_from = match_eo;
+                        continue;
+                    }
 
-                            let thetext_x = actual_x(converted, start_col);
-                            let end_col = wideness(line_data, match_eo).saturating_sub(from_col);
-                            let paintlen = actual_x(&converted[thetext_x..], end_col.saturating_sub(start_col));
+                    let start_col = if match_so > from_x {
+                        wideness(line_data, match_so).saturating_sub(from_col)
+                    } else { 0 };
 
-                            if attrs & A_REVERSE != 0 {
-                                let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
-                            }
-                            let _ = queue!(stdout,
-                                MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y),
-                                Print(&converted[thetext_x..thetext_x + paintlen]),
-                            );
-                            reset_color();
+                    let thetext_x = actual_x(converted, start_col);
+                    let end_col = wideness(line_data, match_eo).saturating_sub(from_col);
+                    let paintlen = actual_x(&converted[thetext_x..], end_col.saturating_sub(start_col));
 
-                            search_from = match_eo;
-                        }
+                    paint(v, start_col, &converted[thetext_x..thetext_x + paintlen]);
+
+                    search_from = match_eo;
+                }
+            }
+            varnish = v.next.as_deref();
+            continue;
+        }
+
+        // Second case: varnish is a multiline expression.
+        let (Some(start_re), Some(end_re)) = (&v.start, &v.end) else {
+            varnish = v.next.as_deref();
+            continue;
+        };
+        let id = v.id as usize;
+
+        // Assume nothing gets painted until proven otherwise below;
+        // collect the new multidata state and write it once afterwards
+        // (the node must not be borrowed when we borrow_mut it).
+        let new_state: i16 = {
+            let node = line.borrow();
+            let line_data: &str = &node.data;
+            let mut state: i16 = NOTHING;
+            let mut index: usize = 0;
+            let mut painted_whole = false;
+
+            let prior_state: i16 = match priorline {
+                Some(ref p) => {
+                    let pb = p.borrow();
+                    if pb.multidata.is_empty() {
+                        statusline(MessageType::Alert,
+                            "Missing multidata -- please report a bug");
+                        NOTHING
+                    } else if id < pb.multidata.len() {
+                        pb.multidata[id]
+                    } else {
+                        NOTHING
                     }
                 }
-            } else {
-                // Multiline rule — simplified, just check WHOLELINE/STARTSHERE
-                let id = v.id as usize;
-                if id < multidata.len() {
-                    match multidata[id] {
-                        WHOLELINE => {
-                            if attrs & A_REVERSE != 0 {
-                                let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
-                            }
-                            let _ = queue!(stdout, MoveTo(midwin_x + margin as u16, abs_y), Print(converted));
-                            reset_color();
+                None => NOTHING,
+            };
+
+            // If there is an unterminated start match before the current
+            // line, we need to look for an end match first.
+            if prior_state == WHOLELINE || prior_state == STARTSHERE {
+                match end_re.find(line_data) {
+                    None => {
+                        // No end on this line: paint the whole line.
+                        paint(v, 0, converted);
+                        state = WHOLELINE;
+                        painted_whole = true;
+                    }
+                    Some(em) => {
+                        // Only if it is visible, paint the part to be coloured.
+                        if em.end() > from_x {
+                            let paintlen = actual_x(converted,
+                                wideness(line_data, em.end()).saturating_sub(from_col));
+                            paint(v, 0, &converted[..paintlen]);
                         }
-                        ENDSHERE | STARTSHERE | JUSTONTHIS => {
-                            // Partial line coloring — simplified
-                        }
-                        _ => {}
+                        state = ENDSHERE;
+                        index = em.end();
                     }
                 }
             }
 
-            varnish = v.next.as_deref();
+            // Now look for start matches on this line.
+            while !painted_whole && index < PAINT_LIMIT {
+                let Some(sm) = start_re.find_at(line_data, index) else { break };
+                let (start_so, start_eo) = (sm.start(), sm.end());
+
+                let start_col = if start_so > from_x {
+                    wideness(line_data, start_so).saturating_sub(from_col)
+                } else { 0 };
+                let thetext_x = actual_x(converted, start_col);
+
+                match end_re.find_at(line_data, start_eo) {
+                    Some(em) => {
+                        let (end_so, end_eo) = (em.start(), em.end());
+                        // Only paint the match when it is visible on screen
+                        // and more than zero characters long.
+                        if end_eo > from_x && end_eo > start_so {
+                            let paintlen = actual_x(&converted[thetext_x..],
+                                wideness(line_data, end_eo)
+                                    .saturating_sub(from_col)
+                                    .saturating_sub(start_col));
+                            paint(v, start_col, &converted[thetext_x..thetext_x + paintlen]);
+                            state = JUSTONTHIS;
+                        }
+                        index = end_eo;
+                        // If both start and end match are anchors, advance.
+                        if start_so == start_eo && end_so == end_eo {
+                            if index >= line_data.len() { break; }
+                            index = step_right(line_data, index);
+                        }
+                    }
+                    None => {
+                        // Paint the rest of the line, and we're done.
+                        paint(v, start_col, &converted[thetext_x..]);
+                        state = STARTSHERE;
+                        break;
+                    }
+                }
+            }
+
+            state
+        };
+
+        {
+            let mut node = line.borrow_mut();
+            if id < node.multidata.len() {
+                node.multidata[id] = new_state;
+            }
         }
+
+        varnish = v.next.as_deref();
     }
 }
 
@@ -4137,12 +4228,34 @@ pub fn edit_refresh() {
     #[cfg(feature = "color")]
     {
         // Prepare palette if needed
-        let _need_palette = with_state(|s| {
+        // When needed and useful, initialize the colors for the current syntax.
+        let need_palette = with_state(|s| {
             s.openfile.as_ref().and_then(|f| f.syntax).is_some()
                 && !s.have_palette
                 && !s.flag_isset(NO_SYNTAX)
         });
-        // prepare_palette() is in color.rs — stub call
+        if need_palette {
+            crate::color::prepare_palette();
+        }
+
+        // When the line above the viewport does not have multidata,
+        // the multiline-regex cache needs recalculating.
+        let recook = with_state(|s| {
+            let above_lacks_multidata = s.flag_isset(SOFTWRAP)
+                && s.openfile.as_ref()
+                    .and_then(|f| f.edittop.as_ref())
+                    .and_then(|et| et.borrow().prev.as_ref().and_then(|w| w.upgrade()))
+                    .map(|prev| prev.borrow().multidata.is_empty())
+                    .unwrap_or(false);
+            s.recook || above_lacks_multidata
+        });
+        if recook {
+            crate::color::precalc_multicolorinfo();
+            with_state_mut(|s| {
+                s.perturbed = false;
+                s.recook = false;
+            });
+        }
     }
 
     #[cfg(not(feature = "tiny"))]

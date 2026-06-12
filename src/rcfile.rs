@@ -1650,7 +1650,7 @@ fn glob_match_inner(pattern: &[u8], name: &[u8]) -> bool {
 
 #[cfg(feature = "color")]
 /* C: void parse_one_include(char *file, syntaxtype *syntax) */
-fn parse_one_include(file: &str, full_parse: bool) {
+pub fn parse_one_include(file: &str, full_parse: bool) {
     // Don't open directories, character files, or block files
     if Path::new(file).exists() && !is_good_file(file) {
         return;

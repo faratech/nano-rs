@@ -313,12 +313,31 @@ pub fn find_and_prime_applicable_syntax() {
         }
     }
 
-    // When the syntax isn't loaded yet (has a filename), parse and init colors.
+    // When the syntax isn't loaded yet (has a filename marker), lazily
+    // parse its color rules now (C: parse_one_include(sntx->filename, sntx)).
     if !found.is_null() {
         let needs_parse = unsafe { !(&(*found).filename).is_empty() };
         if needs_parse {
-            // parse_one_include would load the syntax file; stub for now.
-            // set_syntax_colorpairs initializes color pair numbers.
+            let name = unsafe { (*found).name.clone() };
+            let file = unsafe { (*found).filename.clone() };
+
+            // The Rust parser treats the head of s.syntaxes as C's
+            // live_syntax, so move the wanted syntax to the head first.
+            with_state_mut(|s| move_syntax_to_head(s, &name));
+            crate::rcfile::parse_one_include(&file, true);
+
+            // The list head (and thus our pointer) may have changed.
+            found = with_state_mut(|s| {
+                s.syntaxes.as_deref_mut()
+                    .map(|p| p as *mut SyntaxType)
+                    .unwrap_or(std::ptr::null_mut())
+            });
+            if !found.is_null() {
+                // Indicate that this syntax has been loaded.
+                unsafe { (*found).filename.clear(); }
+            }
+        }
+        if !found.is_null() {
             unsafe { set_syntax_colorpairs(&mut *found); }
         }
     }
@@ -329,6 +348,30 @@ pub fn find_and_prime_applicable_syntax() {
             of.syntax = if found.is_null() { None } else { Some(found) };
         }
     });
+}
+
+/// Detach the syntax with the given name from the list and re-attach it at
+/// the head, so the parser's "live syntax is the list head" convention holds.
+#[cfg(feature = "color")]
+fn move_syntax_to_head(s: &mut crate::global::AppState, name: &str) {
+    if s.syntaxes.as_ref().map(|sx| sx.name == name).unwrap_or(true) {
+        return; // already at head (or list empty)
+    }
+    let mut detached: Option<Box<SyntaxType>> = None;
+    let mut prev = s.syntaxes.as_mut();
+    while let Some(p) = prev {
+        if p.next.as_ref().map(|nx| nx.name == name).unwrap_or(false) {
+            let mut target = p.next.take().expect("checked above");
+            p.next = target.next.take();
+            detached = Some(target);
+            break;
+        }
+        prev = p.next.as_mut();
+    }
+    if let Some(mut t) = detached {
+        t.next = s.syntaxes.take();
+        s.syntaxes = Some(t);
+    }
 }
 
 /// Determine whether the matches of multiline regexes are still the same.

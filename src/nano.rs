@@ -2977,7 +2977,15 @@ pub fn nano_main() {
         #[cfg(feature = "multibuffer")]
         {
             // Switch from the last opened file to the first.
-            files::switch_to_next_buffer();
+            // (C: `openfile = openfile->next` — a raw rotation, without
+            // redecorate_after_switch and its possible status message.)
+            with_state_mut(|s| {
+                if let Some(next) = s.buffer_ring.pop_front() {
+                    if let Some(cur) = s.openfile.replace(next) {
+                        s.buffer_ring.push_back(cur);
+                    }
+                }
+            });
             let more_than_one = with_state(|s| s.more_than_one);
             if more_than_one {
                 files::mention_name_and_linecount();
