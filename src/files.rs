@@ -1371,7 +1371,6 @@ pub fn cancel_the_command(_signal: i32) {
     #[cfg(not(unix))]
     {
         // No-op on non-Unix platforms
-        let _ = signal;
     }
 }
 
