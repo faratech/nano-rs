@@ -48,25 +48,16 @@ fn statusline(kind: MessageType, msg: &str) { crate::winio::statusline(kind, msg
 
 /// C: void edit_redraw(linestruct *old_current, update_type manner)
 /// Defined in winio.c — redraws the edit window after cursor movement.
-/// Adapter: real winio::edit_redraw takes (old_current_lineno: isize, manner).
 #[inline]
 fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
-    crate::winio::edit_redraw(old_current.borrow().lineno, manner)
+    crate::winio::edit_redraw(old_current, manner)
 }
 
 /// C: void update_line(linestruct *line, size_t index)
 /// Defined in winio.c — repaints a single line.
-/// Adapter: real winio::update_line takes (lineno, data, [multidata,] has_anchor, index).
+#[inline]
 fn update_line(line: &LinePtr, index: usize) -> i32 {
-    let n = line.borrow();
-    crate::winio::update_line(
-        n.lineno,
-        &n.data,
-        #[cfg(feature = "color")] &n.multidata,
-        #[cfg(not(feature = "tiny"))] n.has_anchor,
-        #[cfg(feature = "tiny")] false,
-        index,
-    )
+    crate::winio::update_line(line, index)
 }
 
 /// C: void check_the_multis(linestruct *line)

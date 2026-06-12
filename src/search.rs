@@ -54,7 +54,7 @@ unsafe extern "Rust" {}
 #[inline] fn edit_refresh() { crate::winio::edit_refresh() }
 
 #[inline] fn edit_redraw(was_current: &LinePtr, mode: UpdateType) {
-    crate::winio::edit_redraw(was_current.borrow().lineno, mode)
+    crate::winio::edit_redraw(was_current, mode)
 }
 
 #[inline] fn regenerate_screen() { crate::nano::regenerate_screen() }
@@ -153,38 +153,26 @@ fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
 
 #[inline] fn adjust_viewport(mode: UpdateType) { crate::winio::adjust_viewport(mode) }
 
+/// C: linestruct *line_from_number(ssize_t number) — utils.c.
+#[inline]
 fn line_from_number(n: isize) -> Option<LinePtr> {
-    // C: line_from_number() — utils.c — find line by number
-    with_state(|s| {
-        if let Some(ref of) = s.openfile {
-            let mut line = of.filetop.clone();
-            while let Some(l) = line {
-                if l.borrow().lineno == n {
-                    return Some(l);
-                }
-                let next = l.borrow().next.clone();
-                line = next;
-            }
-        }
-        None
-    })
+    crate::utils::line_from_number(n)
 }
 
 fn go_forward_chunks(rows: i32, line: &mut Option<LinePtr>, leftedge: &mut usize) -> i32 {
-    let mut lineno: isize = line.as_ref().map(|l| l.borrow().lineno).unwrap_or(0);
-    let result = crate::winio::go_forward_chunks(rows, &mut lineno, leftedge);
-    result
+    match line {
+        Some(lp) => crate::winio::go_forward_chunks(rows, lp, leftedge),
+        None => rows,
+    }
 }
 
 #[inline] fn leftedge_for(col: usize, line: &LinePtr) -> usize {
     crate::winio::leftedge_for(col, &line.borrow().data)
 }
 
+#[inline]
 fn update_line(line: &LinePtr, x: usize) {
-    let (lineno, data) = { let b = line.borrow(); (b.lineno, b.data.clone()) };
-    crate::winio::update_line(lineno, &data,
-        #[cfg(feature = "color")] &[],
-        false, x);
+    crate::winio::update_line(line, x);
 }
 
 fn mbstrchr<'a>(s: &'a str, needle_start: &str) -> Option<&'a str> {

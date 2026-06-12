@@ -557,16 +557,25 @@ pub fn get_range() -> (usize, usize) {
 }
 
 /* C: linestruct *line_from_number(ssize_t number)
- * Return a reference (line number) for the line that has the given line number. */
-#[cfg(any(
-    not(feature = "tiny"),
-    feature = "speller",
-    feature = "linter",
-    feature = "formatter"
-))]
-pub fn line_from_number(number: isize) -> usize {
-    // In Rust we return the line number; callers use it to index into the buffer.
-    number as usize
+ * Return the line that has the given line number, walking from the
+ * current line in whichever direction is closer.  Returns None when
+ * the number is out of range (where C would walk off the list). */
+pub fn line_from_number(number: isize) -> Option<LinePtr> {
+    let mut line = STATE.with(|s| s.borrow().openfile.as_ref().and_then(|f| f.current.clone()))?;
+
+    if line.borrow().lineno > number {
+        while line.borrow().lineno != number {
+            let prev = line.borrow().prev.as_ref().and_then(|w| w.upgrade());
+            line = prev?;
+        }
+    } else {
+        while line.borrow().lineno != number {
+            let next = line.borrow().next.clone();
+            line = next?;
+        }
+    }
+
+    Some(line)
 }
 
 /* C: size_t number_of_characters_in(const linestruct *begin, const linestruct *end)

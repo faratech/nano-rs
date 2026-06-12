@@ -45,30 +45,15 @@ use crate::{ISSET, SET, UNSET, TOGGLE};
 
 // ── External helpers (winio.c / text.c — delegating to real implementations) ──
 
-// Private helper: look up a LinePtr by line number, walking from filetop.
-fn lineno_to_lp(lineno: isize) -> Option<LinePtr> {
-    with_state(|s| {
-        let mut cur = s.openfile.as_ref().and_then(|of| of.filetop.clone());
-        while let Some(lp) = cur {
-            if lp.borrow().lineno == lineno {
-                return Some(lp);
-            }
-            let next = lp.borrow().next.clone();
-            cur = next;
-        }
-        None
-    })
-}
-
 /// C: int go_back_chunks(int nrows, linestruct **line, size_t *leftedge)
 /// Move `line` and `leftedge` backward by `nrows` soft-wrapped chunks.
 /// Returns the number of chunks it could *not* advance (0 = success).
 #[inline]
 fn go_back_chunks(nrows: i32, line: &mut Option<LinePtr>, leftedge: &mut usize) -> i32 {
-    let mut lineno: isize = line.as_ref().map(|lp| lp.borrow().lineno).unwrap_or(1);
-    let remaining = crate::winio::go_back_chunks(nrows, &mut lineno, leftedge);
-    *line = lineno_to_lp(lineno);
-    remaining
+    match line {
+        Some(lp) => crate::winio::go_back_chunks(nrows, lp, leftedge),
+        None => nrows,
+    }
 }
 
 /// C: int go_forward_chunks(int nrows, linestruct **line, size_t *leftedge)
@@ -76,10 +61,10 @@ fn go_back_chunks(nrows: i32, line: &mut Option<LinePtr>, leftedge: &mut usize) 
 /// Returns the number of chunks it could *not* advance (0 = success).
 #[inline]
 fn go_forward_chunks(nrows: i32, line: &mut Option<LinePtr>, leftedge: &mut usize) -> i32 {
-    let mut lineno: isize = line.as_ref().map(|lp| lp.borrow().lineno).unwrap_or(1);
-    let remaining = crate::winio::go_forward_chunks(nrows, &mut lineno, leftedge);
-    *line = lineno_to_lp(lineno);
-    remaining
+    match line {
+        Some(lp) => crate::winio::go_forward_chunks(nrows, lp, leftedge),
+        None => nrows,
+    }
 }
 
 /// C: size_t leftedge_for(size_t column, linestruct *line)
@@ -108,8 +93,8 @@ fn get_softwrap_breakpoint(
 /// Return the zero-based chunk index that contains the given column.
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn chunk_for(column: usize, _line: &LinePtr) -> usize {
-    crate::winio::chunk_for(column, None)
+fn chunk_for(column: usize, line: &LinePtr) -> usize {
+    crate::winio::chunk_for(column, &line.borrow().data)
 }
 
 /// C: size_t extra_chunks_in(linestruct *line)
@@ -132,7 +117,7 @@ pub fn actual_last_column(leftedge: usize, column: usize) -> usize {
 /// Redraw the edit window after the cursor has moved.
 #[inline]
 fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
-    crate::winio::edit_redraw(old_current.borrow().lineno, manner);
+    crate::winio::edit_redraw(old_current, manner);
 }
 
 /// C: void edit_scroll(bool direction)
@@ -153,15 +138,7 @@ fn adjust_viewport(manner: UpdateType) {
 /// Repaint a single line of the edit window.
 #[inline]
 fn update_line(line: &LinePtr, index: usize) -> i32 {
-    let borrowed = line.borrow();
-    crate::winio::update_line(
-        borrowed.lineno,
-        &borrowed.data,
-        #[cfg(feature = "color")]
-        &borrowed.multidata,
-        borrowed.has_anchor,
-        index,
-    )
+    crate::winio::update_line(line, index)
 }
 
 /// C: bool line_needs_update(const size_t old_column, const size_t new_column)

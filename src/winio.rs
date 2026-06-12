@@ -28,6 +28,7 @@ use crossterm::{
 use std::io::{self, Write, stdout};
 use std::time::Duration;
 use std::cell::RefCell;
+use std::rc::Rc;
 use crate::definitions::*;
 use crate::global::{
     STATE, with_state, with_state_mut, NanoWindow,
@@ -2984,23 +2985,28 @@ pub fn place_the_cursor() {
 
     #[cfg(not(feature = "tiny"))]
     if with_state(|s| s.flag_isset(SOFTWRAP)) {
-        let (edittop_lineno, edittop_firstcol, current_lineno, current_x) = with_state(|s| {
+        let (edittop, firstcolumn, current) = with_state(|s| {
             let f = s.openfile.as_ref();
-            let et_ln = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-            let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
-            let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-            let cx = f.map(|f| f.current_x).unwrap_or(0);
-            (et_ln, fc, cl, cx)
+            (
+                f.and_then(|f| f.edittop.clone()),
+                f.map(|f| f.firstcolumn).unwrap_or(0),
+                f.and_then(|f| f.current.clone()),
+            )
         });
+        let (Some(edittop), Some(current)) = (edittop, current) else { return };
 
-        // Simplified softwrap cursor placement
-        let start_chunk = chunk_for(edittop_firstcol, None);
-        row = -(start_chunk as isize);
+        row = -({ let b = edittop.borrow(); chunk_for(firstcolumn, &b.data) } as isize);
 
-        // Walk from edittop to current
-        let line_diff = (current_lineno - edittop_lineno).max(0) as isize;
-        row += line_diff; // simplified; proper implementation needs softwrap info
-        let (chunk_row, leftedge) = get_chunk_and_edge_val(column, None);
+        // Calculate how many rows the lines from edittop to current use.
+        let mut line = Some(edittop);
+        while let Some(l) = line {
+            if Rc::ptr_eq(&l, &current) { break; }
+            row += 1 + { let b = l.borrow(); extra_chunks_in(&b.data) as isize };
+            line = l.borrow().next.clone();
+        }
+
+        // Add the number of wraps in the current line before the cursor.
+        let (chunk_row, leftedge) = { let b = current.borrow(); get_chunk_and_edge_for(&b.data, column) };
         row += chunk_row as isize;
         let col = column - leftedge;
 
@@ -3011,6 +3017,7 @@ pub fn place_the_cursor() {
         } else {
             statusline(MessageType::Alert, "Misplaced cursor -- please report a bug");
         }
+        let _ = out().flush();
         return;
     }
 
@@ -3128,17 +3135,6 @@ pub fn get_softwrap_breakpoint(
 
 /* C: size_t get_chunk_and_edge(size_t column, linestruct *line, size_t *leftedge) */
 #[cfg(not(feature = "tiny"))]
-pub fn get_chunk_and_edge_val(column: usize, _line_hint: Option<()>) -> (usize, usize) {
-    let linedata = with_state(|s| {
-        s.openfile.as_ref()
-            .and_then(|f| f.current.as_ref())
-            .map(|l| l.borrow().data.clone())
-            .unwrap_or_default()
-    });
-    get_chunk_and_edge_for(&linedata, column)
-}
-
-#[cfg(not(feature = "tiny"))]
 pub fn get_chunk_and_edge_for(linedata: &str, column: usize) -> (usize, usize) {
     let mut current_chunk = 0usize;
     let mut end_of_line = false;
@@ -3163,14 +3159,8 @@ pub fn extra_chunks_in(linedata: &str) -> usize {
 
 /* C: size_t chunk_for(size_t column, linestruct *line) */
 #[cfg(not(feature = "tiny"))]
-pub fn chunk_for(column: usize, _line: Option<()>) -> usize {
-    let linedata = with_state(|s| {
-        s.openfile.as_ref()
-            .and_then(|f| f.edittop.as_ref())
-            .map(|l| l.borrow().data.clone())
-            .unwrap_or_default()
-    });
-    get_chunk_and_edge_for(&linedata, column).0
+pub fn chunk_for(column: usize, linedata: &str) -> usize {
+    get_chunk_and_edge_for(linedata, column).0
 }
 
 /* C: size_t leftedge_for(size_t column, linestruct *line) */
@@ -3285,53 +3275,55 @@ pub fn current_is_offscreen() -> bool {
 // ---------------------------------------------------------------------------
 
 /* C: int go_back_chunks(int nrows, linestruct **line, size_t *leftedge) */
-pub fn go_back_chunks(nrows: i32, line_lineno: &mut isize, leftedge: &mut usize) -> i32 {
+pub fn go_back_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -> i32 {
     let mut i = nrows;
 
     #[cfg(not(feature = "tiny"))]
     if with_state(|s| s.flag_isset(SOFTWRAP)) {
-        // Softwrap path
+        // Recede through the requested number of chunks.
         while i > 0 {
-            let linedata = get_linedata_by_lineno(*line_lineno);
-            let chunk = get_chunk_and_edge_for(&linedata, *leftedge).0;
+            let chunk = { let b = line.borrow(); chunk_for(*leftedge, &b.data) };
             *leftedge = 0;
 
             if chunk >= i as usize {
-                // Advance forward within same line
-                let mut kickoff = true;
-                let mut end_of_line = false;
-                let mut col = 0usize;
-                for _ in 0..(chunk as i32 - i) {
-                    col = get_softwrap_breakpoint(&linedata, col, &mut kickoff, &mut end_of_line);
-                }
-                *leftedge = col;
-                return 0;
+                return go_forward_chunks(chunk as i32 - i, line, leftedge);
             }
 
-            if *line_lineno == get_filetop_lineno() { break; }
-
-            i -= chunk as i32;
-            *line_lineno -= 1;
-            *leftedge = HIGHEST_POSITIVE;
+            let prev = line.borrow().prev.as_ref().and_then(|w| w.upgrade());
+            match prev {
+                None => break, // C: *line == openfile->filetop
+                Some(p) => {
+                    i -= chunk as i32;
+                    *line = p;
+                    *leftedge = HIGHEST_POSITIVE;
+                }
+            }
+            i -= 1; // the C for-loop's own i--
         }
 
         if *leftedge == HIGHEST_POSITIVE {
-            let ld = get_linedata_by_lineno(*line_lineno);
-            *leftedge = leftedge_for(HIGHEST_POSITIVE, &ld);
+            let b = line.borrow();
+            *leftedge = leftedge_for(HIGHEST_POSITIVE, &b.data);
         }
         return i;
     }
 
     // Non-softwrap path
-    while i > 0 && *line_lineno > get_filetop_lineno() {
-        *line_lineno -= 1;
-        i -= 1;
+    while i > 0 {
+        let prev = line.borrow().prev.as_ref().and_then(|w| w.upgrade());
+        match prev {
+            None => break,
+            Some(p) => {
+                *line = p;
+                i -= 1;
+            }
+        }
     }
     i
 }
 
 /* C: int go_forward_chunks(int nrows, linestruct **line, size_t *leftedge) */
-pub fn go_forward_chunks(nrows: i32, line_lineno: &mut isize, leftedge: &mut usize) -> i32 {
+pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -> i32 {
     let mut i = nrows;
 
     #[cfg(not(feature = "tiny"))]
@@ -3339,76 +3331,62 @@ pub fn go_forward_chunks(nrows: i32, line_lineno: &mut isize, leftedge: &mut usi
         let mut current_leftedge = *leftedge;
         let mut kickoff = true;
 
+        // Advance through the requested number of chunks.
         while i > 0 {
-            let linedata = get_linedata_by_lineno(*line_lineno);
             let mut end_of_line = false;
-            current_leftedge = get_softwrap_breakpoint(&linedata, current_leftedge, &mut kickoff, &mut end_of_line);
-            i -= 1;
+            current_leftedge = {
+                let b = line.borrow();
+                get_softwrap_breakpoint(&b.data, current_leftedge, &mut kickoff, &mut end_of_line)
+            };
 
-            if !end_of_line { continue; }
-            if *line_lineno == get_filebot_lineno() { break; }
+            if !end_of_line { i -= 1; continue; }
 
-            *line_lineno += 1;
-            current_leftedge = 0;
-            kickoff = true;
+            let next = line.borrow().next.clone();
+            match next {
+                None => break, // C: *line == openfile->filebot (no i-- on break)
+                Some(n) => {
+                    *line = n;
+                    current_leftedge = 0;
+                    kickoff = true;
+                }
+            }
+            i -= 1; // the C for-loop's own i--
         }
 
+        // Only change leftedge when we actually could move.
         if i < nrows { *leftedge = current_leftedge; }
         return i;
     }
 
     // Non-softwrap path
-    let filebot = get_filebot_lineno();
-    while i > 0 && *line_lineno < filebot {
-        *line_lineno += 1;
-        i -= 1;
+    while i > 0 {
+        let next = line.borrow().next.clone();
+        match next {
+            None => break,
+            Some(n) => {
+                *line = n;
+                i -= 1;
+            }
+        }
     }
     i
-}
-
-/// Get line data by line number (helper for go_back/forward_chunks).
-fn get_linedata_by_lineno(lineno: isize) -> String {
-    with_state(|s| {
-        // Walk from edittop to find the line (simplified)
-        let mut cur = s.openfile.as_ref().and_then(|f| f.edittop.clone());
-        while let Some(line) = cur {
-            let ln = line.borrow().lineno;
-            if ln == lineno {
-                return line.borrow().data.clone();
-            }
-            cur = line.borrow().next.clone();
-        }
-        String::new()
-    })
-}
-
-fn get_filetop_lineno() -> isize {
-    with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1))
-}
-
-fn get_filebot_lineno() -> isize {
-    with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1))
 }
 
 /* C: bool less_than_a_screenful(size_t was_lineno, size_t was_leftedge) */
 pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
     #[cfg(not(feature = "tiny"))]
     if with_state(|s| s.flag_isset(SOFTWRAP)) {
-        let (editwinrows, cur_lineno, firstcol) = with_state(|s| (
+        let (editwinrows, current) = with_state(|s| (
             s.editwinrows,
-            s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
-            s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
+            s.openfile.as_ref().and_then(|f| f.current.clone()),
         ));
+        let Some(mut line) = current else { return true };
         let col = xplustabs();
-        let linedata = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().data.clone()).unwrap_or_default()
-        });
-        let leftedge = leftedge_for(col, &linedata);
-        let mut back_lineno = cur_lineno;
-        let mut back_leftedge = leftedge;
-        let rows_left = go_back_chunks(editwinrows - 1, &mut back_lineno, &mut back_leftedge);
+        let mut leftedge = { let b = line.borrow(); leftedge_for(col, &b.data) };
+        let rows_left = go_back_chunks(editwinrows - 1, &mut line, &mut leftedge);
+        let back_lineno = line.borrow().lineno;
         return rows_left > 0 || back_lineno < was_lineno as isize
-            || (back_lineno == was_lineno as isize && back_leftedge <= was_leftedge);
+            || (back_lineno == was_lineno as isize && leftedge <= was_leftedge);
     }
 
     let (cur_lineno, editwinrows) = with_state(|s| (
@@ -3423,11 +3401,15 @@ pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
 // ---------------------------------------------------------------------------
 
 /* C: void draw_row(int row, const char *converted, linestruct *line, size_t from_col) */
-pub fn draw_row(row: i32, converted: &str, line_lineno: isize, line_data: &str,
-    #[cfg(feature = "color")] multidata: &[i16],
-    has_anchor: bool,
-    from_col: usize)
+pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
 {
+    let node = line.borrow();
+    let line_lineno = node.lineno;
+    let line_data: &str = &node.data;
+    #[cfg(feature = "color")]
+    let multidata: &[i16] = &node.multidata;
+    let has_anchor = node.has_anchor;
+
     let (midwin_x, midwin_y, margin, cols, sidebar, editwincols) = with_state(|s| {
         (s.midwin.x, s.midwin.y, s.margin, s.midwin.cols as usize, s.sidebar, s.editwincols as usize)
     });
@@ -3720,30 +3702,30 @@ fn apply_mark_highlighting(
 // ---------------------------------------------------------------------------
 
 /* C: int update_line(linestruct *line, size_t index) */
-pub fn update_line(line_lineno: isize, line_data: &str,
-    #[cfg(feature = "color")] multidata: &[i16],
-    has_anchor: bool,
-    index: usize) -> i32
-{
+pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     #[cfg(not(feature = "tiny"))]
     if with_state(|s| s.flag_isset(SOFTWRAP)) {
-        return update_softwrapped_line(line_lineno, line_data,
-            #[cfg(feature = "color")] multidata,
-            has_anchor);
+        return update_softwrapped_line(line);
     }
 
     #[cfg(not(feature = "tiny"))]
     { tl_set!(SEQUEL_COLUMN, 0); }
+
+    let line_lineno = line.borrow().lineno;
 
     let from_col = {
         #[cfg(not(feature = "tiny"))]
         if with_state(|s| s.united_sidescroll) {
             with_state(|s| s.openfile.as_ref().map(|f| f.brink).unwrap_or(0))
         } else {
-            get_page_start(wideness(line_data, index))
+            let b = line.borrow();
+            get_page_start(wideness(&b.data, index))
         }
         #[cfg(feature = "tiny")]
-        get_page_start(wideness(line_data, index))
+        {
+            let b = line.borrow();
+            get_page_start(wideness(&b.data, index))
+        }
     };
 
     let (edittop_lineno, editwincols) = with_state(|s| (
@@ -3752,11 +3734,12 @@ pub fn update_line(line_lineno: isize, line_data: &str,
     ));
     let row = (line_lineno - edittop_lineno) as i32;
 
-    let converted = display_string(line_data, from_col, editwincols, true, false);
-    draw_row(row, &converted, line_lineno, line_data,
-        #[cfg(feature = "color")] multidata,
-        has_anchor,
-        from_col);
+    // Expand the piece to be drawn to its representable form, and draw it.
+    let converted = {
+        let b = line.borrow();
+        display_string(&b.data, from_col, editwincols, true, false)
+    };
+    draw_row(row, &converted, line, from_col);
 
     let (midwin_x, midwin_y, margin, sidebar, hilite) = with_state(|s| (
         s.midwin.x, s.midwin.y, s.margin, s.sidebar, s.hilite_attribute,
@@ -3780,13 +3763,13 @@ pub fn update_line(line_lineno: isize, line_data: &str,
     }
 
     // Spotlight (search match highlight)
-    let (spotlighted, light_from, light_to, cur_lineno) = with_state(|s| (
+    let (spotlighted, light_from, light_to, current) = with_state(|s| (
         s.spotlighted,
         s.light_from_col,
         s.light_to_col,
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
+        s.openfile.as_ref().and_then(|f| f.current.clone()),
     ));
-    if spotlighted && line_lineno == cur_lineno {
+    if spotlighted && current.as_ref().is_some_and(|c| Rc::ptr_eq(line, c)) {
         spotlight(light_from, light_to);
     }
 
@@ -3795,68 +3778,61 @@ pub fn update_line(line_lineno: isize, line_data: &str,
 
 /* C: int update_softwrapped_line(linestruct *line) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
-pub fn update_softwrapped_line(
-    line_lineno: isize,
-    line_data: &str,
-    #[cfg(feature = "color")] multidata: &[i16],
-    has_anchor: bool,
-) -> i32 {
-    let (edittop_lineno, edittop_firstcol, editwinrows) = with_state(|s| (
-        s.openfile.as_ref().and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
+pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
+    let (edittop, edittop_firstcol, editwinrows) = with_state(|s| (
+        s.openfile.as_ref().and_then(|f| f.edittop.clone()),
         s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
         s.editwinrows,
     ));
+    let Some(edittop) = edittop else { return 0 };
 
     let mut row = 0i32;
-    let mut from_col = if line_lineno == edittop_lineno {
+    let mut from_col = if Rc::ptr_eq(line, &edittop) {
         edittop_firstcol
     } else {
-        // Find how many rows the edittop line takes
-        let edittop_data = get_linedata_by_lineno(edittop_lineno);
-        let chunks = extra_chunks_in(&edittop_data);
-        let start_chunk = get_chunk_and_edge_for(&edittop_data, edittop_firstcol).0;
-        row -= (chunks - start_chunk) as i32;
+        let b = edittop.borrow();
+        row -= chunk_for(edittop_firstcol, &b.data) as i32;
         0
     };
 
-    // Walk from edittop to line_lineno
-    let mut cur_ln = edittop_lineno;
-    while cur_ln != line_lineno {
-        let ld = get_linedata_by_lineno(cur_ln);
-        row += 1 + extra_chunks_in(&ld) as i32;
-        cur_ln += 1;
+    // Find out on which screen row the target line should be shown.
+    let mut someline = Some(edittop);
+    while let Some(sl) = someline {
+        if Rc::ptr_eq(&sl, line) { break; }
+        row += 1 + { let b = sl.borrow(); extra_chunks_in(&b.data) as i32 };
+        someline = sl.borrow().next.clone();
     }
 
+    // If the first chunk is offscreen, don't even try to display it.
     if row < 0 || row >= editwinrows { return 0; }
 
     let starting_row = row;
     let mut kickoff = true;
     let mut end_of_line = false;
-    let editwincols = with_state(|s| s.editwincols as usize);
 
     while !end_of_line && row < editwinrows {
-        let to_col = get_softwrap_breakpoint(line_data, from_col, &mut kickoff, &mut end_of_line);
+        let node = line.borrow();
+        let to_col = get_softwrap_breakpoint(&node.data, from_col, &mut kickoff, &mut end_of_line);
         tl_set!(SEQUEL_COLUMN, if end_of_line { 0 } else { to_col });
 
-        let converted = display_string(line_data, from_col, to_col - from_col, true, false);
-        draw_row(row, &converted, line_lineno, line_data,
-            #[cfg(feature = "color")] multidata,
-            has_anchor,
-            from_col);
+        // Convert the chunk to its displayable form and draw it.
+        let converted = display_string(&node.data, from_col, to_col - from_col, true, false);
+        drop(node);
+        draw_row(row, &converted, line, from_col);
         row += 1;
         from_col = to_col;
     }
 
     // Spotlight
-    let (spotlighted, light_from, light_to, cur_lineno) = with_state(|s| (
+    let (spotlighted, light_from, light_to, current) = with_state(|s| (
         s.spotlighted, s.light_from_col, s.light_to_col,
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
+        s.openfile.as_ref().and_then(|f| f.current.clone()),
     ));
-    if spotlighted && line_lineno == cur_lineno {
+    if spotlighted && current.as_ref().is_some_and(|c| Rc::ptr_eq(line, c)) {
         spotlight_softwrapped(light_from, light_to);
     }
 
-    (row - starting_row)
+    row - starting_row
 }
 
 // ---------------------------------------------------------------------------
@@ -3947,51 +3923,58 @@ pub fn draw_scrollbar() {
 
 /* C: void edit_scroll(bool direction) */
 pub fn edit_scroll(direction: bool) {
-    let (edittop_lineno, firstcol, current_lineno, current_x, placewewant) = with_state(|s| {
+    let (edittop, firstcol, current, current_x, placewewant) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
+        let et = f.and_then(|f| f.edittop.clone());
         let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
-        let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
+        let cur = f.and_then(|f| f.current.clone());
         let cx = f.map(|f| f.current_x).unwrap_or(0);
         let pw = f.map(|f| f.placewewant).unwrap_or(0);
-        (et, fc, cl, cx, pw)
+        (et, fc, cur, cx, pw)
     });
+    let Some(mut line) = edittop else { return };
 
-    // Move the top line one row
-    let mut et_lineno = edittop_lineno;
-    let mut new_firstcol = firstcol;
+    // Move the top line of the edit window one row up or down.
+    let mut leftedge = firstcol;
     if direction == BACKWARD {
-        go_back_chunks(1, &mut et_lineno, &mut new_firstcol);
+        go_back_chunks(1, &mut line, &mut leftedge);
     } else {
-        go_forward_chunks(1, &mut et_lineno, &mut new_firstcol);
+        go_forward_chunks(1, &mut line, &mut leftedge);
     }
 
     with_state_mut(|s| {
         if let Some(f) = s.openfile.as_mut() {
-            f.firstcolumn = new_firstcol;
+            f.edittop = Some(line.clone());
+            f.firstcolumn = leftedge;
         }
     });
 
-    // Scroll the terminal
+    // Actually scroll the text of the edit window one row up or down.
     let (midwin_y, editwinrows) = with_state(|s| (s.midwin.y, s.editwinrows));
-    let mut stdout = out();
-    if direction == BACKWARD {
-        let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollDown(1));
-    } else {
-        let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollUp(1));
+    {
+        let mut stdout = out();
+        if direction == BACKWARD {
+            let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollDown(1));
+        } else {
+            let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollUp(1));
+        }
     }
 
+    // If we're not on the first "page" (when not softwrapping), or the mark
+    // is on, the row next to the scrolled region needs to be redrawn too.
     let mut nrows = 1i32;
     if line_needs_update(placewewant, 0) && nrows < editwinrows {
         nrows += 1;
     }
 
-    // Determine which line to redraw
-    let mut draw_lineno = et_lineno;
-    let mut draw_leftedge = new_firstcol;
+    // If we scrolled backward, the top row needs to be redrawn;
+    // if forward, the bottom row.
+    let edittop = line.clone();
+    let mut draw_line = line;
+    let mut draw_leftedge = leftedge;
 
     if direction == FORWARD {
-        go_forward_chunks(editwinrows - nrows, &mut draw_lineno, &mut draw_leftedge);
+        go_forward_chunks(editwinrows - nrows, &mut draw_line, &mut draw_leftedge);
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -4001,58 +3984,25 @@ pub fn edit_scroll(direction: bool) {
 
         let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
         if softwrap {
-            nrows += chunk_for(draw_leftedge, None) as i32;
-            if draw_lineno == et_lineno {
-                nrows -= chunk_for(new_firstcol, None) as i32;
+            // Compensate for the earlier chunks of a softwrapped line.
+            nrows += { let b = draw_line.borrow(); chunk_for(draw_leftedge, &b.data) as i32 };
+
+            // Don't compensate for the chunks that are offscreen.
+            if Rc::ptr_eq(&draw_line, &edittop) {
+                nrows -= { let b = draw_line.borrow(); chunk_for(leftedge, &b.data) as i32 };
             }
         }
     }
 
-    // Redraw affected rows
-    let mut cur_lineno = draw_lineno;
-    let mut remaining = nrows;
-    while remaining > 0 {
-        let ld = get_linedata_by_lineno(cur_lineno);
-        if ld.is_empty() && cur_lineno != 1 { break; }
-
-        let ix = if cur_lineno == current_lineno { current_x } else { 0 };
-        let consumed = update_line_by_lineno(cur_lineno, ix);
-        remaining -= consumed;
-        cur_lineno += 1;
+    // Draw new content on the blank row (and on the bordering row too
+    // when it was deemed necessary).
+    let mut walker = Some(draw_line);
+    while nrows > 0 {
+        let Some(l) = walker else { break };
+        let ix = if current.as_ref().is_some_and(|c| Rc::ptr_eq(&l, c)) { current_x } else { 0 };
+        nrows -= update_line(&l, ix);
+        walker = l.borrow().next.clone();
     }
-}
-
-/// update_line wrapper that operates by line number (for scroll etc.)
-fn update_line_by_lineno(lineno: isize, index: usize) -> i32 {
-    let (data, has_anchor) = with_state(|s| {
-        // Walk buffer to find the line
-        let mut cur = s.openfile.as_ref().and_then(|f| f.edittop.clone());
-        loop {
-            match cur {
-                None => return (String::new(), false),
-                Some(l) => {
-                    let ln = l.borrow().lineno;
-                    if ln == lineno {
-                        let data = l.borrow().data.clone();
-                        #[cfg(not(feature = "tiny"))]
-                        let anchor = l.borrow().has_anchor;
-                        #[cfg(feature = "tiny")]
-                        let anchor = false;
-                        return (data, anchor);
-                    }
-                    cur = l.borrow().next.clone();
-                }
-            }
-        }
-    });
-
-    #[cfg(feature = "color")]
-    let multidata: Vec<i16> = Vec::new();
-
-    update_line(lineno, &data,
-        #[cfg(feature = "color")] &multidata,
-        has_anchor,
-        index)
 }
 
 // ---------------------------------------------------------------------------
@@ -4060,11 +4010,12 @@ fn update_line_by_lineno(lineno: isize, index: usize) -> i32 {
 // ---------------------------------------------------------------------------
 
 /* C: void edit_redraw(linestruct *old_current, update_type manner) */
-pub fn edit_redraw(old_current_lineno: isize, manner: UpdateType) {
+pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
     let was_pww = with_state(|s| s.openfile.as_ref().map(|f| f.placewewant).unwrap_or(0));
     let new_pww = xplustabs();
     with_state_mut(|s| { s.openfile.as_mut().map(|f| f.placewewant = new_pww); });
 
+    // If the current line is offscreen, scroll until it's onscreen.
     if current_is_offscreen() {
         let jump = with_state(|s| s.flag_isset(JUMPY_SCROLLING));
         adjust_viewport(if jump { UpdateType::Centering } else { manner });
@@ -4083,34 +4034,47 @@ pub fn edit_redraw(old_current_lineno: isize, manner: UpdateType) {
         }
     }
 
-    let current_lineno = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0)
-    });
+    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else { return };
 
-    #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()) {
-        // Update all lines between old_current and current
-        let (start, end) = if old_current_lineno < current_lineno {
-            (old_current_lineno, current_lineno)
-        } else {
-            (current_lineno, old_current_lineno)
-        };
-        for ln in start..=end {
-            update_line_by_lineno(ln, 0);
+    let mark_is_on = {
+        #[cfg(not(feature = "tiny"))]
+        { with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()) }
+        #[cfg(feature = "tiny")]
+        { false }
+    };
+
+    if mark_is_on {
+        // If the mark is on, update all lines between old_current and current.
+        #[cfg(not(feature = "tiny"))]
+        {
+            let current_lineno = current.borrow().lineno;
+            let mut line = old_current.clone();
+            while !Rc::ptr_eq(&line, &current) {
+                update_line(&line, 0);
+                let neighbour = if line.borrow().lineno > current_lineno {
+                    line.borrow().prev.as_ref().and_then(|w| w.upgrade())
+                } else {
+                    line.borrow().next.clone()
+                };
+                match neighbour {
+                    Some(n) => line = n,
+                    None => break,
+                }
+            }
         }
-        return;
+    } else if !Rc::ptr_eq(old_current, &current) && get_page_start(was_pww) > 0 {
+        // Otherwise, update old_current only if it differs from current
+        // and was horizontally scrolled.
+        update_line(old_current, 0);
     }
 
-    // Update old_current if it scrolled
-    if old_current_lineno != current_lineno && get_page_start(was_pww) > 0 {
-        update_line_by_lineno(old_current_lineno, 0);
-    }
-
+    // Update current if the mark is on or it has changed "page", or if it
+    // differs from old_current and needs to be horizontally scrolled.
     let current_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     if line_needs_update(was_pww, new_pww)
-        || (old_current_lineno != current_lineno && get_page_start(new_pww) > 0)
+        || (!Rc::ptr_eq(old_current, &current) && get_page_start(new_pww) > 0)
     {
-        update_line_by_lineno(current_lineno, current_x);
+        update_line(&current, current_x);
     }
 }
 
@@ -4150,24 +4114,21 @@ pub fn edit_refresh() {
         if sidebar != 0 { draw_scrollbar(); }
     }
 
-    let (editwinrows, edittop_lineno) = with_state(|s| (
+    let (editwinrows, edittop, current, current_x) = with_state(|s| (
         s.editwinrows,
-        s.openfile.as_ref().and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1),
+        s.openfile.as_ref().and_then(|f| f.edittop.clone()),
+        s.openfile.as_ref().and_then(|f| f.current.clone()),
+        s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0),
     ));
 
     let mut row = 0i32;
-    let mut cur_lineno = edittop_lineno;
-    let current_lineno = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0)
-    });
-    let current_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+    let mut line = edittop;
 
     while row < editwinrows {
-        let index = if cur_lineno == current_lineno { current_x } else { 0 };
-        let consumed = update_line_by_lineno(cur_lineno, index);
-        if consumed == 0 { break; }
-        row += consumed;
-        cur_lineno += 1;
+        let Some(l) = line else { break };
+        let index = if current.as_ref().is_some_and(|c| Rc::ptr_eq(&l, c)) { current_x } else { 0 };
+        row += update_line(&l, index);
+        line = l.borrow().next.clone();
     }
 
     // Blank remaining rows
@@ -4221,42 +4182,35 @@ pub fn adjust_viewport(manner: UpdateType) {
         }
     };
 
-    let current_lineno = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1)
-    });
+    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else { return };
+
+    // C: openfile->edittop = openfile->current;
+    let mut edittop = current.clone();
 
     #[cfg(not(feature = "tiny"))]
     let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+    #[cfg(feature = "tiny")]
+    let softwrap = false;
+
+    let mut leftedge = if softwrap {
+        #[cfg(not(feature = "tiny"))]
+        {
+            let col = xplustabs();
+            let b = current.borrow();
+            leftedge_for(col, &b.data)
+        }
+        #[cfg(feature = "tiny")]
+        { 0 }
+    } else {
+        with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0))
+    };
+
+    // Move edittop back goal rows, starting at current[firstcolumn].
+    go_back_chunks(goal, &mut edittop, &mut leftedge);
 
     with_state_mut(|s| {
         if let Some(f) = s.openfile.as_mut() {
-            if let Some(ref cur) = f.current.clone() {
-                f.edittop = Some(cur.clone());
-            }
-            #[cfg(not(feature = "tiny"))]
-            if softwrap {
-                let data = f.current.as_ref().map(|l| l.borrow().data.clone()).unwrap_or_default();
-                let col = f.placewewant;
-                f.firstcolumn = leftedge_for(col, &data);
-            }
-        }
-    });
-
-    let mut et_lineno = current_lineno;
-    let mut leftedge = with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0));
-    go_back_chunks(goal, &mut et_lineno, &mut leftedge);
-
-    // Update edittop to et_lineno (walk buffer to find it)
-    with_state_mut(|s| {
-        if let Some(ref mut f) = s.openfile {
-            let mut cur = f.filetop.clone();
-            while let Some(line) = cur {
-                if line.borrow().lineno == et_lineno {
-                    f.edittop = Some(line.clone());
-                    break;
-                }
-                cur = line.borrow().next.clone();
-            }
+            f.edittop = Some(edittop.clone());
             f.firstcolumn = leftedge;
         }
     });

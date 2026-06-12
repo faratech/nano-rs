@@ -1043,17 +1043,10 @@ pub fn redo_cut(u: &UndoStruct) {
     set_cutbuffer(old_cutbuffer);
 }
 
-/// Helper: find a LinePtr by its 1-based line number.
+/// C: line_from_number() — utils.c — find a LinePtr by its 1-based line number.
+#[inline]
 fn get_line_from_number(lineno: isize) -> Option<LinePtr> {
-    let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()));
-    let mut cur = filetop;
-    while let Some(line) = cur {
-        if line.borrow().lineno == lineno {
-            return Some(line);
-        }
-        cur = line.borrow().next.clone();
-    }
-    None
+    crate::utils::line_from_number(lineno)
 }
 
 /* C: void do_undo(void) */
@@ -2574,20 +2567,21 @@ pub fn do_wrap() {
     // When wrapping a partially visible line, adjust edittop.
     #[cfg(not(feature = "tiny"))]
     {
-        let (edittop_ptr, firstcolumn) = with_state(|s| {
+        let (edittop, firstcolumn) = with_state(|s| {
             let f = s.openfile.as_ref().unwrap();
-            (f.edittop.as_ref().map(|e| e.as_ptr()), f.firstcolumn)
+            (f.edittop.clone(), f.firstcolumn)
         });
-        if edittop_ptr == Some(line.as_ptr()) && firstcolumn > 0 && current_x_val >= wrap_loc {
-            with_state_mut(|s| {
-                if let Some(ref mut f) = s.openfile {
-                    let mut lineno = f.edittop.as_ref().map(|e| e.borrow().lineno).unwrap_or(0);
-                    let mut fc = f.firstcolumn;
-                    crate::winio::go_forward_chunks(1, &mut lineno, &mut fc);
-                    // Find the line with the new lineno.
-                    f.firstcolumn = fc;
-                }
-            });
+        if let Some(mut et) = edittop {
+            if std::rc::Rc::ptr_eq(&et, &line) && firstcolumn > 0 && current_x_val >= wrap_loc {
+                let mut fc = firstcolumn;
+                crate::winio::go_forward_chunks(1, &mut et, &mut fc);
+                with_state_mut(|s| {
+                    if let Some(ref mut f) = s.openfile {
+                        f.edittop = Some(et);
+                        f.firstcolumn = fc;
+                    }
+                });
+            }
         }
     }
 

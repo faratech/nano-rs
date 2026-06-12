@@ -1421,35 +1421,15 @@ pub fn inject(burst: &[u8]) {
 
     let refresh = with_state(|s| s.refresh_needed);
     if !refresh {
-        #[cfg(feature = "color")]
-        {
-            let cur = with_state(|s| s.openfile.as_ref().unwrap().current.clone().unwrap());
-            color::check_the_multis(&cur);
-        }
-        let (lineno, current_x) = with_state(|s| {
+        let (current, current_x) = with_state(|s| {
             let of = s.openfile.as_ref().unwrap();
-            let ln = of.current.as_ref().unwrap().borrow().lineno;
-            (ln, of.current_x)
+            (of.current.clone(), of.current_x)
         });
-        let data = with_state(|s| {
-            s.openfile.as_ref().unwrap().current.as_ref().unwrap().borrow().data.clone()
-        });
-        #[cfg(feature = "color")]
-        let multidata: Vec<i16> = with_state(|s| {
-            s.openfile.as_ref().unwrap().current.as_ref().unwrap()
-                .borrow().multidata.clone()
-        });
-        #[cfg(not(feature = "tiny"))]
-        let has_anchor = with_state(|s| {
-            s.openfile.as_ref().unwrap().current.as_ref().unwrap()
-                .borrow().has_anchor
-        });
-        #[cfg(feature = "tiny")]
-        let has_anchor = false;
-        winio::update_line(lineno, &data,
-            #[cfg(feature = "color")] &multidata,
-            has_anchor,
-            current_x);
+        if let Some(cur) = current {
+            #[cfg(feature = "color")]
+            color::check_the_multis(&cur);
+            winio::update_line(&cur, current_x);
+        }
     }
 }
 
