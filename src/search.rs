@@ -59,78 +59,64 @@ unsafe extern "Rust" {}
 
 #[inline] fn regenerate_screen() { crate::nano::regenerate_screen() }
 
+/// C: size_t xplustabs(void) — winio.c — column of the cursor in the current line.
+#[inline]
 fn xplustabs() -> usize {
-    // C: xplustabs() — winio.c
-    with_state(|s| s.current_x())
+    crate::utils::xplustabs()
 }
 
+/// C: size_t wideness(const char *text, size_t maxlen) — chars.c.
+#[inline]
 fn wideness(data: &str, x: usize) -> usize {
-    // C: wideness(data, x) — chars.c
-    // Simplified: return x (assumes single-width chars)
-    x
+    crate::utils::wideness(data, x)
 }
 
+/// C: size_t breadth(const char *text) — chars.c — display width of text.
+#[inline]
 fn breadth(data: &str) -> usize {
-    // C: breadth(data) — chars.c — visual width
-    data.chars().count()
+    crate::utils::breadth(data)
 }
 
-fn display_string(s: &str, _from: usize, max_cols: usize, _tabs: bool, _isdata: bool) -> String {
-    // C: display_string() — winio.c
-    s.chars().take(max_cols).collect()
+/// C: char *display_string(…) — winio.c.
+#[inline]
+fn display_string(s: &str, column: usize, span: usize, isdata: bool, isprompt: bool) -> String {
+    crate::winio::display_string(s, column, span, isdata, isprompt)
 }
 
-fn actual_x(data: &str, cols: usize) -> usize {
-    // C: actual_x(data, cols) — chars.c
-    // Simplified: return min(cols, data.len())
-    cols.min(data.len())
+/// C: size_t actual_x(const char *text, size_t column) — chars.c.
+#[inline]
+fn actual_x(data: &str, column: usize) -> usize {
+    crate::utils::actual_x(data, column)
 }
 
+/// C: size_t char_length(const char *s) — chars.c.
+#[inline]
 fn char_length(s: &str) -> usize {
-    // C: char_length(s) — chars.c
-    // Returns the byte length of the first char in s.
-    s.chars().next().map(|c| c.len_utf8()).unwrap_or(0)
+    crate::chars::char_length(s)
 }
 
+/// C: size_t step_left(const char *buf, size_t pos) — chars.c.
+#[inline]
 fn step_left(data: &str, x: usize) -> usize {
-    // C: step_left(data, x) — chars.c
-    // Step one character to the left (find the previous character boundary).
-    if x == 0 {
-        return 0;
-    }
-    let bytes = data.as_bytes();
-    let mut pos = x - 1;
-    // Walk back to find a UTF-8 character boundary.
-    while pos > 0 && (bytes[pos] & 0xC0) == 0x80 {
-        pos -= 1;
-    }
-    pos
+    crate::chars::step_left(data, x)
 }
 
+/// C: size_t step_right(const char *buf, size_t pos) — chars.c.
+#[inline]
 fn step_right(data: &str, x: usize) -> usize {
-    // C: step_right(data, x) — chars.c
-    // Step one character to the right.
-    if x >= data.len() {
-        return data.len();
-    }
-    x + char_length(&data[x..])
+    crate::chars::step_right(data, x)
 }
 
+/// C: size_t mbstrlen(const char *s) — chars.c.
+#[inline]
 fn mbstrlen(s: &str) -> usize {
-    // C: mbstrlen(s) — chars.c — number of multibyte characters
-    s.chars().count()
+    crate::chars::mbstrlen(s)
 }
 
+/// C: size_t get_page_start(size_t column) — utils.c.
+#[inline]
 fn get_page_start(col: usize) -> usize {
-    // C: get_page_start(col) — utils.c
-    with_state(|s| {
-        let cols = s.editwincols as usize;
-        if col == 0 || col < cols {
-            0
-        } else {
-            col - (col % (cols - 2))
-        }
-    })
+    crate::utils::get_page_start(col)
 }
 
 fn print_view_warning() {
