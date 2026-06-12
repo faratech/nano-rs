@@ -112,8 +112,9 @@ fn mbstrcasecmp(a: &str, b: &str) -> i32 {
     a_lc.cmp(&b_lc) as i32
 }
 
-// Stub for restoring terminal state — no real equivalent exists yet.
-fn reconnect_and_store_state() {}  // stub: function not yet ported
+/// C: reconnect_and_store_state() — nano.c; reattach the keyboard to stdin.
+#[inline]
+fn reconnect_and_store_state() { crate::nano::reconnect_and_store_state(); }
 fn terminal_init() { let _ = crate::winio::terminal_init(); }
 fn doupdate() {}  // stub: no crate::winio::doupdate exists
 fn isendwin() -> bool { false }  // stub: no crate::winio::isendwin exists

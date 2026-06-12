@@ -821,6 +821,20 @@ extern "C" fn make_a_note_trampoline(_sig: libc::c_int) {
 // ---------------------------------------------------------------------------
 /* C: bool scoop_stdin(void) */
 #[cfg(not(feature = "tiny"))]
+/* C: void reconnect_and_store_state(void)
+ * Reconnect standard input to the keyboard after it was used as a pipe. */
+pub fn reconnect_and_store_state() {
+    #[cfg(unix)]
+    unsafe {
+        let tty = std::ffi::CString::new("/dev/tty").unwrap();
+        let thetty = libc::open(tty.as_ptr(), libc::O_RDONLY);
+        if thetty < 0 || libc::dup2(thetty, 0) < 0 {
+            die(crate::tr!("Could not reconnect stdin to keyboard\n"));
+        }
+        libc::close(thetty);
+    }
+}
+
 pub fn scoop_stdin() -> bool {
     restore_terminal();
 
@@ -852,6 +866,12 @@ pub fn scoop_stdin() -> bool {
                     files::set_modified();
                 }
             }
+
+            // When stdin was a pipe, reattach the keyboard (C parity).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                reconnect_and_store_state();
+            }
+            let _ = winio::terminal_init();
             true
         }
     }
@@ -2051,7 +2071,8 @@ pub fn nano_main() {
         }
 
         // Collect file/+LINE arguments once done with options.
-        if done_with_options || !arg.starts_with('-') {
+        // (A bare "-" means "read from standard input", not an option.)
+        if done_with_options || !arg.starts_with('-') || arg == "-" {
             file_args.push(arg.clone());
             idx += 1;
             continue;
@@ -2963,9 +2984,10 @@ pub fn nano_main() {
     // After handling command-line files, allow inserting files.
     UNSET!(NOREAD_MODE);
 
-    // Nano needs a keyboard (stdin must be a terminal).
+    // Nano needs a keyboard: when standard input is not a terminal
+    // (e.g. `seq 9 | nano -`), reattach it to /dev/tty like C does.
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        die("Standard input is not a terminal");
+        reconnect_and_store_state();
     }
 
     // If no files were given, open a blank buffer.

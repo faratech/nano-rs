@@ -1044,6 +1044,16 @@ pub fn to_top_row()    { crate::move_::to_top_row() }
 pub fn to_bottom_row() { crate::move_::to_bottom_row() }
 #[cfg(not(feature = "tiny"))]
 pub fn do_cycle()      { crate::move_::do_cycle() }
+
+/* C: void show_curses_version(void) — global.c; reports the terminal
+ * backend version (ncurses in C, crossterm in this port). */
+#[cfg(feature = "extra")]
+pub fn show_curses_version() {
+    crate::winio::statusline(
+        MessageType::Notice,
+        concat!("nano-rs ", env!("CARGO_PKG_VERSION"), ", using crossterm"),
+    );
+}
 #[cfg(not(feature = "tiny"))]
 pub fn do_center()     { crate::move_::do_center() }
 #[cfg(feature = "justify")]
@@ -2521,6 +2531,10 @@ pub fn shortcut_init() {
         add_to_sclist(MMAIN, "M-%", 0, do_cycle as FuncPtr, 0);
         add_to_sclist((MMOST | MBROWSER | MHELP | MYESNO) & !MMAIN, "^L", 0, full_refresh as FuncPtr, 0);
     }
+
+    // C: #if defined(ENABLE_EXTRA) && defined(NCURSES_VERSION_PATCH)
+    #[cfg(feature = "extra")]
+    add_to_sclist(MMAIN, "M-&", 0, show_curses_version as FuncPtr, 0);
     #[cfg(feature = "tiny")]
     {
         add_to_sclist(MMOST | MBROWSER | MHELP | MYESNO, "^L", 0, full_refresh as FuncPtr, 0);

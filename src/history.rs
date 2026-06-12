@@ -102,50 +102,6 @@ pub fn reset_history_pointer_for(which: HistoryKind) {
 use super::HistoryKind;
 
 // ---------------------------------------------------------------------------
-// find_in_history  (internal helper)
-// ---------------------------------------------------------------------------
-
-/* C: linestruct *find_in_history(const linestruct *start, const linestruct *end,
- *                                 const char *text, size_t len) */
-/// Search `items[start_idx..=end_idx]` backward (from start_idx toward 0)
-/// for an entry whose first `len` bytes match `text`.
-/// The C code traverses via ->prev (so from `start` toward `htop`).
-/// In our Vec representation "older" entries have lower indices.
-/// `start_idx` is inclusive, stop *before* going past `stop_idx`.
-#[allow(dead_code)] // parity: C's find_history, for prompt history search — not yet wired
-fn find_in_history<'a>(
-    items: &'a [String],
-    start_idx: usize,
-    stop_idx: usize,
-    text: &str,
-    len: usize,
-) -> Option<usize> {
-    // C loop: for (item = start; item != end->prev && item != NULL; item = item->prev)
-    // In the C linked list, "start" is the most-recent non-sentinel node and we walk
-    // prev (toward older). Here items[0] is oldest. We iterate from start_idx down to
-    // stop_idx (inclusive).
-    let safe_len = len.min(text.len());
-    let prefix = &text[..safe_len];
-
-    let mut idx = start_idx;
-    loop {
-        let item = &items[idx];
-        let item_prefix = if item.len() >= safe_len { &item[..safe_len] } else { item.as_str() };
-        if item_prefix == prefix {
-            return Some(idx);
-        }
-        if idx == stop_idx {
-            break;
-        }
-        if idx == 0 {
-            break;
-        }
-        idx -= 1;
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // update_history
 // ---------------------------------------------------------------------------
 
