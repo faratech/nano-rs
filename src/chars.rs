@@ -7,6 +7,24 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 // Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 // Copyright (C) 2016-2021 Benno Schulenberg
 
+// Cached copy of AppState.using_utf8.  The flag is decided once during
+// startup (nano.rs) and never changes afterwards; caching it here avoids
+// a thread-local STATE lookup on every character scanned in the
+// width/stepping hot paths below.
+static USING_UTF8: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the startup-determined UTF-8 mode (also kept in AppState.using_utf8).
+#[inline]
+pub fn remember_utf8(on: bool) {
+    USING_UTF8.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is the locale UTF-8?  Cached equivalent of `STATE.using_utf8`.
+#[inline]
+pub fn using_utf8() -> bool {
+    USING_UTF8.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── Character classification ─────────────────────────────────────────────────
 
 /* C: bool is_alpha_char(const char *c)
@@ -71,7 +89,7 @@ pub fn is_cntrl_char(c: &str) -> bool {
         return false;
     }
 
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         // C: (c[0] & 0xE0) == 0  → bytes 0x00-0x1F
@@ -208,7 +226,7 @@ pub fn control_mbrep(c: &str, isdata: bool) -> char {
         }
     }
 
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         if (bytes[0] as u8) < 128 {
@@ -235,7 +253,7 @@ pub fn mbtowide(c: &str) -> Result<(char, usize), ()> {
         return Err(());
     }
 
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if (bytes[0] as i8) < 0 && using_utf8 {
         let v1 = bytes[0];
@@ -308,7 +326,7 @@ pub fn is_doublewidth(ch: &str) -> bool {
     if bytes[0] < 0xE1 {
         return false;
     }
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
     if !using_utf8 {
         return false;
     }
@@ -330,7 +348,7 @@ pub fn is_zerowidth(ch: &str) -> bool {
     if bytes[0] < 0xCC {
         return false;
     }
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
     if !using_utf8 {
         return false;
     }
@@ -358,7 +376,7 @@ pub fn char_length(s: &str) -> usize {
         return 1; // safety fallback
     }
 
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 && bytes[0] > 0xC1 {
         let c1 = bytes[0];
@@ -436,8 +454,7 @@ pub fn advance_over(s: &str, column: &mut usize) -> usize {
         return 1;
     }
 
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
-    let tabsize = STATE.with(|s| s.borrow().tabsize);
+    let using_utf8 = using_utf8();
 
     if (bytes[0] as i8) < 0 && using_utf8 {
         // UTF-8 upper control code: two bytes, two columns
@@ -477,7 +494,8 @@ pub fn advance_over(s: &str, column: &mut usize) -> usize {
     let b = bytes[0];
     if b < 0x20 {
         if b == b'\t' {
-            let ts = tabsize as usize;
+            // Tabs are rare: read tabsize only when one is actually met.
+            let ts = STATE.with(|s| s.borrow().tabsize) as usize;
             *column += ts - *column % ts;
         } else {
             *column += 2; // C0 control characters shown as ^X (2 columns)
@@ -498,7 +516,7 @@ pub fn advance_over(s: &str, column: &mut usize) -> usize {
  * Return the byte index of the start of the multibyte character immediately
  * before position `pos` in `buf`. */
 pub fn step_left(buf: &str, pos: usize) -> usize {
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         if pos == 0 {
@@ -562,7 +580,7 @@ pub fn mbstrcasecmp(s1: &str, s2: &str) -> i32 {
 /* C: int mbstrncasecmp(const char *s1, const char *s2, size_t n)
  * Case-insensitive comparison of up to `n` characters of two multibyte strings. */
 pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         let mut p1 = 0usize;
@@ -648,7 +666,7 @@ pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
  * Case-insensitive substring search for multibyte strings.
  * Returns the byte offset of the first match in `haystack`, or None. */
 pub fn mbstrcasestr(haystack: &str, needle: &str) -> Option<usize> {
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         let needle_chars = mbstrlen(needle);
@@ -742,7 +760,7 @@ pub fn revstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Optio
 /* C: char *mbrevstrcasestr(const char *haystack, const char *needle, const char *pointer)
  * Reverse case-insensitive search for multibyte strings, starting at `start_offset`. */
 pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Option<usize> {
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         let needle_chars = mbstrlen(needle);
@@ -787,7 +805,7 @@ pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Opt
  * Returns the byte offset of the match, or None. */
 #[cfg(any(not(feature = "tiny"), feature = "justify"))]
 pub fn mbstrchr(string: &str, chr: &str) -> Option<usize> {
-    let using_utf8 = STATE.with(|s| s.borrow().using_utf8);
+    let using_utf8 = using_utf8();
 
     if using_utf8 {
         let (wc_needle, bad_c) = match mbtowide(chr) {

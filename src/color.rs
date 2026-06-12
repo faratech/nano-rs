@@ -5,6 +5,7 @@
 
 use crate::definitions::*;
 use crate::global::{STATE, with_state, with_state_mut, A_REVERSE};
+use std::rc::Rc;
 
 #[cfg(feature = "color")]
 use crate::winio::{ncurses_color_to_crossterm, statusline};
@@ -472,24 +473,21 @@ pub fn precalc_multicolorinfo() {
         return;
     }
 
-    // Collect all line pointers from filetop to filebot.
-    let lines: Vec<LinePtr> = with_state(|s| {
-        let mut result = Vec::new();
-        let mut cur = s.openfile.as_ref().and_then(|f| f.filetop.clone());
-        while let Some(lp) = cur {
-            let next = lp.borrow().next.clone();
-            result.push(lp);
-            cur = next;
-        }
-        result
-    });
+    let (filetop, filebot) = with_state(|s| (
+        s.openfile.as_ref().and_then(|f| f.filetop.clone()),
+        s.openfile.as_ref().and_then(|f| f.filebot.clone()),
+    ));
 
-    // Allocate multidata for each line that doesn't have it yet.
-    for lp in &lines {
-        let needs_alloc = lp.borrow().multidata.is_empty();
-        if needs_alloc {
-            lp.borrow_mut().multidata = vec![0i16; multiscore as usize];
+    // For each line, allocate cache space for the multiline-regex info.
+    let mut walker = filetop.clone();
+    while let Some(lp) = walker {
+        {
+            let mut b = lp.borrow_mut();
+            if b.multidata.is_empty() {
+                b.multidata = vec![0i16; multiscore as usize];
+            }
         }
+        walker = lp.borrow().next.clone();
     }
 
     // Walk each color rule.
@@ -503,200 +501,113 @@ pub fn precalc_multicolorinfo() {
         let ink = unsafe { &*ink_ptr };
 
         // If this is not a multi-line regex, skip it.
-        if ink.end.is_none() {
+        let (Some(start_regex), Some(end_regex)) = (&ink.start, &ink.end) else {
             ink_ptr = ink.next.as_deref()
                 .map(|p| p as *const ColorType)
                 .unwrap_or(std::ptr::null());
             continue;
-        }
-
-        let start_regex = match &ink.start {
-            Some(r) => r,
-            None => {
-                ink_ptr = ink.next.as_deref()
-                    .map(|p| p as *const ColorType)
-                    .unwrap_or(std::ptr::null());
-                continue;
-            }
         };
-        let end_regex = ink.end.as_ref().unwrap();
         let id = ink.id as usize;
 
-        let mut line_idx = 0;
-        while line_idx < lines.len() {
-            let lp = &lines[line_idx];
-            let line_data = lp.borrow().data.clone();
+        let mut line = filetop.clone();
+        while let Some(mut lp) = line {
             let mut index: usize = 0;
 
-            // Assume nothing applies until proven otherwise.
+            // Assume nothing applies until proven otherwise below.
             {
-                let mut borrow = lp.borrow_mut();
-                if id < borrow.multidata.len() {
-                    borrow.multidata[id] = NOTHING;
-                }
+                let mut b = lp.borrow_mut();
+                if id < b.multidata.len() { b.multidata[id] = NOTHING; }
             }
 
-            // When the line contains a start match, look for an end.
+            // When the line contains a start match, look for an end,
+            // and if found, mark all the lines that are affected.
+            // (find_at gives REG_NOTBOL semantics: ^ only matches at
+            // the real start of the string, never at index > 0.)
             loop {
-                // Use find_at for REG_NOTBOL semantics: when index > 0,
-                // ^ anchors won't match at position `index`, exactly like REG_NOTBOL.
-                let start_match = start_regex.find_at(&line_data, index);
-                let sm = match start_match {
-                    Some(m) => m,
-                    None => break,
+                let sm = {
+                    let b = lp.borrow();
+                    start_regex.find_at(&b.data, index).map(|m| (m.start(), m.end()))
                 };
+                let Some((sm_so, sm_eo)) = sm else { break };
 
-                // Advance index past the start match end (absolute offset).
-                index = sm.end();
+                // Begin looking for an end match after the start match.
+                index = sm_eo;
 
-                // Look for an end match on this same line (after the start).
-                let end_match = end_regex.find_at(&line_data, index);
-                if let Some(em) = end_match {
+                // If there is an end match on this same line, mark the line,
+                // but continue looking for other starts after it.
+                let em = {
+                    let b = lp.borrow();
+                    end_regex.find_at(&b.data, index).map(|m| m.end())
+                };
+                if let Some(em_eo) = em {
                     {
-                        let mut borrow = lp.borrow_mut();
-                        if id < borrow.multidata.len() {
-                            borrow.multidata[id] = JUSTONTHIS;
-                        }
+                        let mut b = lp.borrow_mut();
+                        if id < b.multidata.len() { b.multidata[id] = JUSTONTHIS; }
                     }
-                    index = em.end();
 
                     // If the total match has zero length, force an advance.
-                    let start_len = sm.end() - sm.start();
-                    let end_len = em.end() - em.start();
-                    if start_len + end_len == 0 {
+                    // (C: startmatch.rm_eo - rm_so + endmatch.rm_eo == 0,
+                    // where endmatch offsets are relative to `index`.)
+                    let zero_length = (sm_eo - sm_so) + (em_eo - index) == 0;
+                    index = em_eo;
+                    if zero_length {
                         // When at end-of-line, there is no other start.
-                        if index >= line_data.len() {
-                            break;
-                        }
-                        index = step_right(&line_data, index);
+                        let at_eol = index >= lp.borrow().data.len();
+                        if at_eol { break; }
+                        index = { let b = lp.borrow(); step_right(&b.data, index) };
                     }
                     continue;
                 }
 
-                // No end match on this line — look on later lines.
-                // Mark current line as STARTSHERE.
-                {
-                    let mut borrow = lp.borrow_mut();
-                    if id < borrow.multidata.len() {
-                        borrow.multidata[id] = STARTSHERE;
+                // Look for an end match on later lines.
+                let mut tailline = lp.borrow().next.clone();
+                let mut tail_end_eo = 0usize;
+                loop {
+                    let Some(tl) = tailline.clone() else { break };
+                    let found = { let b = tl.borrow(); end_regex.find(&b.data).map(|m| m.end()) };
+                    match found {
+                        Some(eo) => { tail_end_eo = eo; break; }
+                        None => tailline = tl.borrow().next.clone(),
                     }
                 }
 
-                // Find the tail line where the end regex matches.
-                let mut tail_idx = line_idx + 1;
-                while tail_idx < lines.len() {
-                    let tail_data = lines[tail_idx].borrow().data.clone();
-                    if end_regex.find(&tail_data).is_some() {
+                {
+                    let mut b = lp.borrow_mut();
+                    if id < b.multidata.len() { b.multidata[id] = STARTSHERE; }
+                }
+
+                // Mark all lines between this one and the tail as WHOLELINE.
+                // (In C this also advances `line` in the main loop.)
+                let mut mid = lp.borrow().next.clone();
+                while let Some(m) = mid {
+                    if tailline.as_ref().is_some_and(|t| Rc::ptr_eq(&m, t)) { break; }
+                    {
+                        let mut b = m.borrow_mut();
+                        if id < b.multidata.len() { b.multidata[id] = WHOLELINE; }
+                    }
+                    mid = m.borrow().next.clone();
+                }
+
+                match tailline {
+                    None => {
+                        // C: line = openfile->filebot; break;
+                        if let Some(fb) = filebot.clone() { lp = fb; }
                         break;
                     }
-                    tail_idx += 1;
-                }
-
-                // Mark all intermediate lines as WHOLELINE.
-                let mut mid = line_idx + 1;
-                while mid < tail_idx {
-                    let mid_lp = &lines[mid];
-                    let mut borrow = mid_lp.borrow_mut();
-                    if id < borrow.multidata.len() {
-                        borrow.multidata[id] = WHOLELINE;
-                    }
-                    mid += 1;
-                }
-
-                if tail_idx >= lines.len() {
-                    // No end found — advance to end of line list.
-                    line_idx = lines.len().saturating_sub(1);
-                    break;
-                }
-
-                // Mark the tail line as ENDSHERE.
-                {
-                    let tail_lp = &lines[tail_idx];
-                    let mut borrow = tail_lp.borrow_mut();
-                    if id < borrow.multidata.len() {
-                        borrow.multidata[id] = ENDSHERE;
-                    }
-                }
-
-                // Look for a possible new start after the end match on tail line.
-                let tail_data = lines[tail_idx].borrow().data.clone();
-                let tail_end_match = end_regex.find(&tail_data);
-                index = tail_end_match.map(|m| m.end()).unwrap_or(0);
-
-                // In C: after the inner 'for' that marks WHOLELINE lines,
-                // 'line' points to tailline and the outer loop body continues
-                // with the updated 'index' on tailline.
-                // We update line_data and line_idx to tail_idx, then continue
-                // the inner while-loop from the new index on that line.
-                // We also need to update `lp` to point to tail_idx's line.
-                // Since `lp` is the reference from `lines[line_idx]`, we must
-                // restructure: set line_idx to tail_idx and re-bind lp.
-                // The simplest correct approach: decrement line_idx so that
-                // the outer +1 lands on tail_idx, but with index != 0 we'd
-                // lose that. Instead, handle tail_idx inline by continuing
-                // the inner loop body for that line.
-                //
-                // Restructured: set line_idx = tail_idx and break inner loop.
-                // The outer loop will increment to tail_idx+1, skipping tail.
-                // To not skip tail_idx (which needs processing from `index`),
-                // we use a secondary inner loop for tail_idx before breaking.
-                {
-                    let tail_lp = lines[tail_idx].clone();
-                    let inner_data = tail_lp.borrow().data.clone();
-                    // Continue scanning tail_idx from `index` for more starts.
-                    // (The outer loop will start fresh on tail_idx+1.)
-                    // We re-enter the start-match scan below:
-                    let mut idx2 = index;
-                    loop {
-                        let sm2 = start_regex.find_at(&inner_data, idx2);
-                        let sm2 = match sm2 { Some(m) => m, None => break };
-                        idx2 = sm2.end();
-                        let em2 = end_regex.find_at(&inner_data, idx2);
-                        if let Some(em) = em2 {
-                            {
-                                let mut b = tail_lp.borrow_mut();
-                                if id < b.multidata.len() { b.multidata[id] = JUSTONTHIS; }
-                            }
-                            idx2 = em.end();
-                            let sl = sm2.end() - sm2.start();
-                            let el = em.end() - em.start();
-                            if sl + el == 0 {
-                                if idx2 >= inner_data.len() { break; }
-                                idx2 = step_right(&inner_data, idx2);
-                            }
-                            continue;
-                        }
-                        // No end on tail line — it starts a new multi-line span.
+                    Some(t) => {
                         {
-                            let mut b = tail_lp.borrow_mut();
-                            if id < b.multidata.len() { b.multidata[id] = STARTSHERE; }
-                        }
-                        // Find the new tail.
-                        let mut t2 = tail_idx + 1;
-                        while t2 < lines.len() {
-                            let d2 = lines[t2].borrow().data.clone();
-                            if end_regex.find(&d2).is_some() { break; }
-                            t2 += 1;
-                        }
-                        let mut m2 = tail_idx + 1;
-                        while m2 < t2 {
-                            let mut b = lines[m2].borrow_mut();
-                            if id < b.multidata.len() { b.multidata[id] = WHOLELINE; }
-                            m2 += 1;
-                        }
-                        if t2 < lines.len() {
-                            let mut b = lines[t2].borrow_mut();
+                            let mut b = t.borrow_mut();
                             if id < b.multidata.len() { b.multidata[id] = ENDSHERE; }
                         }
-                        // For simplicity, don't recurse further on t2.
-                        break;
+                        // Look for a possible new start after the end match,
+                        // continuing the scan on the tail line.
+                        index = tail_end_eo;
+                        lp = t;
                     }
                 }
-                line_idx = tail_idx;
-                break;
             }
 
-            line_idx += 1;
+            line = lp.borrow().next.clone();
         }
 
         ink_ptr = ink.next.as_deref()

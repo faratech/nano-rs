@@ -1904,6 +1904,7 @@ pub fn nano_main() {
                         let cs = std::ffi::CStr::from_ptr(codeset).to_string_lossy();
                         if cs == "UTF-8" {
                             with_state_mut(|s| s.using_utf8 = true);
+                            crate::chars::remember_utf8(true);
                         }
                     }
                 }
@@ -1918,6 +1919,7 @@ pub fn nano_main() {
     #[cfg(not(unix))]
     {
         with_state_mut(|s| s.using_utf8 = true);
+        crate::chars::remember_utf8(true);
     }
 
     // ----------------------------------------------------------------

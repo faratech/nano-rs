@@ -2013,9 +2013,21 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
         return String::new();
     }
 
-    let cols = with_state(|s| s.midwin.cols) as usize;
-    let tabsize = with_state(|s| s.tabsize) as usize;
+    // Hoist all the per-call state out of the per-character loop below.
+    let (cols, tabsize, softwrap) = with_state(|s| (
+        s.midwin.cols as usize,
+        s.tabsize as usize,
+        s.flag_isset(SOFTWRAP),
+    ));
     let tabsize = if tabsize == 0 { 8 } else { tabsize };
+
+    #[cfg(not(feature = "tiny"))]
+    let (ws_display, whitespace, wlen0, wlen1) = with_state(|s| (
+        s.flag_isset(WHITESPACE_DISPLAY),
+        if s.flag_isset(WHITESPACE_DISPLAY) { s.whitespace.clone() } else { None },
+        s.whitelen[0] as usize,
+        s.whitelen[1] as usize,
+    ));
 
     let start_x = actual_x(text, column);
     let start_col = wideness(text, start_x);
@@ -2102,10 +2114,8 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
         // Space
         if b == b' ' {
             #[cfg(not(feature = "tiny"))]
-            if with_state(|s| s.flag_isset(WHITESPACE_DISPLAY)) {
-                if let Some(ref ws) = with_state(|s| s.whitespace.clone()) {
-                    let wlen0 = with_state(|s| s.whitelen[0]) as usize;
-                    let wlen1 = with_state(|s| s.whitelen[1]) as usize;
+            if ws_display {
+                if let Some(ref ws) = whitespace {
                     converted.push_str(&ws[wlen0..wlen0 + wlen1]);
                     cur_col += 1;
                     pos += 1;
@@ -2121,14 +2131,13 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
         // Tab
         if b == b'\t' {
             #[cfg(not(feature = "tiny"))]
-            if with_state(|s| s.flag_isset(WHITESPACE_DISPLAY)) {
+            if ws_display {
                 let can_show_tab = converted.len() > 0 || !isdata
-                    || !with_state(|s| s.flag_isset(SOFTWRAP))
+                    || !softwrap
                     || cur_col % tabsize == 0
                     || cur_col == start_col;
                 if can_show_tab {
-                    if let Some(ref ws) = with_state(|s| s.whitespace.clone()) {
-                        let wlen0 = with_state(|s| s.whitelen[0]) as usize;
+                    if let Some(ref ws) = whitespace {
                         converted.push_str(&ws[..wlen0]);
                         cur_col += 1;
                         pos += 1;
@@ -2201,7 +2210,7 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
     tl_set!(TILL_X, pos);
 
     // Trim if we went past the right edge
-    if cur_col > beyond || (pos < text.len() && (isprompt || (isdata && !with_state(|s| s.flag_isset(SOFTWRAP))))) {
+    if cur_col > beyond || (pos < text.len() && (isprompt || (isdata && !softwrap))) {
         #[cfg(feature = "utf8")]
         {
             let mut trim_pos = converted.len();
@@ -2374,9 +2383,10 @@ pub fn ncurses_color_to_crossterm(nc: i16) -> Color {
 
 /* C: void titlebar(const char *path) */
 pub fn titlebar(path: Option<&str>) {
-    let (topwin_rows, topwin_y, topwin_x, cols) = with_state(|s| {
-        (s.topwin.rows, s.topwin.y, s.topwin.x, s.topwin.cols)
-    });
+    let (topwin_rows, topwin_y, topwin_x, cols, title_pair, currmenu, inhelp) = with_state(|s| (
+        s.topwin.rows, s.topwin.y, s.topwin.x, s.topwin.cols,
+        s.interface_color_pair[TITLE_BAR], s.currmenu, s.inhelp,
+    ));
 
     if topwin_rows == 0 {
         return;
@@ -2386,21 +2396,15 @@ pub fn titlebar(path: Option<&str>) {
 
     // Apply title bar color — all on the SAME stdout handle so
     // the attribute is guaranteed to precede the fill in the output stream.
-    let title_pair = with_state(|s| s.interface_color_pair[TITLE_BAR]);
     queue_interface_color(&mut stdout, title_pair);
 
     // Fill the entire top row with the title-bar background.
-    let (topwin_x, topwin_y, cols) = with_state(|s| (s.topwin.x, s.topwin.y, s.topwin.cols));
     let spaces = " ".repeat(cols as usize);
     let _ = queue!(stdout, MoveTo(topwin_x, topwin_y), Print(&spaces));
     // Move back to start to overprint with actual title text.
     let _ = queue!(stdout, MoveTo(topwin_x, topwin_y));
 
     with_state_mut(|s| s.as_an_at = false);
-
-    // Determine what to show
-    let currmenu = with_state(|s| s.currmenu);
-    let inhelp = with_state(|s| s.inhelp);
 
     let (upperleft, prefix, state, caption) = compute_titlebar_strings(path, currmenu, inhelp);
 
@@ -2465,10 +2469,12 @@ pub fn titlebar(path: Option<&str>) {
     // Print state flags or state word
     #[cfg(not(feature = "tiny"))]
     {
-        let stateflags = with_state(|s| s.flag_isset(STATEFLAGS));
-        let view_mode = with_state(|s| s.flag_isset(VIEW_MODE));
+        let (stateflags, view_mode, modified) = with_state(|s| (
+            s.flag_isset(STATEFLAGS),
+            s.flag_isset(VIEW_MODE),
+            s.openfile.as_ref().map(|f| f.modified).unwrap_or(false),
+        ));
         if !state.is_empty() && stateflags && !view_mode {
-            let modified = with_state(|s| s.openfile.as_ref().map(|f| f.modified).unwrap_or(false));
             if modified && cols > 1 {
                 let _ = queue!(stdout, Print(" *"));
             }
@@ -2599,8 +2605,23 @@ fn compute_titlebar_strings(
 /* C: void minibar(void) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn minibar() {
-    let (footwin_x, footwin_y, cols) = with_state(|s| {
-        (s.footwin.x, s.footwin.y, s.footwin.cols as usize)
+    let (footwin_x, footwin_y, cols, mini_pair,
+         filename, modified, current_lineno, filebot_lineno, totsize,
+         constant_show, stateflags, has_anchor, using_utf8) = with_state(|s| {
+        let f = s.openfile.as_ref();
+        (
+            s.footwin.x, s.footwin.y, s.footwin.cols as usize,
+            s.interface_color_pair[MINI_INFOBAR],
+            f.map(|f| f.filename.clone()).unwrap_or_default(),
+            f.map(|f| f.modified).unwrap_or(false),
+            f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1),
+            f.and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1),
+            f.map(|f| f.totsize).unwrap_or(0),
+            s.flag_isset(CONSTANT_SHOW),
+            s.flag_isset(STATEFLAGS),
+            f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().has_anchor).unwrap_or(false),
+            s.using_utf8,
+        )
     });
 
     if cols == 0 { return; }
@@ -2608,21 +2629,10 @@ pub fn minibar() {
     let mut stdout = out();
 
     // Draw colored bar
-    let mini_pair = with_state(|s| s.interface_color_pair[MINI_INFOBAR]);
     apply_interface_color(mini_pair);
 
     let spaces = " ".repeat(cols);
     let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Print(&spaces));
-
-    let (filename, modified, current_lineno, filebot_lineno, totsize) = with_state(|s| {
-        let f = s.openfile.as_ref();
-        let fname = f.map(|f| f.filename.clone()).unwrap_or_default();
-        let modif = f.map(|f| f.modified).unwrap_or(false);
-        let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
-        let fb = f.and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
-        let ts = f.map(|f| f.totsize).unwrap_or(0);
-        (fname, modif, cl, fb, ts)
-    });
 
     with_state_mut(|s| s.as_an_at = false);
 
@@ -2665,7 +2675,6 @@ pub fn minibar() {
     }
 
     // Display cursor position
-    let constant_show = with_state(|s| s.flag_isset(CONSTANT_SHOW));
     if constant_show && namewidth + 32 < cols {
         let loc_col = (cols - 27 - placewidth) as u16;
         let _ = queue!(stdout, MoveTo(footwin_x + loc_col, footwin_y), Print(&location));
@@ -2679,22 +2688,14 @@ pub fn minibar() {
     }
 
     // Display state flags
-    let stateflags = with_state(|s| s.flag_isset(STATEFLAGS));
     if stateflags && namewidth + 14 + 2 * padding < cols {
         let state_col = (cols - 11 - padding) as u16;
         show_states_at_win(&with_state(|s| s.footwin.clone()), 0, state_col);
     }
 
     // Display anchor indicator
-    let has_anchor = with_state(|s| {
-        s.openfile.as_ref()
-            .and_then(|f| f.current.as_ref())
-            .map(|l| l.borrow().has_anchor)
-            .unwrap_or(false)
-    });
     if has_anchor && namewidth + 7 < cols {
         let anchor_col = (cols - 5 - padding) as u16;
-        let using_utf8 = with_state(|s| s.using_utf8);
         let dagger = if using_utf8 { "\u{2020}" } else { "+" };
         let _ = queue!(stdout, MoveTo(footwin_x + anchor_col, footwin_y), Print(dagger));
     }
