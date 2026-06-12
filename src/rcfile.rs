@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/rcfile.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014 Mike Frysinger
@@ -6,7 +6,8 @@
 //             Copyright (C) 2014-2021, 2024 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
+use crate::global::{with_state, with_state_mut};
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET};
 use std::cell::RefCell;
 use std::fs::{self, File};
@@ -20,7 +21,7 @@ use regex::{Regex, RegexBuilder};
 // Module-level statics (thread_local replacements for C file-scope statics)
 // ---------------------------------------------------------------------------
 
-/// The current line number being parsed (C: static size_t lineno).
+// The current line number being parsed (C: static size_t lineno).
 thread_local! {
     static LINENO: RefCell<usize> = RefCell::new(0);
     /// The path to the rcfile being parsed (C: static char *nanorc).
@@ -102,11 +103,6 @@ pub const COLOR_WHITE:   i16 = 7;
 /// Number of colors the terminal supports (placeholder; will be 8 or 256).
 /// C: COLORS — ncurses global. We use 256 as a safe default for config parsing.
 const COLORS: i16 = 256;
-
-/// NANO_REG_EXTENDED: used when building regexes (case-sensitive).
-const NANO_REG_EXTENDED: bool = false;
-/// REG_ICASE: case-insensitive flag.
-const REG_ICASE: bool = true;
 
 /// SYSCONFDIR — where the system-wide nanorc lives.
 const SYSCONFDIR: &str = "/etc";
@@ -852,7 +848,7 @@ fn parse_combination(combotext: &str) -> Option<(i16, i16, i32)> {
     };
 
     let bg = if let Some(bg_name) = bg_str {
-        let (color, vivid, thick) = color_to_short(bg_name);
+        let (color, vivid, _thick) = color_to_short(bg_name);
         if color == BAD_COLOR {
             return None;
         }
@@ -1126,6 +1122,7 @@ fn begin_new_syntax(ptr: &str) {
 /// Helper: build + store a regex list (outside any STATE borrow).
 /// Calls grab_and_store_build then appends to storage.
 #[cfg(feature = "color")]
+#[allow(dead_code)] // parity: companion to grab_and_store_build for extendsyntax handling
 fn grab_and_store_extensions(kind: &str, ptr: &str, storage: &mut Option<Box<RegexListType>>) {
     // is_default: not applicable in direct-storage mode; opensyntax check done in grab_and_store_build
     if let Some(new_items) = grab_and_store_build(kind, ptr, false) {
@@ -1318,7 +1315,7 @@ pub fn parse_syntax_commands(keyword: &str, ptr: &str) -> bool {
 }
 
 #[cfg(not(feature = "color"))]
-pub fn parse_syntax_commands(keyword: &str, ptr: &str) -> bool {
+pub fn parse_syntax_commands(_keyword: &str, _ptr: &str) -> bool {
     false
 }
 
@@ -2073,7 +2070,7 @@ pub fn parse_rcfile<R: BufRead>(reader: R, just_syntax: bool, intros_only: bool)
 
 /// Handle all non-color set options.
 fn handle_non_color_option(option: &str, argument: &str) {
-    use crate::utils::{parse_num, mallocstrcpy};
+    use crate::utils::parse_num;
     use crate::chars::{has_blank_char, mbstrlen, char_length};
 
     #[cfg(feature = "operatingdir")]

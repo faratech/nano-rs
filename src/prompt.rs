@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/prompt.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2016, 2018, 2020-2022, 2025 Benno Schulenberg
@@ -9,12 +9,10 @@
 // (at your option) any later version.
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
-use crate::winio;
-use crate::history;
+use crate::global::{with_state, with_state_mut};
 
 // Bring the exported macros into scope.
-use crate::{ISSET, TOGGLE, SET, UNSET};
+use crate::{ISSET, TOGGLE};
 
 // The tr! translation macro is defined once in main.rs (#[macro_export]).
 use crate::tr;
@@ -308,7 +306,7 @@ pub fn process_prompt_click() -> i32 {
     /* When the click is in the prompt bar, position the cursor. */
     if retval == 0 {
         // wmouse_trafo equivalent: check if click is in footwin row 0
-        let (foot_y, foot_cols) = with_state(|s| (s.footwin.y as i32, s.footwin.cols as i32));
+        let (_foot_y, _foot_cols) = with_state(|s| (s.footwin.y as i32, s.footwin.cols as i32));
         if click_row == 0 {
             let prompt_str = get_prompt();
             let start_col = breadth(&prompt_str) + 2;
@@ -630,8 +628,8 @@ fn acquire_an_answer(
         }
     }
 
-    let mut input: i32 = 0;
-    let mut function: Option<FuncPtr> = None;
+    let mut input: i32;
+    let mut function: Option<FuncPtr>;
 
     loop {
         draw_the_promptbar();
@@ -739,12 +737,9 @@ fn acquire_an_answer(
                     previous_was_tab = true;
                 }
                 continue;
-            } else {
-                #[cfg(all(feature = "histories", feature = "tabcomp"))]
-                {
-                    previous_was_tab = false;
-                }
             }
+            // (When it wasn't a double tab, previous_was_tab gets refreshed
+            // at the bottom of the loop.)
         }
 
         #[cfg(feature = "histories")]
@@ -1005,7 +1000,7 @@ fn do_tab_complete(refresh_func: Option<fn()>, listed: &mut bool) {
         let answer = with_state(|s| s.answer.clone());
         let mut tx = get_typing_x();
         let new_answer = crate::files::input_tab(&answer, &mut tx, refresh_func.unwrap_or(|| {}), listed);
-        let new_len = new_answer.len();
+        let _new_len = new_answer.len();
         with_state_mut(|s| s.answer = new_answer);
         set_typing_x(tx);
     }
@@ -1056,7 +1051,7 @@ pub fn do_prompt(
     }
 
     let cols = crate::winio::get_cols();
-    let maxcharlen = MAXCHARLEN;
+    let _maxcharlen = MAXCHARLEN;
 
     // redo_theprompt label → we use a loop for the resize-retry.
     let result;

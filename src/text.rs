@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/text.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2015 Mark Majeres
@@ -12,29 +12,35 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#[allow(unused_imports)] // some of these are used only under feature gates
 use std::rc::Rc;
+#[allow(unused_imports)] // some of these are used only under feature gates
 use std::cell::RefCell;
 use crate::definitions::*;
-use crate::{ISSET, SET, UNSET, TOGGLE, tr};
-use crate::global::{STATE, with_state, with_state_mut, AppState,
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::{ISSET, SET, UNSET, tr};
+use crate::global::{with_state, with_state_mut,
     flag_index, flag_mask,
 };
-use crate::definitions::*;
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::chars::{
     is_blank_char, is_word_char, char_length, step_left, step_right,
     advance_over, mbstrlen, mbstrchr, white_string,
 };
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::utils::{
-    xplustabs, measured_copy, copy_of, wideness, breadth, actual_x,
+    xplustabs, measured_copy, wideness, breadth, actual_x,
     new_magicline, remove_magicline, mark_is_before_cursor, get_range,
-    get_region, line_from_number,
+    get_region,
 };
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::winio::{
     statusline, statusbar, titlebar, edit_refresh, adjust_viewport,
     ensure_firstcolumn_is_aligned, blank_bottombars, bottombars, place_the_cursor,
     wipe_statusbar, full_refresh, window_init,
 };
 use crate::files::set_modified;
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::cut::{expunge, do_snip};
 use crate::search::goto_line_posx;
 
@@ -176,7 +182,7 @@ fn terminal_init() {
 /// C: doupdate() — flush pending ncurses updates.
 fn doupdate() {
     // Crossterm: flush stdout.
-    use std::io::Write;
+    
     crate::winio::flush_out();
 }
 
@@ -208,21 +214,9 @@ fn regenerate_screen() {
     full_refresh();
 }
 
-/// C: wredrawln(win, y, n) — mark n lines for refresh.
-#[cfg(not(feature = "tiny"))]
-fn wredrawln(y: i32, n: i32) {
-    // No-op in crossterm port; edit_refresh will repaint everything.
-}
-
 /// C: wnoutrefresh(win) — schedule deferred refresh.
 fn wnoutrefresh() {
     // No-op; use doupdate/full_refresh instead.
-}
-
-/// C: open_file(filename, new_one, stream) — open a file for reading.
-/// Returns a file descriptor >= 0 on success, < 0 on failure.
-fn open_file_fd(filename: &str, new_one: bool) -> Option<std::fs::File> {
-    std::fs::File::open(filename).ok()
 }
 
 /// C: read_file(stream, fd, filename, undoable) — read file into buffer.
@@ -255,11 +249,6 @@ fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 /// C: ask_user(withall, question) — ask YES/NO/CANCEL question on status bar.
 fn ask_user(withall: bool, question: &str) -> i32 {
     crate::prompt::ask_user(withall, question)
-}
-
-/// C: safe_tempfile(&stream) — create a temp file, return name.
-fn safe_tempfile_name() -> Option<String> {
-    crate::files::safe_tempfile().map(|(name, _)| name)
 }
 
 /// C: findnextstr — search forward for a string.
@@ -295,12 +284,6 @@ fn begpar(line: &LinePtr, depth: i32) -> bool {
     begpar_fn(line, depth)
 }
 
-#[cfg(feature = "justify")]
-/// C: do_para_begin(line_ref) — move line_ref back to paragraph start.
-fn para_begin(line: &mut LinePtr) {
-    *line = do_para_begin(line.clone());
-}
-
 /// Access the global cutbuffer.
 fn get_cutbuffer() -> Option<LinePtr> {
     with_state(|s| s.cutbuffer.clone())
@@ -308,30 +291,6 @@ fn get_cutbuffer() -> Option<LinePtr> {
 
 fn set_cutbuffer(buf: Option<LinePtr>) {
     with_state_mut(|s| s.cutbuffer = buf);
-}
-
-fn get_cutbottom() -> Option<LinePtr> {
-    with_state(|s| s.cutbottom.clone())
-}
-
-// ---------------------------------------------------------------------------
-// Macro-equivalent accessors for AppState fields via STATE
-// ---------------------------------------------------------------------------
-
-macro_rules! openfile_field {
-    ($field:ident) => {
-        with_state(|s| s.openfile.as_ref().map(|f| f.$field.clone()).unwrap_or_default())
-    };
-}
-
-macro_rules! set_openfile_field {
-    ($field:ident, $val:expr) => {
-        with_state_mut(|s| {
-            if let Some(ref mut f) = s.openfile {
-                f.$field = $val;
-            }
-        })
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2003,7 +1962,7 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
     }
 
     // Prepend to undo stack.
-    let new_u_raw = &*u as *const UndoStruct as *mut UndoStruct;
+    let _new_u_raw = &*u as *const UndoStruct as *mut UndoStruct;
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             u.next = f.undotop.take();
@@ -2100,8 +2059,8 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
 
                 if let Some(ref m) = mark {
                     let mark_lineno = m.borrow().lineno;
-                    let cur_lineno = thisline.borrow().lineno;
-                    let cur_x = current_x;
+                    let _cur_lineno = thisline.borrow().lineno;
+                    let _cur_x = current_x;
 
                     if mark_is_before_cursor() {
                         u.head_lineno = mark_lineno;
@@ -2213,7 +2172,7 @@ pub fn update_multiline_undo(lineno: isize, indentation: &str) {
         }
 
         // Create a new group.
-        let mut born = Box::new(GroupStruct {
+        let born = Box::new(GroupStruct {
             top_line: lineno,
             bottom_line: lineno,
             indentations: vec![indentation.to_string()],
@@ -2273,7 +2232,7 @@ pub fn update_undo(action: UndoType) {
                 let cur_safe = safe_char_boundary(&data, current_x);
                 let text_at_pos = &data[cur_safe..];
                 let charlen = char_length(text_at_pos);
-                let datalen = u.strdata.as_deref().map(|s| s.len()).unwrap_or(0);
+                let _datalen = u.strdata.as_deref().map(|s| s.len()).unwrap_or(0);
 
                 if current_x == u.head_x {
                     // Deleted more forward.
@@ -2520,7 +2479,7 @@ pub fn do_wrap() {
 
         let mut rr = rear_x;
         loop {
-            let cur_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+            let _cur_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
             let d = line.borrow().data.clone();
             if rr == 0 { break; }
             if (rr != typed_x || current_x_val >= wrap_loc) && is_blank_char(&d[rr..]) {
@@ -2568,7 +2527,7 @@ pub fn do_wrap() {
             let new_line = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
             if let Some(ref nl) = new_line {
                 let nl_data = nl.borrow().data.clone();
-                let nl_len = nl_data.len();
+                let _nl_len = nl_data.len();
                 let prev_data = nl.borrow().prev.as_ref()
                     .and_then(|w| w.upgrade())
                     .map(|p| p.borrow().data[..lead_len.min(p.borrow().data.len())].to_string())
@@ -2850,7 +2809,7 @@ pub fn find_paragraph(firstline: &mut LinePtr, linecount: &mut usize) -> bool {
 #[cfg(feature = "justify")]
 pub fn concat_paragraph(line: &LinePtr, count: usize) {
     let mut remaining = count;
-    let mut cur = line.clone();
+    let cur = line.clone();
     while remaining > 1 {
         let next_line = cur.borrow().next.clone();
         if let Some(ref nl) = next_line {
@@ -3069,7 +3028,7 @@ pub fn justify_text(whole_buffer: bool) {
             // Get region boundaries.
             let (sl, sx, el, ex) = {
                 // Adjust region: recede over blanks at start, advance over blanks at end.
-                let (mut s_lineno, mut sx_v, mut e_lineno, mut ex_v) = get_region();
+                let (s_lineno, mut sx_v, e_lineno, mut ex_v) = get_region();
                 let (Some(sl_ptr), Some(el_ptr)) = (
                     get_line_from_number(s_lineno as isize),
                     get_line_from_number(e_lineno as isize),
@@ -3279,9 +3238,13 @@ pub fn justify_text(whole_buffer: bool) {
             });
             return;
         }
-        // NANO_TINY: no mark support, fall through to non-mark path
-        let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
-        startline = sl; start_x = sx; endline = el; end_x = ex;
+        // Under NANO_TINY there is no mark support: has_mark is always
+        // false, so this branch is never taken; satisfy the compiler.
+        #[cfg(feature = "tiny")]
+        {
+            let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
+            startline = sl; start_x = sx; endline = el; end_x = ex;
+        }
     } else {
         let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
         startline = sl;
@@ -3727,7 +3690,7 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
         replaced = replace_buffer(tempfile_name, UndoType::CutToEof, if spelling { "spelling correction" } else { "formatting" });
     }
 
-    let cur_x_now = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+    let _cur_x_now = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     goto_line_posx(was_lineno, was_x);
 
     let cur_data_len = with_state(|s| {
@@ -3754,7 +3717,7 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
     if replaced {
         #[cfg(not(feature = "tiny"))]
         {
-            let filetop_anchor = {
+            let _filetop_anchor = {
                 let ft = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()));
                 if let Some(ref ft) = ft {
                     ft.borrow_mut().has_anchor = false;
@@ -3890,7 +3853,7 @@ pub fn fix_spello(word: &str) -> bool {
         if in_mark {
             // Restore mark and cursor.
             let right_side_up = mark_is_before_cursor();
-            let Some((top, top_x, bot, bot_x)) = get_region_as_lines_coords() else { return proceed };
+            let Some((top, top_x, _bot, _bot_x)) = get_region_as_lines_coords() else { return proceed };
             if right_side_up {
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
@@ -3947,7 +3910,7 @@ fn get_region_as_lines_coords() -> Option<(LinePtr, usize, LinePtr, usize)> {
 #[cfg(feature = "speller")]
 pub fn spell_check(tempfile_name: &str) {
     use std::process::{Command, Stdio};
-    use std::io::Read;
+    
 
     statusbar(tr!("Invoking spell checker..."));
 
@@ -4044,13 +4007,11 @@ pub fn spell_check(tempfile_name: &str) {
     UNSET!(BACKWARDS_SEARCH);
     UNSET!(USE_REGEXP);
 
-    let mut proceed = true;
     for word in misspellings.split(|c| c == '\r' || c == '\n') {
         if word.is_empty() {
             continue;
         }
         if !fix_spello(word) {
-            proceed = false;
             break;
         }
     }
@@ -4069,7 +4030,7 @@ pub fn do_spell() {
         return;
     }
 
-    let (temp_name, stream) = match crate::files::safe_tempfile() {
+    let (temp_name, _stream) = match crate::files::safe_tempfile() {
         Some(pair) => pair,
         None => {
             statusline(MessageType::Alert, tr!("Error writing temp file: cannot create"));
@@ -4133,7 +4094,7 @@ pub fn do_spell() {
 #[cfg(feature = "linter")]
 pub fn do_linter() {
     use std::process::{Command, Stdio};
-    use std::io::Read;
+    
 
     with_state_mut(|s| s.ran_a_tool = true);
 
@@ -4353,6 +4314,9 @@ pub fn do_linter() {
 /// One parsed lint diagnostic.
 #[cfg(feature = "linter")]
 struct LintEntry {
+    // parity: C's do_linter switches buffers via the diagnostic's filename;
+    // the port currently only navigates within the current buffer.
+    #[allow(dead_code)]
     filename: String,
     lineno: isize,
     colno: isize,
@@ -4628,7 +4592,7 @@ pub fn copy_completion(text: &str) -> String {
     text[..length].to_string()
 }
 
-/// Thread-local state for complete_a_word.
+// Thread-local state for complete_a_word.
 #[cfg(feature = "wordcomp")]
 thread_local! {
     static COMPLETIONS: RefCell<Vec<String>> = RefCell::new(Vec::new());
@@ -4701,8 +4665,8 @@ pub fn complete_a_word() {
         let threshold = pl_data.len().saturating_sub(shard_length) as isize;
         let pletion_x_val = PLETION_X.with(|px| *px.borrow());
 
-        let mut found_at: Option<usize> = None;
-        let mut next_pletion_x: usize = 0;
+        let _found_at: Option<usize> = None;
+        let next_pletion_x: usize;
 
         // Search this line.
         let mut i = pletion_x_val;

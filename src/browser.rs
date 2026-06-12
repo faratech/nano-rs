@@ -1,15 +1,12 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/browser.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2015, 2016, 2020, 2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut, KEY_ENTER};
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::global::{with_state, with_state_mut, KEY_ENTER};
 
-#[cfg(feature = "browser")]
-use std::fs;
-#[cfg(feature = "browser")]
-use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Browser module-local state (replaces C file-scope statics)
@@ -39,17 +36,13 @@ macro_rules! bl_get {
 macro_rules! bl_set {
     ($name:ident, $val:expr) => { $name.with(|v| { *v.borrow_mut() = $val; }); };
 }
-#[cfg(feature = "browser")]
-macro_rules! bl_with {
-    ($name:ident, $f:expr) => { $name.with(|v| { let mut b = v.borrow_mut(); $f(&mut *b) }); };
-}
 
 // ---------------------------------------------------------------------------
 // read_the_list — fill FILELIST with directory contents, set GAUGE, PILES
 // C: void read_the_list(const char *path, DIR *dir)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
-pub fn read_the_list(path: &str, entries: Vec<String>) {
+pub fn read_the_list(_path: &str, entries: Vec<String>) {
     use crate::utils::breadth;
 
     let cols = with_state(|s| s.midwin.cols as i32);
@@ -121,8 +114,8 @@ pub fn reselect(name: &str) {
 pub fn browser_refresh() {
     use crate::utils::{breadth, tail, actual_x};
     use crate::winio::{titlebar, blank_edit, display_string, apply_interface_color, reset_color};
-    use crossterm::{execute, queue, cursor::MoveTo, style::{Print, SetAttribute, Attribute}};
-    use std::io::{stdout, Write};
+    use crossterm::{queue, cursor::MoveTo, style::Print};
+    use std::io::Write;
 
     let present_path = with_state(|s| s.present_path.clone());
     titlebar(present_path.as_deref());
@@ -147,7 +140,7 @@ pub fn browser_refresh() {
 
     let filelist_snapshot: Vec<String> = FILELIST.with(|fl| fl.borrow().clone());
 
-    let mut stdout = crate::winio::out();
+    let stdout = crate::winio::out();
 
     let mut index = start_index;
     while index < list_length && row < usable_rows {
@@ -468,7 +461,7 @@ pub fn browse(initial_path: String) -> Option<String> {
         do_up, do_down, to_prev_block, to_next_block, do_page_up, do_page_down,
         do_enter, do_exit, goto_dir,
     };
-    use crate::winio::{statusline, statusbar, bottombars, titlebar, edit_refresh, wipe_statusbar, get_kbinput};
+    use crate::winio::{statusline, statusbar, bottombars, titlebar, edit_refresh, get_kbinput};
     use crate::files::{get_full_path, outside_of_confinement, expand_leading_tilde};
     use crate::utils::tail;
     use std::fs;
@@ -618,8 +611,8 @@ pub fn browse(initial_path: String) -> Option<String> {
             let selected = bl_get!(SELECTED);
             let usable_rows = bl_get!(USABLE_ROWS);
             let piles = bl_get!(PILES) as usize;
-            let gauge_val = bl_get!(GAUGE) as usize;
-            let cols = with_state(|s| s.midwin.cols as usize);
+            let _gauge_val = bl_get!(GAUGE) as usize;
+            let _cols = with_state(|s| s.midwin.cols as usize);
 
             if function == Some(do_help as crate::definitions::FuncPtr) {
                 do_help();
@@ -817,7 +810,7 @@ pub fn browse(initial_path: String) -> Option<String> {
                 #[cfg(feature = "nanorc")]
                 {
                     use crate::winio::implant;
-                    use crate::global::first_sc_for;
+                    
                     if let Some(func) = function {
                         // The C code: implant(first_sc_for(MBROWSER, function)->expansion)
                         // We look up the expansion and call implant.
@@ -883,7 +876,7 @@ pub fn browse(initial_path: String) -> Option<String> {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn browse_in(inpath: &str) -> Option<String> {
-    use crate::files::{get_full_path, outside_of_confinement, expand_leading_tilde};
+    use crate::files::{outside_of_confinement, expand_leading_tilde};
     use std::fs;
 
     let mut path = expand_leading_tilde(inpath);
@@ -901,7 +894,7 @@ pub fn browse_in(inpath: &str) -> Option<String> {
             .unwrap_or(true);
 
         if still_not_dir {
-            use std::path::PathBuf;
+            
             let cwd = std::env::current_dir().ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()));
             match cwd {

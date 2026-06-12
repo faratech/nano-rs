@@ -1,11 +1,10 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/definitions.h from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2017, 2020-2022, 2024 Benno Schulenberg
 
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Version constants

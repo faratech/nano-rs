@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 //! Installation and update functionality for nano-rs.
 //!
 //! Supports self-install / self-update on both Windows and Unix:
@@ -667,7 +667,12 @@ pub fn do_install_update(update_file: &std::path::Path) -> Result<(), Box<dyn st
 #[derive(Clone)]
 pub enum UpdateStatus {
     /// A newer version is available and has been downloaded
-    Downloaded { version: String, path: PathBuf },
+    Downloaded {
+        version: String,
+        // Kept for API completeness; consumers currently only show the version.
+        #[allow(dead_code)]
+        path: PathBuf,
+    },
     /// No update available or error occurred
     None,
 }

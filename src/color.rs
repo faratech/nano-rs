@@ -1,14 +1,15 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/color.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2017, 2020, 2021 Benno Schulenberg
 
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut, A_REVERSE};
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::global::{with_state, with_state_mut, A_REVERSE};
+#[allow(unused_imports)] // some of these are used only under feature gates
 use std::rc::Rc;
 
-#[cfg(feature = "color")]
-use crate::winio::{ncurses_color_to_crossterm, statusline};
 
 // ncurses attribute constants (matching winio.rs conventions)
 pub const A_NORMAL:  i32 = 0;
@@ -335,7 +336,7 @@ pub fn find_and_prime_applicable_syntax() {
 /// C: void check_the_multis(linestruct *line)
 #[cfg(feature = "color")]
 pub fn check_the_multis(line_ptr: &LinePtr) {
-    use regex::Regex;
+    
 
     // If there is no syntax or no multiline regex, there is nothing to do.
     let syntax_ptr = with_state(|s| {

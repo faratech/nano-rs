@@ -1,14 +1,15 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/files.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2015-2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
+use crate::global::{with_state, with_state_mut};
+#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET, TOGGLE};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write, BufRead, BufReader, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::Path;
 
 // Re-export stubs for winio/text/search/nano functions referenced here.
 // These will be replaced by real implementations when those modules are ported.
@@ -94,8 +95,6 @@ fn leftedge_for(xpt: usize, current: Option<&LinePtr>) -> usize {
     crate::winio::leftedge_for(xpt, &data)
 }
 
-#[inline] fn free_lines(line: Option<LinePtr>) { crate::nano::free_lines(line); }
-
 #[cfg(not(feature = "tiny"))]
 fn ensure_firstcolumn_is_aligned() { crate::winio::ensure_firstcolumn_is_aligned(); }
 #[cfg(feature = "tiny")]
@@ -132,22 +131,43 @@ fn finish() { crate::nano::finish() }
 fn discard_until(target: *mut crate::definitions::UndoStruct) {
     crate::text::discard_until(target as *const crate::definitions::UndoStruct)
 }
-fn copy_marked_region() {}
-fn do_snip(_a: bool, _b: bool, _c: bool) {}
+/// C: get_region(&top, &top_x, &bot, &bot_x) — frame the marked region.
 fn get_region(
-    _topline: &mut Option<LinePtr>, _top_x: &mut usize,
-    _botline: &mut Option<LinePtr>, _bot_x: &mut usize,
-) {}
+    topline: &mut Option<LinePtr>, top_x: &mut usize,
+    botline: &mut Option<LinePtr>, bot_x: &mut usize,
+) {
+    let (t_ln, t_x, b_ln, b_x) = crate::utils::get_region();
+    *topline = crate::utils::line_from_number(t_ln as isize);
+    *botline = crate::utils::line_from_number(b_ln as isize);
+    *top_x = t_x;
+    *bot_x = b_x;
+}
 
 // Signature adapter: call site passes LinePtr by value, real fn takes &LinePtr.
 fn delete_node(node: LinePtr) { crate::nano::delete_node(&node); }
 
-fn add_or_remove_pipe_symbol_from_answer() {}
-fn restore_cursor_position_if_any() {}
-fn do_undo() {}
-fn goto_line_posx(_lineno: isize, _x: usize) {}
-fn cancel_the_command_signal(_sig: i32) {}
-fn do_credits() {}
+/// C: add_or_remove_pipe_symbol_from_answer() — prompt.c.
+fn add_or_remove_pipe_symbol_from_answer() {
+    #[cfg(not(feature = "tiny"))]
+    crate::prompt::add_or_remove_pipe_symbol_from_answer();
+}
+
+/// C: restore_cursor_position_if_any() — history.c.
+fn restore_cursor_position_if_any() {
+    #[cfg(feature = "histories")]
+    crate::history::restore_cursor_position_if_any();
+}
+
+/// C: do_undo() — text.c.
+fn do_undo() {
+    #[cfg(not(feature = "tiny"))]
+    crate::text::do_undo();
+}
+
+/// C: do_credits() — winio.c easter egg.
+fn do_credits() {
+    crate::winio::do_credits();
+}
 #[inline]
 fn do_prompt(
     menu: u32,
@@ -160,10 +180,25 @@ fn do_prompt(
     crate::prompt::do_prompt(menu, Some(given), None, Some(refresh), msg)
 }
 #[inline] fn edit_refresh() { crate::winio::edit_refresh(); }
-fn browse_in(_path: &str) -> Option<String> { None }
+
+/// C: browse_in(path) — browser.c; pick a file via the file browser.
+fn browse_in(path: &str) -> Option<String> {
+    #[cfg(feature = "browser")]
+    { crate::browser::browse_in(path) }
+    #[cfg(not(feature = "browser"))]
+    { let _ = path; None }
+}
+
 #[inline] fn func_from_key(response: i32) -> Option<FuncPtr> { crate::global::func_from_key(response) }
-fn update_history(_history: &mut Option<LinePtr>, _s: &str, _prune: bool) {}
-fn open_buffer(_filename: &str, _new_one: bool) -> bool { true }
+
+/// C: update_history(&execute_history, answer, PRUNE_DUPLICATE) — history.c.
+/// The only call site updates the execute-command history.
+fn update_history(_history: &mut Option<LinePtr>, s: &str, prune: bool) {
+    #[cfg(feature = "histories")]
+    crate::history::update_history(crate::history::HistoryKind::Execute, s, prune);
+    #[cfg(not(feature = "histories"))]
+    { let _ = (s, prune); }
+}
 
 // Stub display helper
 fn COLS() -> usize {
@@ -223,7 +258,7 @@ pub fn delete_lockfile(lockfilename: &str) -> bool {
  * existing version of that file.  Return TRUE on success; FALSE otherwise. */
 #[cfg(not(feature = "tiny"))]
 pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> bool {
-    use std::ffi::CString;
+    
 
     // First remove any existing lock file.
     if !delete_lockfile(lockfilename) {
@@ -658,7 +693,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     {
         let confined = with_state(|s| {
             s.operating_dir.as_deref()
-                .map(|od| outside_of_confinement(filename, false))
+                .map(|_od| outside_of_confinement(filename, false))
                 .unwrap_or(false)
         });
         if confined {
@@ -1016,10 +1051,10 @@ pub fn read_file_impl(mut f: File, is_new_file: bool, filename: &str, undoable: 
     let mut num_lines: usize = 0;
 
     // Read the file byte by byte
-    let mut buf: Vec<u8> = Vec::with_capacity(LUMPSIZE);
+    let _buf: Vec<u8> = Vec::with_capacity(LUMPSIZE);
     let mut error_occurred = false;
     let mut error_msg = String::new();
-    let mut interrupted = false;
+    let _interrupted = false;
 
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(true);
@@ -1319,7 +1354,7 @@ static SHOULD_PIPE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /* C: void cancel_the_command(int signal)
  * Send an unconditional kill signal to the running external command. */
 #[cfg(not(feature = "tiny"))]
-pub fn cancel_the_command(signal: i32) {
+pub fn cancel_the_command(_signal: i32) {
     #[cfg(unix)]
     {
         let pid_cmd = PID_OF_COMMAND.load(Ordering::SeqCst);
@@ -1391,8 +1426,8 @@ pub fn send_data(line: Option<LinePtr>, fd: i32) {
 pub fn execute_command(command: &str) {
     #[cfg(unix)]
     {
-        use std::process::{Command, Stdio};
-        use std::os::unix::io::{AsRawFd, FromRawFd};
+        
+        use std::os::unix::io::FromRawFd;
 
         let should_pipe = command.starts_with('|');
         let capture_output = !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
@@ -1528,10 +1563,8 @@ pub fn execute_command(command: &str) {
         }
 
         // Check exit status
-        let cmd_ok = unsafe {
-            libc::WIFEXITED(command_status) && libc::WEXITSTATUS(command_status) == 0
-        };
-        let cmd_signaled = unsafe { libc::WIFSIGNALED(command_status) };
+        let cmd_ok = libc::WIFEXITED(command_status) && libc::WEXITSTATUS(command_status) == 0;
+        let cmd_signaled = libc::WIFSIGNALED(command_status);
 
         if !cmd_ok {
             if cmd_signaled {
@@ -1559,9 +1592,8 @@ pub fn execute_command(command: &str) {
                 statusline(MessageType::Alert, &format!("Error: {}", err_detail));
             }
         } else if should_pipe && pid_sender > 0 {
-            let sender_ok = unsafe {
-                libc::WIFEXITED(sender_status) && libc::WEXITSTATUS(sender_status) == 0
-            };
+            let sender_ok =
+                libc::WIFEXITED(sender_status) && libc::WEXITSTATUS(sender_status) == 0;
             if !sender_ok {
                 statusline(MessageType::Alert, "Piping failed");
             }
@@ -1947,7 +1979,7 @@ pub fn safe_tempfile() -> Option<(String, File)> {
     });
 
     // Build template: <tempdir>nano.XXXXXX<ext>
-    let template = format!("{}nano.XXXXXX{}", tempdir, extension);
+    let _template = format!("{}nano.XXXXXX{}", tempdir, extension);
 
     // Use tempfile crate (cross-platform)
     let temp_builder = tempfile::Builder::new()
@@ -2696,7 +2728,7 @@ pub fn write_region_to_file(
 
     // Adjust topline start
     if let Some(ref top) = topline {
-        let mut t = top.borrow_mut();
+        let t = top.borrow_mut();
         if top_x <= t.data.len() {
             // slice from top_x — we store as an offset
             // This is simplified; the C code adjusts the data pointer directly
@@ -2776,7 +2808,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
     loop {
         let response: i32;
-        let mut choice = NO;
+        let choice;
 
         #[cfg(not(feature = "tiny"))]
         let formatstr = {
@@ -2937,7 +2969,12 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                 let cols = COLS();
                 if lines > 5 && cols > 31 {
                     do_credits();
-                    did_credits = true;
+                    // C parity: guards a repeat showing; our port returns
+                    // right after, so the value is never read again.
+                    #[allow(unused_assignments)]
+                    {
+                        did_credits = true;
+                    }
                 } else {
                     statusline(MessageType::Ahem, "Too tiny");
                 }
@@ -3196,7 +3233,7 @@ pub fn username_completion(morsel: &str, length: usize) -> Vec<String> {
                 .to_string_lossy()
                 .into_owned();
             // morsel starts with ~, so morsel[1..length-1] is the fragment
-            let fragment = if morsel.len() >= 1 { &morsel[1..length.saturating_sub(0)] } else { "" };
+            let _fragment = if morsel.len() >= 1 { &morsel[1..length.saturating_sub(0)] } else { "" };
             // Actually compare against morsel+1 .. length-1
             let frag = if morsel.len() > 1 { &morsel[1..] } else { "" };
             if name.starts_with(frag) {
@@ -3206,7 +3243,7 @@ pub fn username_completion(morsel: &str, length: usize) -> Vec<String> {
                         .to_string_lossy()
                         .into_owned();
                     let od = with_state(|s| s.operating_dir.clone());
-                    if let Some(ref od_str) = od {
+                    if let Some(_od_str) = od {
                         if outside_of_confinement(&dir, true) {
                             continue;
                         }
@@ -3254,7 +3291,7 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
         Ok(d) => d,
     };
 
-    let filenamelen = filename.len();
+    let _filenamelen = filename.len();
 
     for entry in dir {
         let entry = match entry { Ok(e) => e, Err(_) => continue };
@@ -3393,7 +3430,7 @@ pub fn input_tab(
         let editwinrows_val = editwinrows();
         let zero = ISSET!(ZERO);
         let lines = LINES();
-        let lastrow = editwinrows_val - 1 - (if zero && lines > 1 { 1 } else { 0 });
+        let _lastrow = editwinrows_val - 1 - (if zero && lines > 1 { 1 } else { 0 });
         let cols = COLS();
 
         // Find the longest match name
@@ -3402,7 +3439,7 @@ pub fn input_tab(
 
         // Calculate columns and rows
         let ncols = if longest_name + 2 > 0 { (cols + 1) / (longest_name + 2) } else { 1 };
-        let nrows = (matches.len() + ncols - 1) / ncols;
+        let _nrows = (matches.len() + ncols - 1) / ncols;
 
         if !*listed {
             beep();

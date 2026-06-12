@@ -1,6 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
-use crate::definitions::*;
-use crate::global::STATE;
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 
 /// Which history list we are operating on.
 /// Defined outside the feature gate so prompt.rs can reference it unconditionally.
@@ -17,13 +15,11 @@ mod inner {
 
 use crate::definitions::*;
 use crate::global::STATE;
-use crate::{ISSET, SET, UNSET, TOGGLE};
+use crate::UNSET;
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write as IoWrite};
 use std::time::SystemTime;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 const SEARCH_HISTORY: &str = "search_history";
 const POSITION_HISTORY: &str = "filepos_history";
@@ -68,7 +64,7 @@ pub struct PositionRecord {
 /// and the list of historical executed commands.
 pub fn history_init() {
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         // Each list is a Vec<String> with the current position index.
         // In the C code, each list is a doubly-linked list ending with an
         // empty sentinel node; the "current position" pointer starts at the
@@ -93,7 +89,7 @@ pub fn history_init() {
 /// Reset the pointer into the history list that contains item to the bottom.
 pub fn reset_history_pointer_for(which: HistoryKind) {
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         match which {
             HistoryKind::Search  => st.search_history_pos  = st.search_history_items.len(),
             HistoryKind::Replace => st.replace_history_pos = st.replace_history_items.len(),
@@ -116,6 +112,7 @@ use super::HistoryKind;
 /// The C code traverses via ->prev (so from `start` toward `htop`).
 /// In our Vec representation "older" entries have lower indices.
 /// `start_idx` is inclusive, stop *before* going past `stop_idx`.
+#[allow(dead_code)] // parity: C's find_history, for prompt history search — not yet wired
 fn find_in_history<'a>(
     items: &'a [String],
     start_idx: usize,
@@ -158,7 +155,7 @@ fn find_in_history<'a>(
 /// is reset to the bottom (most recent).
 pub fn update_history(which: HistoryKind, text: &str, avoid_duplicates: bool) {
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         let items: &mut Vec<String> = match which {
             HistoryKind::Search  => &mut st.search_history_items,
             HistoryKind::Replace => &mut st.replace_history_items,
@@ -226,7 +223,7 @@ pub fn get_history_completion(which: HistoryKind, string: &str, len: usize) -> S
             if items[idx].starts_with(prefix) && items[idx] != string {
                 // Update position (separate mutable borrow).
                 STATE.with(|s| {
-                    let mut st = s.borrow_mut();
+                    let st = s.borrow_mut();
                     match which {
                         HistoryKind::Search  => st.search_history_pos  = idx,
                         HistoryKind::Replace => st.replace_history_pos = idx,
@@ -248,7 +245,7 @@ pub fn get_history_completion(which: HistoryKind, string: &str, len: usize) -> S
             if idx == here { break; }
             if items[idx].starts_with(prefix) && items[idx] != string {
                 STATE.with(|s| {
-                    let mut st = s.borrow_mut();
+                    let st = s.borrow_mut();
                     match which {
                         HistoryKind::Search  => st.search_history_pos  = idx,
                         HistoryKind::Replace => st.replace_history_pos = idx,

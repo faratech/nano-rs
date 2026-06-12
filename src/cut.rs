@@ -1,13 +1,13 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/cut.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014 Mark Majeres
 //             Copyright (C) 2016, 2018-2020 Benno Schulenberg
 
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::cell::RefCell;
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
+use crate::global::{with_state, with_state_mut};
 
 // ---------------------------------------------------------------------------
 // Forward stubs for functions not yet ported to Rust.
@@ -208,7 +208,7 @@ pub fn expunge(action: UndoType) {
     });
 
     // Check whether the cursor is in the middle of a line or at its end.
-    let (in_middle, charlen, line_len) = with_state(|s| {
+    let (in_middle, charlen, _line_len) = with_state(|s| {
         if let Some(ref of) = s.openfile {
             if let Some(ref cur) = of.current {
                 let data = cur.borrow().data.clone();
@@ -228,7 +228,7 @@ pub fn expunge(action: UndoType) {
 
         #[cfg(not(feature = "tiny"))]
         {
-            let old_amount = with_state(|s| {
+            let _old_amount = with_state(|s| {
                 if s.flag_isset(SOFTWRAP) {
                     if let Some(ref of) = s.openfile {
                         if let Some(ref cur) = of.current {
@@ -294,7 +294,7 @@ pub fn expunge(action: UndoType) {
                 if s.flag_isset(SOFTWRAP) {
                     if let Some(ref of) = s.openfile {
                         if let Some(ref cur) = of.current {
-                            let new_amount = extra_chunks_in(cur);
+                            let _new_amount = extra_chunks_in(cur);
                             // If chunk count changed, need refresh.
                             // (We can't compare against old_amount here due to borrow;
                             //  this simplified form unconditionally triggers the check.)
@@ -306,7 +306,7 @@ pub fn expunge(action: UndoType) {
             });
             // Recompute new chunk count and compare.
             if refresh {
-                let (old, new_a) = with_state(|s| {
+                let (_old, _new_a) = with_state(|s| {
                     if let Some(ref of) = s.openfile {
                         if let Some(ref cur) = of.current {
                             if s.flag_isset(SOFTWRAP) {
@@ -355,7 +355,7 @@ pub fn expunge(action: UndoType) {
         // Cursor is at the end of the line — try to join with the next line.
 
         // Check whether there is a next line.
-        let (has_next, next_is_filebot, at_magic_boundary) = with_state(|s| {
+        let (has_next, _next_is_filebot, at_magic_boundary) = with_state(|s| {
             if let Some(ref of) = s.openfile {
                 if let Some(ref cur) = of.current {
                     let next = cur.borrow().next.clone();
@@ -1045,7 +1045,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
         });
     } else {
         // Append: concatenate taken->data onto cutbottom->data, then chain the rest.
-        let (cutbottom_data, taken_data) = with_state(|s| {
+        let (_cutbottom_data, taken_data) = with_state(|s| {
             let cb = s.cutbottom.as_ref().map(|cb| cb.borrow().data.clone()).unwrap_or_default();
             let td = taken.borrow().data.clone();
             (cb, td)
@@ -1220,7 +1220,7 @@ pub fn ingraft_buffer(topline: LinePtr) {
     });
 
     let extralen = topline.borrow().data.len();
-    let effective_length = if !is_single { xpos } else { length };
+    let _effective_length = if !is_single { xpos } else { length };
 
     if extralen > 0 {
         // Insert topline->data at xpos in line->data.
@@ -1406,7 +1406,7 @@ fn cut_marked_region() {
 // ---------------------------------------------------------------------------
 /* C: void do_snip(bool marked, bool until_eof, bool append) */
 pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
-    let line = with_state(|s| {
+    let _line = with_state(|s| {
         s.openfile.as_ref().and_then(|of| of.current.clone())
     });
 
@@ -1454,7 +1454,7 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
                     }
                 });
             } else if with_state(|s| s.flag_isset(CUT_FROM_CURSOR)) {
-                let (line_clone, cur_x, has_data, next_is_filebot, is_filebot) =
+                let (line_clone, cur_x, has_data, _next_is_filebot, is_filebot) =
                     with_state(|s| {
                         let of = s.openfile.as_ref().expect("openfile");
                         let cur = of.current.as_ref().expect("current").clone();
@@ -1989,7 +1989,7 @@ pub fn paste_text() {
     {
         // Wipe anchors from the pasted region.
         if let Some(ref wc) = was_current {
-            let cur_next = with_state(|s| {
+            let _cur_next = with_state(|s| {
                 s.openfile.as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|cur| cur.borrow().next.clone())

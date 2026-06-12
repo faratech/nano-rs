@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/nano.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::process;
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
-use crate::{winio, files, text, cut, search, move_, history, rcfile, color, prompt, help, browser};
+use crate::global::{with_state, with_state_mut};
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::{winio, files, search, history, rcfile, color, prompt};
 use crate::{ISSET, SET, UNSET, TOGGLE};
 
 // ---------------------------------------------------------------------------
@@ -255,7 +256,7 @@ pub fn in_restricted_mode() -> bool {
 pub fn suggest_ctrlT_ctrlZ() {
     #[cfg(feature = "nanorc")]
     {
-        use crate::global::{first_sc_for, do_execute, do_suspend};
+        use crate::global::first_sc_for;
         // Check if ^T is bound to do_execute and ^Z is bound to do_suspend in MEXECUTE.
         let exec_bound = first_sc_for(MMAIN, crate::global::do_execute as crate::definitions::FuncPtr)
             .map(|(kc, _)| kc == 0x14)
@@ -336,7 +337,7 @@ pub fn close_and_go() {
     #[cfg(feature = "multibuffer")]
     {
         // If there is another buffer, close this one; otherwise terminate.
-        let has_next = with_state(|s| {
+        let _has_next = with_state(|s| {
             s.openfile.is_some() // simplified — full multi-buffer cycle not ported here
         });
         // In a full port we'd check openfile != openfile->next.
@@ -765,7 +766,7 @@ pub fn restore_handler_for_Ctrl_C() {
 
 /// Trampoline for SIGINT that is safe to use as a C function pointer.
 #[cfg(unix)]
-extern "C" fn make_a_note_trampoline(sig: libc::c_int) {
+extern "C" fn make_a_note_trampoline(_sig: libc::c_int) {
     CONTROL_C_WAS_PRESSED.store(true, Ordering::SeqCst);
 }
 
@@ -1163,7 +1164,7 @@ pub fn process_click() -> i32 {
     if click_row >= editwin_y && click_row < editwin_y + editwin_rows {
         let adj_row = click_row - editwin_y;
         let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
-        let row_count = adj_row - cursor_row as i32;
+        let _row_count = adj_row - cursor_row as i32;
 
         // Reset cutbuffer on click (cursor moved).
         with_state_mut(|s| s.keep_cutbuffer = false);
@@ -1286,7 +1287,6 @@ pub fn suck_up_input_and_paste_it() {
     with_state_mut(|s| s.cutbuffer = Some(head.clone()));
 
     let mut line = head.clone();
-    let mut index = 0usize;
     let mut input;
 
     loop {
@@ -1296,7 +1296,6 @@ pub fn suck_up_input_and_paste_it() {
         if (0x20 <= ch && ch <= 0xFF && ch != DEL_CODE) || ch == b'\t' as u32 {
             let c = input as u8 as char;
             line.borrow_mut().data.push(c);
-            index += 1;
         } else if input == b'\r' as i32 || input == b'\n' as i32 {
             let new_line = Rc::new(RefCell::new(LineNode {
                 data: String::new(),
@@ -1310,7 +1309,6 @@ pub fn suck_up_input_and_paste_it() {
             }));
             line.borrow_mut().next = Some(new_line.clone());
             line = new_line;
-            index = 0;
         } else {
             break;
         }
@@ -1338,10 +1336,10 @@ pub fn suck_up_input_and_paste_it() {
 /* C: void inject(char *burst, size_t count) */
 pub fn inject(burst: &[u8]) {
     // Encode embedded NUL bytes as 0x0A.
-    let mut data: Vec<u8> = burst.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
+    let data: Vec<u8> = burst.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
     let count = data.len();
 
-    let (datalen, lineno, current_x) = with_state(|s| {
+    let (_datalen, lineno, current_x) = with_state(|s| {
         let of = s.openfile.as_ref().expect("an open buffer");
         let cur = of.current.as_ref().expect("a current line");
         let b = cur.borrow();
@@ -1590,9 +1588,6 @@ pub fn toggle_this(flag: u32) {
 // ---------------------------------------------------------------------------
 /* C: void process_a_keystroke(void) */
 pub fn process_a_keystroke() {
-    static PUDDLE_CAPACITY: std::sync::atomic::AtomicUsize
-        = std::sync::atomic::AtomicUsize::new(12);
-
     // Read a keystroke.
     let input = winio::get_kbinput(VISIBLE);
 
@@ -2131,7 +2126,7 @@ pub fn nano_main() {
                 }
                 "force"          => { /* consumed by --install / --update via env scan */ }
                 "modernbindings" => { SET!(MODERN_BINDINGS); }
-                other => {
+                _other => {
                     eprintln!("Type '{} -h' for a list of available options.", argv0);
                     process::exit(1);
                 }
@@ -2768,7 +2763,7 @@ pub fn nano_main() {
             #[cfg(not(feature = "tiny"))]
             {
                 let fname_clone = filename.clone();
-                let colon_parsed = if ISSET!(COLON_PARSING) && givenline == 0
+                let _colon_parsed = if ISSET!(COLON_PARSING) && givenline == 0
                     && fname_clone.contains(':') && givencol == 0
                 {
                     // Check if file exists first.

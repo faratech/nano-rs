@@ -1,7 +1,6 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 use crate::definitions::*;
 use crate::global::STATE;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // utils.c -- utility functions for GNU nano (Rust port)
 // Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
@@ -451,7 +450,7 @@ pub fn xplustabs() -> usize {
 pub fn actual_x(text: &str, column: usize) -> usize {
     let mut width: usize = 0;
     let mut pos: usize = 0;
-    let bytes = text.as_bytes();
+    let _bytes = text.as_bytes();
 
     while pos < text.len() {
         let charlen = crate::chars::advance_over(&text[pos..], &mut width);
@@ -505,7 +504,7 @@ pub fn breadth(text: &str) -> usize {
  * Append a new empty magic line to the end of the buffer. */
 pub fn new_magicline() {
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.append_magicline();
     });
 }
@@ -516,7 +515,7 @@ pub fn new_magicline() {
 #[cfg(any(not(feature = "tiny"), feature = "help"))]
 pub fn remove_magicline() {
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.remove_magicline_if_empty();
     });
 }
@@ -551,7 +550,7 @@ pub fn get_region() -> (usize, usize, usize, usize) {
 pub fn get_range() -> (usize, usize) {
     // Returns (top_lineno, bot_lineno)
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.get_range_linenos()
     })
 }

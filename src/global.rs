@@ -1,11 +1,9 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/global.c + extern declarations from src/prototypes.h
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::rc::{Rc, Weak};
 use crate::definitions::*;
 
 // ---------------------------------------------------------------------------
@@ -1347,7 +1345,7 @@ pub fn shown_entries_for(menu: u32) -> usize {
         let maximum = ((cols + 40) / 20) * 2;
         let mut count = 0usize;
         let mut found_all = true;
-        for (i, item) in s.allfuncs.iter().enumerate() {
+        for (_i, item) in s.allfuncs.iter().enumerate() {
             if count >= maximum {
                 found_all = false;
                 break;
@@ -1662,20 +1660,6 @@ pub fn shortcut_init() {
     // TODO: query terminfo when available
     let help_key: &'static str = "^N";
 
-    // Helper closure: produce phrase/blank depending on ENABLE_HELP feature.
-    // C uses WHENHELP(description) macro that expands to "" or description.
-    macro_rules! whenhelp {
-        ($desc:expr) => {
-            // When help feature is enabled pass the description; else ""
-            #[cfg(feature = "help")]
-            { $desc }
-            #[cfg(not(feature = "help"))]
-            { "" }
-        };
-    }
-
-    const VIEW:     bool = true;   // C: #define VIEW TRUE
-    const NOVIEW:   bool = false;
     const BLANKAFTER: bool = true; // C: #define BLANKAFTER TRUE
     const TOGETHER:   bool = false;
 
@@ -1688,7 +1672,7 @@ pub fn shortcut_init() {
             "Help", help_gist, TOGETHER);
     }
 
-    add_to_funcs(do_cancel as FuncPtr, ((MMOST & !MMAIN) | MYESNO),
+    add_to_funcs(do_cancel as FuncPtr, (MMOST & !MMAIN) | MYESNO,
         "Cancel", cancel_gist, BLANKAFTER);
 
     add_to_funcs(do_exit as FuncPtr, MMAIN,
@@ -2189,7 +2173,7 @@ pub fn shortcut_init() {
     //    #define SLASH_OR_DASH  "^/"
     let on_a_vt_now = with_state(|s| s.on_a_vt);
     #[cfg(target_os = "linux")]
-    let slash_or_dash: &'static str = if on_a_vt_now { "^-" } else { "^/" };
+    let _slash_or_dash: &'static str = if on_a_vt_now { "^-" } else { "^/" };
     #[cfg(not(target_os = "linux"))]
     let slash_or_dash: &'static str = "^/";
 
@@ -2569,7 +2553,7 @@ pub fn shortcut_init() {
         }
     } // !NANO_TINY
 
-    add_to_sclist(((MMOST & !MMAIN) | MYESNO), "^C", 0, do_cancel as FuncPtr, 0);
+    add_to_sclist((MMOST & !MMAIN) | MYESNO, "^C", 0, do_cancel as FuncPtr, 0);
 
     add_to_sclist(MWHEREIS | MREPLACE, "M-C", 0, case_sens_void as FuncPtr, 0);
     add_to_sclist(MWHEREIS | MREPLACE, "M-R", 0, regexp_void as FuncPtr, 0);

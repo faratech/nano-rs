@@ -1,4 +1,4 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 // Port of src/move.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2018, 2020, 2024, 2026 Benno Schulenberg
@@ -12,8 +12,8 @@
 // inpar likewise forward to crate::text.
 
 use crate::definitions::*;
-use crate::global::{STATE, with_state, with_state_mut};
-use crate::{ISSET, SET, UNSET, TOGGLE};
+use crate::global::{with_state, with_state_mut};
+use crate::ISSET;
 
 // ── External helpers (winio.c / text.c — delegating to real implementations) ──
 
@@ -167,7 +167,7 @@ fn inpar(line: &LinePtr) -> bool {
 
 // ── Helpers from utils.rs / chars.rs ─────────────────────────────────────────
 
-use crate::utils::{actual_x, wideness, breadth, xplustabs, get_page_start};
+use crate::utils::{actual_x, wideness, breadth, xplustabs};
 use crate::chars::{white_string, is_word_char, step_left, step_right};
 #[cfg(feature = "utf8")]
 use crate::chars::is_zerowidth;
@@ -582,7 +582,7 @@ pub fn do_para_end(line: LinePtr) -> LinePtr {
 #[cfg(feature = "justify")]
 pub fn to_para_begin() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
-    if let Some(wc) = was_current.clone() {
+    if let Some(_wc) = was_current.clone() {
         let new_line = do_para_begin(with_state(|s| {
             s.openfile.as_ref().and_then(|of| of.current.clone()).expect("a current line")
         }));
@@ -1544,7 +1544,7 @@ pub fn do_scroll_right() {
 
         // Walk backward while current line is too short.
         loop {
-            let (is_short, has_prev, not_edittop) = with_state(|s| {
+            let (is_short, _has_prev, not_edittop) = with_state(|s| {
                 let lp_short = candidate.as_ref()
                     .map(|lp| breadth(&lp.borrow().data) < brink + CUSHION)
                     .unwrap_or(false);
@@ -1561,7 +1561,7 @@ pub fn do_scroll_right() {
             if !(not_edittop && is_short) {
                 break;
             }
-            let prev_lp = with_state(|s| {
+            let prev_lp = with_state(|_s| {
                 candidate.as_ref()
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
             });

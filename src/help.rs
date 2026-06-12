@@ -1,6 +1,7 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 use crate::definitions::*;
 use crate::global::STATE;
+#[allow(unused_imports)] // some of these are used only under feature gates
 use unicode_width::UnicodeWidthChar;
 
 // The tr! translation macro is defined once in main.rs (#[macro_export]).
@@ -41,7 +42,7 @@ mod stubs {
     /// Set the data of the current line in the open buffer.
     pub fn set_current_line_data(data: &str) {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 if let Some(ref cur) = of.current.clone() {
                     cur.borrow_mut().data = data.to_string();
@@ -58,7 +59,7 @@ mod stubs {
     /// Set filebot to current.
     pub fn set_filebot_to_current() {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.filebot = of.current.clone();
             }
@@ -68,7 +69,7 @@ mod stubs {
     /// Set current to filetop.
     pub fn set_current_to_filetop() {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.current = of.filetop.clone();
             }
@@ -86,7 +87,7 @@ mod stubs {
     /// Advance current to the next line.  Returns false if already at filebot.
     pub fn advance_current_to_next() -> bool {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 let next = of.current.as_ref().and_then(|c| c.borrow().next.clone());
                 if let Some(n) = next {
@@ -101,7 +102,7 @@ mod stubs {
     /// Set edittop to the current line.
     pub fn set_edittop_to_current() {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.edittop = of.current.clone();
             }
@@ -150,7 +151,7 @@ mod stubs {
 #[cfg(feature = "help")]
 pub fn help_init() {
     use help_state::*;
-    use crate::global::{flag_index, flag_mask};
+    
 
     let currmenu: u32 = STATE.with(|s| s.borrow().currmenu);
 
@@ -487,8 +488,8 @@ parentheses:\n\n")),
 pub fn wrap_help_text_into_buffer() {
     use help_state::*;
     use stubs::*;
-    use crate::global::flag_index;
-    use crate::global::flag_mask;
+    
+    
 
     let text_opt = HELP_TEXT.with(|ht| ht.borrow().clone());
     let text = match text_opt {
@@ -500,7 +501,7 @@ pub fn wrap_help_text_into_buffer() {
     let intro_end    = END_OF_INTRO_OFFSET.with(|e| *e.borrow());
     let location_val = LOCATION.with(|l| *l.borrow());
 
-    let (cols, rows, sidebar, minibar_set, empty_line_set, editwinrows) =
+    let (cols, rows, sidebar, minibar_set, empty_line_set, _editwinrows) =
         STATE.with(|s| {
             let st = s.borrow();
             (
@@ -620,7 +621,6 @@ fn break_line_bytes(text: &str, goal: usize) -> usize {
 
     let mut last_space = 0usize;
     let mut col = 0usize;
-    let mut byte_pos = 0usize;
 
     for (i, ch) in text.char_indices() {
         if ch == '\n' {
@@ -636,9 +636,8 @@ fn break_line_bytes(text: &str, goal: usize) -> usize {
             return i;
         }
         col += width;
-        byte_pos = i + ch.len_utf8();
         if ch == ' ' {
-            last_space = byte_pos;
+            last_space = i + ch.len_utf8();
         }
     }
     text.len()
@@ -663,8 +662,7 @@ pub fn show_help() {
         do_findprevious, do_findnext,
         do_scroll_up, do_scroll_down,
         do_page_up, do_page_down,
-        to_first_line, to_last_line,
-        full_refresh, do_exit,
+        to_first_line, to_last_line, do_exit,
     };
     use crate::winio::{bottombars, titlebar, edit_refresh, blank_statusbar, get_kbinput};
     use crate::nano::window_init;
@@ -693,7 +691,7 @@ pub fn show_help() {
     });
     if no_help_set || zero_set {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             st.flags[flag_index(NO_HELP)] &= !flag_mask(NO_HELP);
             st.flags[flag_index(ZERO)]    &= !flag_mask(ZERO);
         });
@@ -704,7 +702,7 @@ pub fn show_help() {
 
     // When searching, do it forward, case insensitive, and without regexes.
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.flags[flag_index(BACKWARDS_SEARCH)]   &= !flag_mask(BACKWARDS_SEARCH);
         st.flags[flag_index(CASE_SENSITIVE)]      &= !flag_mask(CASE_SENSITIVE);
         st.flags[flag_index(USE_REGEXP)]          &= !flag_mask(USE_REGEXP);
@@ -713,7 +711,7 @@ pub fn show_help() {
 
     #[cfg(feature = "linenumbers")]
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         let cols = st.midwin.cols as i32;
         let sidebar = st.sidebar;
         st.editwincols = cols - sidebar;
@@ -735,7 +733,7 @@ pub fn show_help() {
     help_init();
 
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.inhelp = true;
     });
     LOCATION.with(|l| *l.borrow_mut() = 0);
@@ -755,7 +753,7 @@ pub fn show_help() {
     });
 
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.title = Some(title.clone());
     });
     titlebar(None);
@@ -782,7 +780,7 @@ pub fn show_help() {
     // Main help input loop.
     loop {
         STATE.with(|s| {
-            let mut st = s.borrow_mut();
+            let st = s.borrow_mut();
             st.lastmessage = MessageType::Vacuum;
             st.focusing = true;
         });
@@ -877,7 +875,7 @@ pub fn show_help() {
 
     #[cfg(feature = "linenumbers")]
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.margin = was_margin;
         let cols = st.midwin.cols as i32;
         let margin = st.margin;
@@ -889,13 +887,13 @@ pub fn show_help() {
 
     #[cfg(feature = "color")]
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.syntaxstr = was_syntax;
         st.have_palette = false;
     });
 
     STATE.with(|s| {
-        let mut st = s.borrow_mut();
+        let st = s.borrow_mut();
         st.title = None;
     });
     STATE.with(|s| s.borrow_mut().answer = saved_answer);

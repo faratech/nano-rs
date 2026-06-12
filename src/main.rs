@@ -1,4 +1,17 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons, clippy::all)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons, clippy::all)]
+// When building with a reduced feature set, code that only serves the
+// feature-gated paths shows up as unused; don't warn about it there.
+// The default-features build stays warning-clean and strict.
+#![cfg_attr(
+    not(all(feature = "color", feature = "nanorc", feature = "utf8",
+            feature = "browser", feature = "help", feature = "histories",
+            feature = "justify", feature = "multibuffer", feature = "wrapping",
+            feature = "mouse", feature = "linenumbers", feature = "linter",
+            feature = "formatter", feature = "speller", feature = "tabcomp",
+            feature = "wordcomp", feature = "comment", feature = "libmagic",
+            feature = "operatingdir", feature = "extra")),
+    allow(unused, dead_code)
+)]
 
 pub mod definitions;
 pub mod global;

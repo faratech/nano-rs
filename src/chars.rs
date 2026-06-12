@@ -1,7 +1,7 @@
-#![allow(unused, non_snake_case, dead_code, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 use crate::definitions::*;
 use crate::global::STATE;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 // chars.c -- character-classification and multibyte-string functions for GNU nano (Rust port)
 // Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
@@ -524,7 +524,7 @@ pub fn step_left(buf: &str, pos: usize) -> usize {
         }
 
         let bytes = buf.as_bytes();
-        let start_search = if pos < 4 { 0 } else { pos - 4 };
+        let _start_search = if pos < 4 { 0 } else { pos - 4 };
 
         // Probe backwards for a valid UTF-8 starter byte
         let before = if pos >= 1 && is_utf8_starter(bytes[pos - 1]) {
