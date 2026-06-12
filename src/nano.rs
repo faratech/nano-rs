@@ -28,14 +28,14 @@ pub static THE_WINDOW_RESIZED: AtomicBool = AtomicBool::new(false);
 // make_new_node — create a new linestruct node
 // ---------------------------------------------------------------------------
 /* C: linestruct *make_new_node(linestruct *prevnode) */
-pub fn make_new_node(prev_lineno: isize) -> LinePtr {
+pub fn make_new_node(prev: Option<&LinePtr>) -> LinePtr {
     use std::rc::Rc;
     use std::cell::RefCell;
     Rc::new(RefCell::new(LineNode {
         data: String::new(),
-        lineno: prev_lineno + 1,
+        lineno: prev.map(|p| p.borrow().lineno + 1).unwrap_or(1),
         next: None,
-        prev: None,
+        prev: prev.map(Rc::downgrade),
         #[cfg(feature = "color")]
         multidata: Vec::new(),
         #[cfg(not(feature = "tiny"))]
@@ -61,12 +61,12 @@ pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
     // afterthis->next = newnode
     afterthis.borrow_mut().next = Some(newnode.clone());
 
-    // Update filebot if inserting at end of file
+    // Update filebot when inserting a node at the end of file.
+    // (C compares pointers, so a cutbuffer node can never match.)
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
-            let afterthis_lineno = afterthis.borrow().lineno;
             let is_filebot = of.filebot.as_ref()
-                .map(|b| b.borrow().lineno == afterthis_lineno)
+                .map(|b| Rc::ptr_eq(b, afterthis))
                 .unwrap_or(false);
             if is_filebot {
                 of.filebot = Some(newnode.clone());
@@ -80,12 +80,12 @@ pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
 // ---------------------------------------------------------------------------
 /* C: void delete_node(linestruct *line) */
 pub fn delete_node(line: &LinePtr) {
+    use std::rc::Rc;
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
-            let line_lineno = line.borrow().lineno;
-            // If this is edittop, step edittop back one.
+            // If the first line on the screen gets deleted, step one back.
             let is_edittop = of.edittop.as_ref()
-                .map(|e| e.borrow().lineno == line_lineno)
+                .map(|e| Rc::ptr_eq(e, line))
                 .unwrap_or(false);
             if is_edittop {
                 let prev = line.borrow().prev.clone()
@@ -96,7 +96,7 @@ pub fn delete_node(line: &LinePtr) {
             #[cfg(feature = "wrapping")]
             {
                 let is_spillage = of.spillage_line.as_ref()
-                    .map(|sl| sl.borrow().lineno == line_lineno)
+                    .map(|sl| Rc::ptr_eq(sl, line))
                     .unwrap_or(false);
                 if is_spillage {
                     of.spillage_line = None;
@@ -124,18 +124,20 @@ pub fn unlink_node(line: &LinePtr) {
         next.borrow_mut().prev = prev_weak.clone();
     }
 
-    // Update filebot if removing the last node.
-    with_state_mut(|s| {
-        if let Some(ref mut of) = s.openfile {
-            let line_lineno = line.borrow().lineno;
-            let is_filebot = of.filebot.as_ref()
-                .map(|b| b.borrow().lineno == line_lineno)
-                .unwrap_or(false);
-            if is_filebot {
-                of.filebot = prev_weak.and_then(|w| w.upgrade());
+    // Update filebot when removing a node at the end of file.
+    {
+        use std::rc::Rc;
+        with_state_mut(|s| {
+            if let Some(ref mut of) = s.openfile {
+                let is_filebot = of.filebot.as_ref()
+                    .map(|b| Rc::ptr_eq(b, line))
+                    .unwrap_or(false);
+                if is_filebot {
+                    of.filebot = prev_weak.and_then(|w| w.upgrade());
+                }
             }
-        }
-    });
+        });
+    }
 
     delete_node(line);
 }

@@ -3,11 +3,8 @@ use crate::definitions::*;
 use crate::global::STATE;
 use unicode_width::UnicodeWidthChar;
 
-// Local translation stub — matches the pattern used in files.rs and prompt.rs.
-macro_rules! tr {
-    ($s:literal) => { $s };
-    ($fmt:literal, $($arg:tt)*) => { format!($fmt, $($arg)*) };
-}
+// The tr! translation macro is defined once in main.rs (#[macro_export]).
+use crate::tr;
 
 // ---------------------------------------------------------------------------
 // Everything inside ENABLE_HELP is gated by #[cfg(feature = "help")].

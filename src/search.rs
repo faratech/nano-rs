@@ -119,13 +119,10 @@ fn get_page_start(col: usize) -> usize {
     crate::utils::get_page_start(col)
 }
 
+/// C: print_view_warning() — nano.c.
+#[inline]
 fn print_view_warning() {
-    // C: print_view_warning() — nano.c
-    statusline(MessageType::Ahem, "File is unmodifiable");
-}
-
-fn napms(_ms: i32) {
-    // C: napms(ms) — ncurses
+    crate::nano::print_view_warning()
 }
 
 fn do_prompt(

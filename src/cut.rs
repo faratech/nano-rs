@@ -160,89 +160,38 @@ fn count_chars_in_chain(first: &LinePtr, last: &LinePtr) -> usize {
 }
 
 /// Make a fresh `LinePtr` with no links and empty data.
-/// C: make_new_node(NULL) — the NULL means "no parent"; links set later.
+/// C: make_new_node(NULL) — nano.c; the NULL means "no parent".
+#[inline]
 fn make_new_node() -> LinePtr {
-    Rc::new(RefCell::new(LineNode {
-        data: String::new(),
-        lineno: 0,
-        next: None,
-        prev: None,
-        #[cfg(feature = "color")]
-        multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
-        has_anchor: false,
-    }))
+    crate::nano::make_new_node(None)
 }
 
 /// Free a single detached node (let the Rc drop).
-/// C: delete_node(node) — only valid when the node is already unlinked.
-fn delete_node(_node: LinePtr) {
-    // In Rust the drop happens automatically when the last Rc goes out of scope.
+/// C: delete_node(node) — nano.c.
+#[inline]
+fn delete_node(node: LinePtr) {
+    crate::nano::delete_node(&node);
 }
 
 /// Free an entire chain starting at `head`.
-/// C: free_lines(head)
+/// C: free_lines(head) — nano.c.
+#[inline]
 fn free_lines(head: LinePtr) {
-    // Walk forward, dropping each Rc.
-    let mut current: Option<LinePtr> = Some(head);
-    while let Some(node) = current {
-        let next = node.borrow_mut().next.take();
-        // `node` Rc drops here at end of iteration, freeing the node.
-        current = next;
-    }
+    crate::nano::free_lines(Some(head));
 }
 
-/// Unlink `node` from the doubly-linked list in the current buffer and
-/// drop it.  The caller must ensure that `openfile->current` no longer
-/// refers to `node` before calling this.
-/// C: unlink_node(node)
+/// Unlink `node` from the doubly-linked list and drop it.
+/// C: unlink_node(node) — nano.c; also fixes up filebot/edittop.
+#[inline]
 fn unlink_node(node: &LinePtr) {
-    let (prev_weak, next_strong) = {
-        let n = node.borrow();
-        (n.prev.clone(), n.next.clone())
-    };
-
-    if let Some(ref next) = next_strong {
-        next.borrow_mut().prev = prev_weak.clone();
-    }
-
-    if let Some(pw) = prev_weak {
-        if let Some(prev) = pw.upgrade() {
-            prev.borrow_mut().next = next_strong;
-        }
-    }
+    crate::nano::unlink_node(node)
 }
 
 /// Renumber every line from `start` to the end of the buffer.
-/// C: renumber_from(start)
+/// C: renumber_from(start) — nano.c.
+#[inline]
 fn renumber_from(start: &LinePtr) {
-    // Find `start`'s current lineno from its predecessor, or use its own
-    // stored lineno if it is filetop.
-    let base = {
-        let node = start.borrow();
-        if let Some(ref pw) = node.prev {
-            if let Some(prev) = pw.upgrade() {
-                prev.borrow().lineno + 1
-            } else {
-                node.lineno
-            }
-        } else {
-            // This node is the first line of the buffer.
-            1
-        }
-    };
-
-    let mut current = start.clone();
-    let mut lineno = base;
-    loop {
-        current.borrow_mut().lineno = lineno;
-        lineno += 1;
-        let next = current.borrow().next.clone();
-        match next {
-            Some(n) => current = n,
-            None => break,
-        }
-    }
+    crate::nano::renumber_from(start)
 }
 
 // ---------------------------------------------------------------------------
@@ -499,25 +448,12 @@ pub fn expunge(action: UndoType) {
             });
 
             // Unlink joining from the buffer.
+            // (unlink_node also moves filebot back when joining was filebot.)
             unlink_node(joining_node);
 
-            // If joining was filebot, update filebot to current.
             let cur_clone = with_state(|s| {
                 s.openfile.as_ref().and_then(|of| of.current.clone())
             });
-            let joining_was_filebot = with_state(|s| {
-                s.openfile.as_ref()
-                    .and_then(|of| of.filebot.as_ref())
-                    .map(|fb| Rc::ptr_eq(fb, joining_node))
-                    .unwrap_or(false)
-            });
-            if joining_was_filebot {
-                with_state_mut(|s| {
-                    if let Some(ref mut of) = s.openfile {
-                        of.filebot = cur_clone.clone();
-                    }
-                });
-            }
 
             // Renumber and refresh.
             if let Some(ref cur) = cur_clone {

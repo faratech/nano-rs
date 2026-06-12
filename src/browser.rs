@@ -929,11 +929,11 @@ pub fn browse_in(inpath: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// napms — stub (sleep in milliseconds); file-local helper matching C usage
+// napms — sleep in milliseconds (lets flash messages linger to be read)
 // ---------------------------------------------------------------------------
+#[inline]
 fn napms(ms: i32) {
-    // No-op stub matching other modules in the codebase
-    let _ = ms;
+    crate::winio::napms(ms.max(0) as u64);
 }
 
 // ---------------------------------------------------------------------------

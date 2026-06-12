@@ -4609,6 +4609,12 @@ pub fn beep() {
     let _ = out().flush();
 }
 
+/// Sleep for the given number of milliseconds (equivalent to ncurses napms()).
+/// Used to let flash messages linger long enough to be read.
+pub fn napms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
 /// Return the number of columns in the terminal (COLS equivalent).
 pub fn get_cols() -> usize {
     with_state(|s| s.footwin.cols) as usize

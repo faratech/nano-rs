@@ -13,11 +13,6 @@ use std::path::{Path, PathBuf};
 // Re-export stubs for winio/text/search/nano functions referenced here.
 // These will be replaced by real implementations when those modules are ported.
 
-macro_rules! tr {
-    ($s:literal) => { $s };
-    ($s:literal, $($a:expr),*) => { &format!($s, $($a),*) };
-}
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -36,8 +31,12 @@ const LUMPSIZE: usize = 120;
 #[inline] fn titlebar(extra: Option<&str>) { crate::winio::titlebar(extra); }
 fn blank_bottombars() { crate::winio::blank_bottombars(); }
 fn wipe_statusbar() { crate::winio::wipe_statusbar(); }
-fn beep() {}  // stub: no winio::beep exposed as pub yet
-fn napms(_ms: i32) {}  // stub: no direct equivalent
+/// C: beep() — ncurses; ring the terminal bell.
+#[inline]
+fn beep() { crate::winio::beep() }
+/// C: napms(ms) — ncurses; lets flash messages linger to be read.
+#[inline]
+fn napms(ms: i32) { crate::winio::napms(ms.max(0) as u64) }
 
 // Helper: check if file is a special file (char device, block device, or socket)
 fn is_special_file(meta: &std::fs::Metadata) -> bool {
@@ -65,19 +64,10 @@ fn is_fifo_file(meta: &std::fs::Metadata) -> bool {
     }
 }
 
+/// C: make_new_node(prev) — nano.c.
+#[inline]
 fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    Rc::new(RefCell::new(LineNode {
-        data: String::new(),
-        lineno: 0,
-        next: None,
-        prev: prev.as_ref().map(|p| Rc::downgrade(p)),
-        #[cfg(feature = "color")]
-        multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
-        has_anchor: false,
-    }))
+    crate::nano::make_new_node(prev.as_ref())
 }
 
 #[inline] fn ingraft_buffer(topline: LinePtr) { crate::cut::ingraft_buffer(topline); }

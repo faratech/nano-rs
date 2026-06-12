@@ -16,11 +16,8 @@ use crate::history;
 // Bring the exported macros into scope.
 use crate::{ISSET, TOGGLE, SET, UNSET};
 
-/// Minimal tr! macro for this module (no-op translation).
-macro_rules! tr {
-    ($s:literal) => { $s };
-    ($fmt:literal, $($arg:tt)*) => { format!($fmt, $($arg)*) };
-}
+// The tr! translation macro is defined once in main.rs (#[macro_export]).
+use crate::tr;
 
 // ---------------------------------------------------------------------------
 // Module-level statics (C file-scope statics → thread_local!)

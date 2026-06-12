@@ -64,48 +64,24 @@ fn safe_char_boundary_end(s: &str, pos: usize) -> usize {
 // These forward to the real implementations once all modules are wired.
 // ---------------------------------------------------------------------------
 
-/// C: make_new_node(prev) — create a new, empty LineNode.
-/// Sets only the back-pointer (prev); forward-linking into the list is the
-/// caller's responsibility (typically via splice_node).
+/// C: make_new_node(prev) — create a new, empty LineNode (nano.c).
+#[inline]
 fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
-    let lineno = prev.as_ref()
-        .map(|p| p.borrow().lineno + 1)
-        .unwrap_or(1);
-    Rc::new(RefCell::new(LineNode {
-        data: String::new(),
-        lineno,
-        next: None,
-        prev: prev.as_ref().map(Rc::downgrade),
-        #[cfg(feature = "color")]
-        multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
-        has_anchor: false,
-    }))
+    crate::nano::make_new_node(prev.as_ref())
 }
 
-/// C: splice_node(node, newnode) — insert newnode after node in the list.
+/// C: splice_node(node, newnode) — insert newnode after node (nano.c).
+/// Also updates filebot when splicing at the end of the buffer.
+#[inline]
 fn splice_node(node: &LinePtr, newnode: LinePtr) {
-    let old_next = node.borrow().next.clone();
-    newnode.borrow_mut().prev = Some(Rc::downgrade(node));
-    newnode.borrow_mut().next = old_next.clone();
-    node.borrow_mut().next = Some(newnode.clone());
-    if let Some(ref after) = old_next {
-        after.borrow_mut().prev = Some(Rc::downgrade(&newnode));
-    }
+    crate::nano::splice_node(node, newnode)
 }
 
-/// C: unlink_node(node) — remove a node from the doubly-linked list.
+/// C: unlink_node(node) — remove a node from the list (nano.c).
+/// Also updates filebot/edittop when the node is one of them.
+#[inline]
 fn unlink_node(node: &LinePtr) {
-    let prev_weak = node.borrow().prev.clone();
-    let next_opt = node.borrow().next.clone();
-    if let Some(ref prev_w) = prev_weak {
-        if let Some(prev) = prev_w.upgrade() {
-            prev.borrow_mut().next = next_opt.clone();
-        }
-    }
-    if let Some(ref next) = next_opt {
-        next.borrow_mut().prev = prev_weak;
-    }
+    crate::nano::unlink_node(node)
 }
 
 /// C: renumber_from(line) — reset line numbers starting from line.
@@ -210,8 +186,9 @@ fn beep() {
 }
 
 /// C: napms(ms) — sleep for ms milliseconds.
+#[inline]
 fn napms(ms: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(ms));
+    crate::winio::napms(ms);
 }
 
 /// C: get_kbinput(win, visible) — read a keystroke.
