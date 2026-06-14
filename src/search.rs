@@ -235,13 +235,65 @@ fn mark_is_before_cursor() -> bool {
     state().mark_is_before_cursor()
 }
 
+// ASCII case-insensitive substring search — zero allocation. Used as the fast
+// path for the common (ASCII) case-insensitive plain search, replacing a
+// per-line `to_lowercase()` heap allocation. Because ASCII lowercasing is
+// byte-length-preserving, the returned byte offsets are identical to those from
+// `haystack.to_lowercase().find(&needle.to_lowercase())`. Callers must ensure
+// both slices are ASCII and the needle is non-empty.
+fn ascii_ci_find(hay: &[u8], ndl: &[u8]) -> Option<usize> {
+    let n = ndl.len();
+    if n == 0 {
+        return Some(0);
+    }
+    if n > hay.len() {
+        return None;
+    }
+    let first = ndl[0].to_ascii_lowercase();
+    let last = hay.len() - n;
+    let mut i = 0;
+    while i <= last {
+        if hay[i].to_ascii_lowercase() == first && hay[i..i + n].eq_ignore_ascii_case(ndl) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+// Reverse of `ascii_ci_find`: the LAST match position in `hay` (largest start
+// offset). Equivalent to the to_lowercase() backward loop, which keeps the last
+// match found while scanning forward by one character at a time.
+fn ascii_ci_rfind(hay: &[u8], ndl: &[u8]) -> Option<usize> {
+    let n = ndl.len();
+    if n == 0 || n > hay.len() {
+        return None;
+    }
+    let first = ndl[0].to_ascii_lowercase();
+    let mut i = hay.len() - n;
+    loop {
+        if hay[i].to_ascii_lowercase() == first && hay[i..i + n].eq_ignore_ascii_case(ndl) {
+            return Some(i);
+        }
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // strstrwrapper — search for needle in haystack starting from pos
 // ---------------------------------------------------------------------------
 // C: const char *strstrwrapper(const char *data, const char *needle, const char *from)
 // Returns the byte offset of the match within `data`, or None.
 // (Not NANO_TINY-gated: findnextstr — always compiled — calls it, matching C.)
-fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> {
+fn strstrwrapper(
+    data: &str,
+    needle: &str,
+    from_offset: usize,
+    lowered_needle: Option<&str>,
+) -> Option<usize> {
     if from_offset > data.len() {
         return None;
     }
@@ -280,35 +332,31 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
             }
         });
 
-        // Update regmatches if we found something.
-        if let Some(_match_start) = result {
-            with_state_mut(|s| {
-                if let Some(ref re) = s.search_regexp.clone() {
-                    if backwards {
-                        let search_slice = &data[..from_offset];
-                        if let Some(caps) = re.captures(search_slice) {
-                            for i in 0..10 {
-                                s.regmatches[i] = if let Some(m) = caps.get(i) {
-                                    (m.start(), m.end())
-                                } else {
-                                    (0, 0)
-                                };
-                            }
-                        }
-                    } else {
-                        let search_slice = &data[from_offset..];
-                        if let Some(caps) = re.captures(search_slice) {
-                            for i in 0..10 {
-                                s.regmatches[i] = if let Some(m) = caps.get(i) {
-                                    (from_offset + m.start(), from_offset + m.end())
-                                } else {
-                                    (0, 0)
-                                };
-                            }
-                        }
+        // Update regmatches if we found something. Compute the ten capture spans
+        // against a read borrow of the compiled regex, then store them in one
+        // assignment — avoids cloning the whole compiled regex (which the old code
+        // did on every match just to dodge the &mut-while-reading borrow).
+        if result.is_some() {
+            let new_matches: Option<[(usize, usize); 10]> = with_state(|s| {
+                let re = s.search_regexp.as_ref()?;
+                let search_slice = if backwards {
+                    &data[..from_offset]
+                } else {
+                    &data[from_offset..]
+                };
+                let base = if backwards { 0 } else { from_offset };
+                let caps = re.captures(search_slice)?;
+                let mut rm = [(0usize, 0usize); 10];
+                for i in 0..10 {
+                    if let Some(m) = caps.get(i) {
+                        rm[i] = (base + m.start(), base + m.end());
                     }
                 }
+                Some(rm)
             });
+            if let Some(rm) = new_matches {
+                with_state_mut(|s| s.regmatches = rm);
+            }
         }
 
         result
@@ -319,8 +367,8 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
         if backwards {
             // Find the last occurrence at or before from_offset.
             let search_slice = &data[..from_offset];
-            let mut last_match: Option<usize> = None;
             if case_sensitive {
+                let mut last_match: Option<usize> = None;
                 let mut start = 0;
                 while let Some(pos) = search_slice[start..].find(needle) {
                     let match_pos = start + pos;
@@ -334,11 +382,27 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
                         break;
                     }
                 }
+                last_match
+            } else if !needle.is_empty() && search_slice.is_ascii() && needle.is_ascii() {
+                // Common case: ASCII, case-insensitive. Scan in place with no
+                // allocation. ASCII case-folding is byte-length-preserving, so this
+                // yields the exact same last-match offset as the to_lowercase() path.
+                ascii_ci_rfind(search_slice.as_bytes(), needle.as_bytes())
             } else {
+                // Non-ASCII fallback: preserve the existing whole-string lowercasing
+                // behavior exactly (Unicode folding can differ from per-char folding).
+                let lower_needle_buf;
+                let lower_needle: &str = match lowered_needle {
+                    Some(s) => s,
+                    None => {
+                        lower_needle_buf = needle.to_lowercase();
+                        lower_needle_buf.as_str()
+                    }
+                };
                 let lower_data = search_slice.to_lowercase();
-                let lower_needle = needle.to_lowercase();
+                let mut last_match: Option<usize> = None;
                 let mut start = 0;
-                while let Some(pos) = lower_data[start..].find(&lower_needle[..]) {
+                while let Some(pos) = lower_data[start..].find(lower_needle) {
                     let match_pos = start + pos;
                     last_match = Some(match_pos);
                     let step = lower_data[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
@@ -347,17 +411,28 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
                         break;
                     }
                 }
+                last_match
             }
-            last_match
         } else {
             // Find first occurrence at or after from_offset.
             let search_slice = &data[from_offset..];
             let found = if case_sensitive {
                 search_slice.find(needle)
+            } else if !needle.is_empty() && search_slice.is_ascii() && needle.is_ascii() {
+                // Common case: ASCII, case-insensitive — zero-alloc in-place scan.
+                ascii_ci_find(search_slice.as_bytes(), needle.as_bytes())
             } else {
+                // Non-ASCII fallback: exact existing whole-string lowercasing behavior.
+                let lower_needle_buf;
+                let lower_needle: &str = match lowered_needle {
+                    Some(s) => s,
+                    None => {
+                        lower_needle_buf = needle.to_lowercase();
+                        lower_needle_buf.as_str()
+                    }
+                };
                 let lower_data = search_slice.to_lowercase();
-                let lower_needle = needle.to_lowercase();
-                lower_data.find(&lower_needle[..])
+                lower_data.find(lower_needle)
             };
             found.map(|pos| from_offset + pos)
         }
@@ -591,6 +666,17 @@ pub fn findnextstr(
     // Record the time for "Searching..." feedback.
     let mut lastkbcheck = std::time::Instant::now();
 
+    // Pre-lower the needle once per search for the case-insensitive plain-search
+    // fallback path (non-ASCII lines), instead of re-lowering it on every line
+    // scanned. The ASCII fast path inside strstrwrapper needs no lowered needle.
+    let lowered_needle: Option<String> =
+        if !ISSET!(USE_REGEXP) && !ISSET!(CASE_SENSITIVE) {
+            Some(needle.to_lowercase())
+        } else {
+            None
+        };
+    let lowered_needle = lowered_needle.as_deref();
+
     loop {
         let current_line = match line {
             Some(ref l) => l.clone(),
@@ -612,16 +698,16 @@ pub fn findnextstr(
                 skipone = false;
                 if backwards && from_offset != 0 {
                     let new_from = step_left(ld, from_offset);
-                    strstrwrapper(ld, needle, new_from)
+                    strstrwrapper(ld, needle, new_from, lowered_needle)
                         .filter(|&pos| if backwards { pos <= new_from } else { pos >= new_from })
                 } else if !backwards && from_offset < ld.len() {
                     let new_from = from_offset + char_length(&ld[from_offset..]);
-                    strstrwrapper(ld, needle, new_from)
+                    strstrwrapper(ld, needle, new_from, lowered_needle)
                 } else {
                     None
                 }
             } else {
-                strstrwrapper(ld, needle, from_offset)
+                strstrwrapper(ld, needle, from_offset, lowered_needle)
             }
         };
 
