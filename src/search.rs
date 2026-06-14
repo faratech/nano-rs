@@ -6,7 +6,7 @@
 use crate::definitions::*;
 use crate::global::{with_state, with_state_mut};
 use crate::{ISSET, SET, UNSET, TOGGLE};
-use regex::RegexBuilder;
+use regex_lite::RegexBuilder;
 
 // ---------------------------------------------------------------------------
 // Module-level state (static variables in C)

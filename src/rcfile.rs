@@ -15,7 +15,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
 #[cfg(feature = "color")]
-use regex::{Regex, RegexBuilder};
+use regex_lite::{Regex, RegexBuilder};
 
 // ---------------------------------------------------------------------------
 // Module-level statics (thread_local replacements for C file-scope statics)
@@ -887,19 +887,25 @@ fn set_interface_color(element: usize, combotext: &str) {
 // compile — compile a regex
 // ---------------------------------------------------------------------------
 
-/// Translate POSIX-ERE bracket-expression quirks into syntax the `regex` crate
-/// accepts.  nano's syntax files (and POSIX `regcomp`) treat a `]` that is the
-/// FIRST member of a bracket expression — e.g. `[]abc]` or `[^]abc]` — as a
-/// literal `]`, and a bare `[` inside a class as a literal `[`.  The `regex`
-/// crate instead closes the class at that `]` (or treats `[` as a nested-class
-/// start), which breaks patterns like `[^][]`.  Escape those so the meaning is
-/// preserved.  POSIX classes (`[:name:]`, `[.coll.]`, `[=equiv=]`) pass through.
+/// Translate POSIX-ERE quirks into syntax the `regex` crate accepts.  nano's
+/// syntax files (and POSIX `regcomp`) differ from the Rust regex engine in a few
+/// ways that this bridges:
+///   * a `]` that is the FIRST member of a bracket expression (`[]abc]`,
+///     `[^]abc]`) is a literal `]`, and a bare `[` inside a class is a literal
+///     `[` — the regex crate would instead close the class or start a nested one
+///     (breaking `[^][]`);
+///   * inside a bracket expression `\` is a LITERAL backslash, not an escape
+///     (so `[^'\]` / `[^\]` keep their meaning instead of swallowing the class);
+///   * an UNMATCHED `)` is a literal `)` in POSIX/GNU (the regex crate errors).
+/// POSIX classes (`[:name:]`, `[.coll.]`, `[=equiv=]`) pass through unchanged.
 #[cfg(feature = "color")]
 fn posix_bracket_fixup(re: &str) -> String {
     let chars: Vec<char> = re.chars().collect();
     let n = chars.len();
     let mut out = String::with_capacity(re.len() + 4);
     let mut i = 0;
+    // Group-nesting depth, so an unmatched ')' can be escaped to a literal.
+    let mut depth: i32 = 0;
     while i < n {
         let c = chars[i];
         if c == '\\' {
@@ -954,13 +960,12 @@ fn posix_bracket_fixup(re: &str) -> String {
                     continue;
                 }
                 if chars[i] == '\\' {
-                    // Preserve escapes inside the class.
-                    out.push('\\');
+                    // POSIX bracket expressions have NO escapes: '\' is a LITERAL
+                    // backslash.  Emit it doubled so the regex crate reads a literal
+                    // (and so it cannot "escape" a following ']' and swallow the
+                    // rest of the pattern — e.g. c.nanorc's `[^'\]` and `[^\]`).
+                    out.push_str("\\\\");
                     i += 1;
-                    if i < n {
-                        out.push(chars[i]);
-                        i += 1;
-                    }
                     continue;
                 }
                 out.push(chars[i]);
@@ -970,6 +975,23 @@ fn posix_bracket_fixup(re: &str) -> String {
                 out.push(']');
                 i += 1;
             }
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+            out.push('(');
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            if depth > 0 {
+                depth -= 1;
+                out.push(')');
+            } else {
+                // Unmatched ')' is a literal in POSIX/GNU; escape it for the regex crate.
+                out.push_str("\\)");
+            }
+            i += 1;
             continue;
         }
         out.push(c);

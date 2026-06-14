@@ -478,9 +478,9 @@ pub struct ColorType {
     /// Pair number and brightness composed into ready-to-use attributes.
     pub attributes: i32,
     /// The compiled start regex (or the only regex for single-line rules).
-    pub start: Option<regex::Regex>,
+    pub start: Option<regex_lite::Regex>,
     /// The compiled end regex (for multiline rules), if any.
-    pub end: Option<regex::Regex>,
+    pub end: Option<regex_lite::Regex>,
     /// Next color combination in the syntax's list.
     pub next: Option<Box<ColorType>>,
 }
@@ -507,7 +507,7 @@ impl Default for ColorType {
 #[derive(Debug)]
 pub struct RegexListType {
     /// A compiled regex to match things that imply a certain syntax.
-    pub one_rgx: Option<regex::Regex>,
+    pub one_rgx: Option<regex_lite::Regex>,
     /// The next regex in the list.
     pub next: Option<Box<RegexListType>>,
 }

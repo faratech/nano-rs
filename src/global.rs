@@ -362,7 +362,7 @@ pub struct AppState {
     pub quotestr: Option<String>,
     #[cfg(feature = "justify")]
     /// The compiled regular expression from the quoting string.
-    pub quotereg: Option<regex::Regex>,
+    pub quotereg: Option<regex_lite::Regex>,
 
     // --- Word characters ---
     /// Nonalphanumeric characters that also form words.
@@ -457,7 +457,7 @@ pub struct AppState {
 
     // --- Regex search state ---
     /// The compiled regular expression to use in searches.
-    pub search_regexp: Option<regex::Regex>,
+    pub search_regexp: Option<regex_lite::Regex>,
     /// The match positions for parenthetical subexpressions (up to 10).
     /// Each entry is (start, end) byte offsets.
     pub regmatches: [(usize, usize); 10],

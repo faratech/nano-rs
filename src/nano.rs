@@ -2712,7 +2712,7 @@ pub fn nano_main() {
 
         // Compile quoting regex.
         let quotestr = with_state(|s| s.quotestr.clone().unwrap_or_default());
-        match regex::Regex::new(&quotestr) {
+        match regex_lite::Regex::new(&quotestr) {
             Ok(re) => with_state_mut(|s| s.quotereg = Some(re)),
             Err(e) => {
                 die(&format!("Bad quoting regex \"{}\": {}", quotestr, e));

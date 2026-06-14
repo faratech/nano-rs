@@ -1,8 +1,6 @@
 #![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
 use crate::definitions::*;
 use crate::global::STATE;
-#[allow(unused_imports)] // some of these are used only under feature gates
-use unicode_width::UnicodeWidthChar;
 
 // The tr! translation macro is defined once in main.rs (#[macro_export]).
 use crate::tr;

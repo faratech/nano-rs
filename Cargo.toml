@@ -1,6 +1,6 @@
 [package]
 name = "nano"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 
 [[bin]]
@@ -9,20 +9,19 @@ path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29"
-regex = "1"
+regex-lite = "0.1"
 libc = "0.2"
-signal-hook = "0.4"
-clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
-unicode-segmentation = "1"
 infer = { version = "0.19", optional = true }
 tempfile = "3"
 
 [features]
+# libmagic (the `infer` crate) is intentionally NOT in default — it adds ~35 KiB
+# for a magic-bytes syntax fallback; build with `--features libmagic` to include it.
 default = ["color", "nanorc", "utf8", "browser", "help", "histories",
            "justify", "multibuffer", "wrapping", "mouse",
            "linenumbers", "linter", "formatter", "speller",
-           "tabcomp", "wordcomp", "comment", "libmagic", "operatingdir", "extra"]
+           "tabcomp", "wordcomp", "comment", "operatingdir", "extra"]
 tiny         = []
 color        = []
 nanorc       = []
@@ -56,8 +55,12 @@ windows = { version = "0.62", features = [
 [build-dependencies]
 embed-resource = "3"
 
-# Speed-tuned release build (keeps opt-level at the default 3).
+# Size-tuned release build. opt-level="z" + panic="abort" trade run speed and
+# unwinding for a much smaller binary; crash-time emergency save uses SIGSEGV/
+# SIGABRT handlers (nano.rs), so abort-on-panic stays compatible.
 [profile.release]
+opt-level = "z"
 lto = true
 codegen-units = 1
+panic = "abort"
 strip = true
