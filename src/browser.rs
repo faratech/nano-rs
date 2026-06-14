@@ -437,12 +437,10 @@ pub fn to_last_file() {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn strip_last_component(path: &str) -> String {
+    // C truncates at the last '/': for a root-level path like "/foo" this yields
+    // "" (not "/"), so browse_in falls back to the cwd as intended.
     if let Some(pos) = path.rfind('/') {
-        if pos == 0 {
-            "/".to_string()
-        } else {
-            path[..pos].to_string()
-        }
+        path[..pos].to_string()
     } else {
         path.to_string()
     }
@@ -452,6 +450,19 @@ pub fn strip_last_component(path: &str) -> String {
 // browse — allow the user to browse through directories
 // C: char *browse(char *path)
 // ---------------------------------------------------------------------------
+/// The `toggle` field of the shortcut bound to `kbinput` in the current menu
+/// (C: get_shortcut(kbinput)->toggle).
+#[cfg(all(feature = "browser", not(feature = "tiny")))]
+fn shortcut_toggle_for(kbinput: i32) -> i32 {
+    crate::global::with_state(|s| {
+        let cm = s.currmenu;
+        s.sclist.iter()
+            .find(|sc| (sc.menus as u32 & cm) != 0 && sc.keycode == kbinput)
+            .map(|sc| sc.toggle)
+            .unwrap_or(0)
+    })
+}
+
 #[cfg(feature = "browser")]
 pub fn browse(initial_path: String) -> Option<String> {
     use crate::global::{with_state, with_state_mut, interpret};
@@ -626,6 +637,25 @@ pub fn browse(initial_path: String) -> Option<String> {
                     present_name = FILELIST.with(|fl| {
                         fl.borrow().get(selected).cloned()
                     });
+                    continue 'reload;
+                }
+            } else if {
+                #[cfg(not(feature = "tiny"))]
+                {
+                    function == Some(crate::global::do_toggle as crate::definitions::FuncPtr)
+                        && shortcut_toggle_for(kbinput) == NO_HELP as i32
+                }
+                #[cfg(feature = "tiny")]
+                { false }
+            } {
+                // M-X in the browser: toggle the help lines (C: do_toggle with
+                // toggle == NO_HELP), then treat it as a resize so the browser
+                // re-reads the directory and repaints.
+                #[cfg(not(feature = "tiny"))]
+                {
+                    crate::TOGGLE!(NO_HELP);
+                    crate::winio::window_init();
+                    present_name = FILELIST.with(|fl| fl.borrow().get(selected).cloned());
                     continue 'reload;
                 }
             } else if function == Some(do_search_backward as crate::definitions::FuncPtr) {

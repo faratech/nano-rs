@@ -44,7 +44,9 @@ fn is_special_file(meta: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        meta.file_type().is_char_device() || meta.file_type().is_block_device() || meta.file_type().is_socket()
+        // C's is_dev_chr/is_dev_blk check only matches S_ISCHR || S_ISBLK; sockets
+        // are NOT treated as "device files" (mirrors files.c).
+        meta.file_type().is_char_device() || meta.file_type().is_block_device()
     }
     #[cfg(not(unix))]
     {
@@ -216,15 +218,18 @@ fn editwinrows() -> i32 {
 // crop_to_fit — return the given file name cropped to fit within `room` cols
 // C: char *crop_to_fit(const char *name, int room)
 // ---------------------------------------------------------------------------
-pub fn crop_to_fit(name: &str, room: usize) -> String {
-    if breadth(name) <= room {
-        return display_string(name, 0, room, false, false);
+pub fn crop_to_fit(name: &str, room: isize) -> String {
+    // room is signed (C uses `int room`) so an underflowed/negative budget falls
+    // into the `room < 4` "_" case instead of wrapping to a huge usize.
+    if (breadth(name) as isize) <= room {
+        return display_string(name, 0, room.max(0) as usize, false, false);
     }
 
     if room < 4 {
         return "_".to_string();
     }
 
+    let room = room as usize;
     let mut clipped = display_string(name, breadth(name) - room + 3, room, false, false);
     clipped.insert_str(0, "...");
     clipped
@@ -462,7 +467,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
                     + breadth(&lockuser)
                     + breadth(&lockprog)
                     + breadth(&pidstring);
-                let room = if COLS() > total_fixed + 7 { COLS() - total_fixed + 7 } else { 4 };
+                let room = COLS() as isize - total_fixed as isize + 7;
                 let postedname = crop_to_fit(filename, room);
                 let promptstr = question
                     .replacen("%s", &postedname, 1)
@@ -788,7 +793,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     if descriptor > 0 {
         if let Some(f) = file_handle {
             install_handler_for_Ctrl_C();
-            read_file_impl(f, new_one, &realname, !new_one);
+            read_file_impl(f, true, &realname, !new_one);
             restore_handler_for_Ctrl_C();
 
             #[cfg(not(feature = "tiny"))]
@@ -1079,7 +1084,7 @@ pub fn encode_data(buf: &[u8]) -> String {
 // read_file_impl — read an open file into the current buffer
 // C: void read_file(FILE *f, int fd, const char *filename, bool undoable)
 // ---------------------------------------------------------------------------
-pub fn read_file_impl(mut f: File, is_new_file: bool, filename: &str, undoable: bool) {
+pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: bool) {
     let was_lineno = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.current.as_ref())
@@ -1103,7 +1108,7 @@ pub fn read_file_impl(mut f: File, is_new_file: bool, filename: &str, undoable: 
         }
     }
     #[cfg(feature = "tiny")]
-    { let was_leftedge: usize = 0; }
+    { was_leftedge = 0; }
 
     let topline = make_new_node(None);
     topline.borrow_mut().lineno = 1;
@@ -1156,7 +1161,7 @@ pub fn read_file_impl(mut f: File, is_new_file: bool, filename: &str, undoable: 
     }
 
     // Check writability
-    let writable = if !is_new_file && !undoable && !ISSET!(VIEW_MODE) {
+    let writable = if had_real_fd && !undoable && !ISSET!(VIEW_MODE) {
         #[cfg(unix)]
         {
             let cname = std::ffi::CString::new(filename).unwrap_or_default();
@@ -1610,7 +1615,7 @@ pub fn execute_command(command: &str) {
 
         // Read command output
         let stream = unsafe { File::from_raw_fd(from_read_fd) };
-        read_file_impl(stream, true, "pipe", true);
+        read_file_impl(stream, false, "pipe", true);
 
         // Wait for processes
         let mut command_status: i32 = 0;
@@ -2763,38 +2768,36 @@ pub fn write_region_to_file(
         None
     };
 
-    // Save and modify the buffer to look like a region
+    // Make the marked area look like a separate buffer.  As in copy_marked_region
+    // this must be NON-destructive: C writes a single '\0' at bot_x and bumps the
+    // topline data pointer past top_x, then restores the exact original strings.
+    // These are LIVE document nodes, so save their full data before mutating.
     let birthline = with_state(|s| s.openfile.as_ref().and_then(|of| of.filetop.clone()));
     let after_line = botline.as_ref().and_then(|b| b.borrow().next.clone());
 
-    // Truncate botline at bot_x
-    let saved_byte = botline.as_ref().map(|b| {
-        let b_ref = b.borrow();
-        b_ref.data.as_bytes().get(bot_x).copied().unwrap_or(0)
-    });
+    let saved_top_data = topline.as_ref().map(|t| t.borrow().data.clone());
+    let saved_bot_data = botline.as_ref().map(|b| b.borrow().data.clone());
 
+    // Logically truncate botline at bot_x and attach the magic stopper (if any).
     if let Some(ref bot) = botline {
         let mut b = bot.borrow_mut();
-        if bot_x <= b.data.len() {
+        if bot_x <= b.data.len() && b.data.is_char_boundary(bot_x) {
             b.data.truncate(bot_x);
         }
-        if let Some(ref stopper_node) = stopper {
-            b.next = Some(stopper_node.clone());
-        } else {
-            b.next = None;
-        }
+        b.next = stopper.clone();
     }
 
-    // Adjust topline start
+    // Drop topline's prefix before top_x.  When topline == botline this runs after
+    // the truncate above, yielding data[top_x..bot_x] — exactly C's behaviour.
     if let Some(ref top) = topline {
-        let t = top.borrow_mut();
-        if top_x <= t.data.len() {
-            // slice from top_x — we store as an offset
-            // This is simplified; the C code adjusts the data pointer directly
+        let mut t = top.borrow_mut();
+        if top_x <= t.data.len() && t.data.is_char_boundary(top_x) {
+            let moved = t.data[top_x..].to_string();
+            t.data = moved;
         }
     }
 
-    // Set filetop to topline
+    // Set filetop to topline for the duration of the write.
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             of.filetop = topline.clone();
@@ -2803,21 +2806,22 @@ pub fn write_region_to_file(
 
     let retval = write_file(name, stream, normal, method, NONOTES);
 
-    // Restore buffer state
+    // Restore the proper state of the buffer.
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             of.filetop = birthline;
         }
     });
 
+    if let Some(ref top) = topline {
+        if let Some(data) = saved_top_data {
+            top.borrow_mut().data = data;
+        }
+    }
     if let Some(ref bot) = botline {
         let mut b = bot.borrow_mut();
-        // Restore the saved byte
-        if let Some(sb) = saved_byte {
-            if bot_x <= b.data.len() {
-                // Push back the saved character
-                b.data.push(sb as char);
-            }
+        if let Some(data) = saved_bot_data {
+            b.data = data;
         }
         b.next = after_line;
     }
@@ -3093,7 +3097,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
                 if name_exists {
                     let question = "File \"%s\" exists; OVERWRITE? ";
-                    let room = if COLS() > breadth(question) + 1 { COLS() - breadth(question) + 1 } else { 4 };
+                    let room = COLS() as isize - breadth(question) as isize + 1;
                     let name = crop_to_fit(&answer2, room);
                     let message = format!("File \"{}\" exists; OVERWRITE? ", name);
                     choice = ask_user(YESORNO, &message);
@@ -3449,7 +3453,10 @@ pub fn input_tab(
                 if common_len + ch1_len > m.len() {
                     break 'outer;
                 }
-                if &first[common_len..common_len + ch1_len] != &m[common_len..common_len + ch1_len] {
+                // Compare at the byte level (like C's strncmp); slicing m as a &str
+                // could land on a non-char boundary and panic for multibyte names.
+                if first.as_bytes()[common_len..common_len + ch1_len]
+                    != m.as_bytes()[common_len..common_len + ch1_len] {
                     break 'outer;
                 }
             }

@@ -274,7 +274,10 @@ pub fn proper_x(
                 let crossed_boundary = if forward {
                     w < *leftedge
                 } else {
-                    column / tabsize == (*leftedge - 1) / tabsize
+                    // C uses size_t arithmetic: when *leftedge == 0, *leftedge - 1
+                    // wraps to SIZE_MAX (so the comparison is false).  wrapping_sub
+                    // reproduces that instead of panicking on usize underflow.
+                    column / tabsize == (*leftedge).wrapping_sub(1) / tabsize
                         && column / tabsize < (*leftedge + editwincols - 1) / tabsize
                 };
                 if crossed_boundary {

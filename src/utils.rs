@@ -114,12 +114,16 @@ pub fn digits(n: isize) -> i32 {
  * Read a decimal integer from the given string.
  * Returns Some(value) on success, None on failure. */
 pub fn parse_num(s: &str) -> Option<isize> {
-    let trimmed = s.trim_end();
-    if trimmed.is_empty() {
+    // Mirror C strtol semantics: skip LEADING whitespace, accept an optional sign
+    // and a run of digits, and REJECT any leftover after the number (C's *excess
+    // check).  So leading spaces are allowed but trailing ones (and any other
+    // trailing junk) are not.
+    let s = s.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // Reject strings with trailing non-numeric content (mimics strtol excess check)
-    trimmed.parse::<isize>().ok()
+    s.parse::<isize>().ok()
 }
 
 /* C: bool parse_line_column(const char *string, ssize_t *line, ssize_t *column)

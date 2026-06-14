@@ -470,6 +470,10 @@ pub struct AppState {
     pub color_combo: [Option<Box<ColorType>>; NUMBER_OF_ELEMENTS],
     /// The processed color pairs for the interface elements.
     pub interface_color_pair: [i32; NUMBER_OF_ELEMENTS],
+    /// The decoded (fg, bg) ncurses color indices for each interface pair,
+    /// indexed by the 1-based pair index encoded in interface_color_pair's low
+    /// bits.  THE_DEFAULT (-1) means "use the terminal default".
+    pub interface_color_rgb: [(i16, i16); NUMBER_OF_ELEMENTS + 1],
 
     // --- Paths ---
     /// The user's home directory.
@@ -724,6 +728,7 @@ impl Default for AppState {
                 [NONE; NUMBER_OF_ELEMENTS]
             },
             interface_color_pair: [0i32; NUMBER_OF_ELEMENTS],
+            interface_color_rgb: [(-1i16, -1i16); NUMBER_OF_ELEMENTS + 1],
 
             homedir: None,
             statedir: None,
@@ -930,79 +935,40 @@ where
 // The real implementations are just {;} in C — they are command targets.
 // ---------------------------------------------------------------------------
 
-/* C: void case_sens_void(void) {;} */
-pub fn case_sens_void() {}
+// These C "void" markers are empty by design — they are sentinel command
+// targets, identified throughout the keybinding system by FUNCTION-POINTER
+// IDENTITY (see first_sc_for / shown_entries_for / the search_init toggles).
+// In C, distinct empty functions have distinct addresses; in Rust, two functions
+// with identical bodies may be merged by identical-code-folding, which would make
+// their pointers compare EQUAL and corrupt that dispatch.  Each body therefore
+// carries a unique discriminant (black_box(line!())) so it cannot be folded.
+macro_rules! void_marker {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        pub fn $name() { std::hint::black_box(line!()); }
+    };
+}
 
-/* C: void regexp_void(void) {;} */
-pub fn regexp_void() {}
-
-/* C: void backwards_void(void) {;} */
-pub fn backwards_void() {}
-
-#[cfg(feature = "histories")]
-/* C: void get_older_item(void) {;} */
-pub fn get_older_item() {}
-
-#[cfg(feature = "histories")]
-/* C: void get_newer_item(void) {;} */
-pub fn get_newer_item() {}
-
-/* C: void flip_replace(void) {;} */
-pub fn flip_replace() {}
-
-#[cfg(feature = "browser")]
-/* C: void to_files(void) {;} */
-pub fn to_files() {}
-
-#[cfg(feature = "browser")]
-/* C: void goto_dir(void) {;} */
-pub fn goto_dir() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void do_nothing(void) {;} */
-pub fn do_nothing() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void do_toggle(void) {;} */
-pub fn do_toggle() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void dos_format(void) {;} */
-pub fn dos_format() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void append_it(void) {;} */
-pub fn append_it() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void prepend_it(void) {;} */
-pub fn prepend_it() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void back_it_up(void) {;} */
-pub fn back_it_up() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void flip_execute(void) {;} */
-pub fn flip_execute() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void flip_pipe(void) {;} */
-pub fn flip_pipe() {}
-
-#[cfg(not(feature = "tiny"))]
-/* C: void flip_convert(void) {;} */
-pub fn flip_convert() {}
-
-#[cfg(feature = "multibuffer")]
-/* C: void flip_newbuffer(void) {;} */
-pub fn flip_newbuffer() {}
-
-/* C: void discard_buffer(void) {;} */
-pub fn discard_buffer() {}
-
-/* C: void do_cancel(void) {;} */
-pub fn do_cancel() {}
+void_marker!(/* C: void case_sens_void(void) {;} */ case_sens_void);
+void_marker!(/* C: void regexp_void(void) {;} */ regexp_void);
+void_marker!(/* C: void backwards_void(void) {;} */ backwards_void);
+void_marker!(#[cfg(feature = "histories")] get_older_item);
+void_marker!(#[cfg(feature = "histories")] get_newer_item);
+void_marker!(/* C: void flip_replace(void) {;} */ flip_replace);
+void_marker!(#[cfg(feature = "browser")] to_files);
+void_marker!(#[cfg(feature = "browser")] goto_dir);
+void_marker!(#[cfg(not(feature = "tiny"))] do_nothing);
+void_marker!(#[cfg(not(feature = "tiny"))] do_toggle);
+void_marker!(#[cfg(not(feature = "tiny"))] dos_format);
+void_marker!(#[cfg(not(feature = "tiny"))] append_it);
+void_marker!(#[cfg(not(feature = "tiny"))] prepend_it);
+void_marker!(#[cfg(not(feature = "tiny"))] back_it_up);
+void_marker!(#[cfg(not(feature = "tiny"))] flip_execute);
+void_marker!(#[cfg(not(feature = "tiny"))] flip_pipe);
+void_marker!(#[cfg(not(feature = "tiny"))] flip_convert);
+void_marker!(#[cfg(feature = "multibuffer")] flip_newbuffer);
+void_marker!(/* C: void discard_buffer(void) {;} */ discard_buffer);
+void_marker!(/* C: void do_cancel(void) {;} */ do_cancel);
 
 // ---------------------------------------------------------------------------
 // Forward declarations / stubs for functions in other modules that
@@ -1253,8 +1219,10 @@ pub fn keycode_from_string(keystring: &str) -> i32 {
     // #ifdef ENABLE_NANORC — Sh-M-<letter>
     #[cfg(feature = "nanorc")]
     {
-        if keystring.len() == 6
-            && keystring[..5].eq_ignore_ascii_case("Sh-M-")
+        // Compare on bytes (like C's strncasecmp); slicing keystring[..5] as a &str
+        // would panic when byte 5 is not a char boundary for a 6-byte multibyte key.
+        if bytes.len() == 6
+            && bytes[..5].eq_ignore_ascii_case(b"Sh-M-")
         {
             let ch = bytes[5];
             let lower = ch | 0x20;
@@ -1266,8 +1234,10 @@ pub fn keycode_from_string(keystring: &str) -> i32 {
     }
 
     if bytes[0] == b'F' {
-        let rest = &keystring[1..];
-        if let Ok(fn_num) = rest.parse::<i32>() {
+        // atoi-style: parse only the leading run of digits, so "F12" works and a
+        // trailing remainder (as C's atoi tolerates) does not reject the key.
+        let digits: String = keystring[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(fn_num) = digits.parse::<i32>() {
             if fn_num >= 1 && fn_num <= 24 {
                 return KEY_F0 + fn_num;
             }
@@ -1358,8 +1328,8 @@ pub fn first_sc_for(menu: u32, function: FuncPtr) -> Option<(i32, &'static str)>
 /* C: size_t shown_entries_for(int menu) */
 pub fn shown_entries_for(menu: u32) -> usize {
     with_state(|s| {
-        // C uses COLS in the formula; use a reasonable default
-        let cols: usize = 80;
+        // C uses the live COLS in this formula (global.c:476), not a fixed 80.
+        let cols: usize = crate::winio::get_cols();
         let maximum = ((cols + 40) / 20) * 2;
         let mut count = 0usize;
         let mut found_all = true;
@@ -1671,12 +1641,16 @@ pub fn shortcut_init() {
     #[cfg(feature = "formatter")]
     let formatter_gist = "Invoke a program to format/arrange/manipulate the buffer";
 
-    // Determine help_key: if Backspace is not ^H, use ^H for help; else ^N.
-    // C: char *bsp_string = tgetstr("kb", NULL);
-    //    char *help_key = (bsp_string && *bsp_string != 0x08) ? "^H" : "^N";
-    // We have no terminfo access; default to "^N" (safe fallback).
-    // TODO: query terminfo when available
-    let help_key: &'static str = "^N";
+    // Determine help_key.  C: help_key = (bsp_string && *bsp_string != 0x08) ?
+    // "^H" : "^N" — i.e. "^H" whenever the terminal's Backspace is not ^H, which
+    // is the case for essentially every modern terminal (Backspace is 0x7F).
+    // crossterm exposes no terminfo "kb" capability and reports the physical
+    // Backspace key as KeyCode::Backspace (bound below via "Bsp"), so default to
+    // "^H" — the value C produces on modern terminals.  help_key is added before
+    // the (now shadowed) ^H->backspace entry, and get_shortcut returns the first
+    // match, so ^H -> Help while the real Backspace key still deletes; this also
+    // frees ^N for do_down (the previous "^N" default collided with it).
+    let help_key: &'static str = "^H";
 
     const BLANKAFTER: bool = true; // C: #define BLANKAFTER TRUE
     const TOGETHER:   bool = false;

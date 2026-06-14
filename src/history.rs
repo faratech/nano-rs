@@ -576,6 +576,9 @@ pub fn load_positions_register() {
             // 0 = EOF, 1 = only a newline (empty line)
             break;
         }
+        // Count every physical line toward the 200-record cap (C bumps the counter
+        // per read, before any skip), not just the successfully-parsed ones.
+        count += 1;
         // Strip trailing newline.
         if buf.last() == Some(&b'\n') {
             buf.pop();
@@ -623,7 +626,6 @@ pub fn load_positions_register() {
         });
 
         records.push(PositionRecord { filename, linenumber, columnnumber, anchors });
-        count += 1;
     }
 
     POSITIONS_REGISTER.with(|pr| *pr.borrow_mut() = records);

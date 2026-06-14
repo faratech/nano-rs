@@ -1392,22 +1392,43 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
             let mut unicode = assemble_unicode(keycode);
             tl_set!(REVEAL_CURSOR, false);
 
+            let mut last_keycode = keycode;
             while unicode == PROCEED {
                 let k = get_input(Some(()));
+                last_keycode = k;
                 unicode = assemble_unicode(k);
             }
 
             #[cfg(not(feature = "tiny"))]
-            {
-                let k = get_input(None); // peek at last read
-                if k == THE_WINDOW_RESIZED as i32 {
-                    *count = 999;
-                    return Vec::new();
-                }
+            if last_keycode == THE_WINDOW_RESIZED as i32 {
+                *count = 999;
+                return Vec::new();
             }
 
             if unicode == INVALID_DIGIT {
-                // Skip continuation bytes if any
+                // For an invalid keystroke, discard its possible continuation bytes,
+                // exactly as C does (winio.c:1480-1491).  nextcodes[0] is the front
+                // of the waiting buffer: KEY_BUFFER[NEXTCODES_IDX].
+                let peek_front = || -> Option<i32> {
+                    if tl_get!(WAITING_CODES) > 0 {
+                        KEY_BUFFER.with(|kb| NEXTCODES_IDX.with(|ni| kb.borrow().get(*ni.borrow()).copied()))
+                    } else {
+                        None
+                    }
+                };
+                if last_keycode == ESC_CODE as i32 && tl_get!(WAITING_CODES) > 0 {
+                    let _ = get_input(None);
+                    while peek_front().map_or(false, |c| 0x1F < c && c < 0x40) {
+                        let _ = get_input(None);
+                    }
+                    if peek_front().map_or(false, |c| 0x3F < c && c < 0x7F) {
+                        let _ = get_input(None);
+                    }
+                } else if (0xC0..=0xFF).contains(&last_keycode) {
+                    while peek_front().map_or(false, |c| 0x7F < c && c < 0xC0) {
+                        let _ = get_input(None);
+                    }
+                }
                 *count = 0;
                 return Vec::new();
             }
@@ -2047,9 +2068,11 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
     let from_x_val = start_x;
     tl_set!(FROM_X, from_x_val);
 
-    // Handle case where first character starts before left edge
-    // (partial character display with placeholders)
-    if start_col < column && pos < text.len() && bytes[pos] != b'\t' {
+    // Handle case where the first character starts before the left edge, or would
+    // be overwritten by a "<" token (C: start_col < column ||
+    // (start_col > 0 && isdata && !SOFTWRAP)) — show placeholders instead.
+    if (start_col < column || (start_col > 0 && isdata && !softwrap))
+        && pos < text.len() && bytes[pos] != b'\t' {
         let ch = &text[pos..];
         if is_cntrl_char(ch) {
             if start_col < column {
@@ -2073,7 +2096,10 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
         }
     }
 
-    while pos < text.len() && cur_col < beyond {
+    // C loop guard: while (*text && (column < beyond || ZEROWIDTH_CHAR)).  Keep
+    // consuming trailing zero-width characters at the right edge instead of
+    // dropping them, so the inner break below is the real terminator.
+    while pos < text.len() {
         let ch = &text[pos..];
         let b = bytes[pos];
 
@@ -2314,6 +2340,24 @@ pub fn show_states_at_win(win: &NanoWindow, cur_y: u16, cur_x: u16) {
 /// Write the color/attribute commands for `pair` onto `w`.
 /// Called by apply_interface_color and by callers that already hold a stdout handle.
 pub fn queue_interface_color<W: Write>(w: &mut W, pair: i32) {
+    // Emit the configured foreground/background colours.  The low 8 bits of `pair`
+    // hold the 1-based interface-pair index (0 means attributes only); look up the
+    // decoded (fg, bg) and emit them just like set_color does for syntax colours.
+    #[cfg(feature = "color")]
+    {
+        let pair_index = (pair & 0xFF) as usize;
+        if pair_index > 0 {
+            let (fg, bg) = with_state(|s| {
+                *s.interface_color_rgb.get(pair_index).unwrap_or(&(-1, -1))
+            });
+            if fg >= 0 {
+                let _ = queue!(w, SetForegroundColor(ncurses_color_to_crossterm(fg)));
+            }
+            if bg >= 0 {
+                let _ = queue!(w, SetBackgroundColor(ncurses_color_to_crossterm(bg)));
+            }
+        }
+    }
     let reverse = (pair & A_REVERSE) != 0;
     if reverse {
         let _ = queue!(w, SetAttribute(Attribute::Reverse));
@@ -2699,21 +2743,30 @@ pub fn minibar() {
         }
     }
 
-    // Display cursor position
-    if constant_show && namewidth + 32 < cols {
+    // Display cursor position.  C guard: namewidth + tallywidth + placewidth + 32
+    // < COLS (tallywidth is 0 here, as the minibar shows no line-count tally).
+    // Including placewidth is what stops `cols - 27 - placewidth` from underflowing
+    // (and panicking) on a narrow terminal.
+    if constant_show && namewidth + placewidth + 32 < cols {
         let loc_col = (cols - 27 - placewidth) as u16;
         let _ = queue!(stdout, MoveTo(footwin_x + loc_col, footwin_y), Print(&location));
     }
 
-    // Display hex code of character under cursor
+    // Display the hex code of the character under the cursor, plus the codes of
+    // up to two succeeding zero-width characters (C winio.c:2232-2269).
+    let mut had_successor = false;
     if constant_show && namewidth + 28 < cols {
-        let hex_str = compute_cursor_hex();
+        let mut hex_str = compute_cursor_hex();
+        let (succ, has_succ) = compute_cursor_hex_successors();
+        hex_str.push_str(&succ);
+        had_successor = has_succ;
         let hex_col = (cols - 23) as u16;
         let _ = queue!(stdout, MoveTo(footwin_x + hex_col, footwin_y), Print(&hex_str));
     }
 
-    // Display state flags
-    if stateflags && namewidth + 14 + 2 * padding < cols {
+    // Display the state flags — but not when a succeeding zero-width code was
+    // shown (C gates this on !successor).
+    if stateflags && !had_successor && namewidth + 14 + 2 * padding < cols {
         let state_col = (cols - 11 - padding) as u16;
         show_states_at_win(&with_state(|s| s.footwin.clone()), 0, state_col);
     }
@@ -2781,15 +2834,68 @@ fn compute_cursor_hex() -> String {
     format!("  0x{:02X}", b)
 }
 
+/// Compute the "|XXXX" codes of up to two zero-width characters that immediately
+/// follow the character under the cursor (C winio.c:2253-2269).  Returns the
+/// appended string and whether any successor code was produced.
+#[cfg(not(feature = "tiny"))]
+fn compute_cursor_hex_successors() -> (String, bool) {
+    #[cfg(not(feature = "utf8"))]
+    {
+        (String::new(), false)
+    }
+    #[cfg(feature = "utf8")]
+    {
+        let (data, current_x, using_utf8) = with_state(|s| {
+            let f = s.openfile.as_ref();
+            let data = f.and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().data.clone())
+                .unwrap_or_default();
+            let cx = f.map(|f| f.current_x).unwrap_or(0);
+            (data, cx, s.using_utf8)
+        });
+        if !using_utf8 || current_x >= data.len() {
+            return (String::new(), false);
+        }
+        // successor starts just after the character under the cursor.
+        let this_pos = &data[current_x..];
+        let mut succ_start = current_x + char_length(this_pos);
+        let mut out = String::new();
+        let mut had = false;
+        if succ_start < data.len() {
+            let succ = &data[succ_start..];
+            if is_zerowidth(succ) {
+                if let Ok((wc, _)) = mbtowide(succ) {
+                    out.push_str(&format!("|{:04X}", wc as u32));
+                    had = true;
+                    succ_start += char_length(succ);
+                    if succ_start < data.len() {
+                        let succ2 = &data[succ_start..];
+                        if is_zerowidth(succ2) {
+                            if let Ok((wc2, _)) = mbtowide(succ2) {
+                                out.push_str(&format!("|{:04X}", wc2 as u32));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (out, had)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // statusline
 // ---------------------------------------------------------------------------
 
 /* C: void statusline(message_type importance, const char *msg, ...) */
 pub fn statusline(importance: MessageType, msg: &str) {
-    // NOTE: do NOT reset WAITING_CODES here.
-    // The C nano's statusline() never touched the key buffer; clearing it
-    // destroys pending multi-byte character bytes (e.g. UTF-8 emoji continuations).
+    // Drop all waiting keystrokes upon any kind of "error" (C: importance >= AHEM).
+    // This fires only for AHEM/MILD/ALERT, never for ordinary INFO/HUSH updates,
+    // so it cannot destroy in-flight UTF-8 continuation bytes.
+    if importance >= MessageType::Ahem {
+        WAITING_CODES.with(|wc| *wc.borrow_mut() = 0);
+        NEXTCODES_IDX.with(|ni| *ni.borrow_mut() = 0);
+    }
 
     let lastmessage = with_state(|s| s.lastmessage);
 
@@ -4009,7 +4115,40 @@ pub fn draw_scrollbar() {
 
     let from_line = edittop_lineno - 1;
     let total_lines = filebot_lineno;
-    let covered_lines = editwinrows as isize;
+
+    // C: under SOFTWRAP, covered_lines is found by walking chunks forward from
+    // edittop until editwinrows screen rows are covered — not simply editwinrows.
+    let covered_lines = if softwrap {
+        let (edittop, firstcolumn) = with_state(|s| {
+            let f = s.openfile.as_ref();
+            (f.and_then(|f| f.edittop.clone()), f.map(|f| f.firstcolumn).unwrap_or(0))
+        });
+        if let Some(top) = edittop {
+            let mut line = top;
+            let mut extras: isize = {
+                let data = line.borrow().data.clone();
+                extra_chunks_in(&data) as isize - chunk_for(firstcolumn, &data) as isize
+            };
+            loop {
+                let lineno = line.borrow().lineno;
+                let next = line.borrow().next.clone();
+                if lineno + extras < from_line + editwinrows as isize {
+                    if let Some(n) = next {
+                        let data = n.borrow().data.clone();
+                        extras += extra_chunks_in(&data) as isize;
+                        line = n;
+                        continue;
+                    }
+                }
+                break;
+            }
+            line.borrow().lineno - from_line
+        } else {
+            editwinrows as isize
+        }
+    } else {
+        editwinrows as isize
+    };
 
     let lowest = (from_line * editwinrows as isize) / total_lines;
     let highest = lowest + (editwinrows as isize * covered_lines) / total_lines;
@@ -4427,9 +4566,30 @@ pub fn report_cursor_position() {
     let fullwidth = breadth(&current_data) + 1;
     let column = xplustabs() + 1;
 
-    // Number of characters up to the cursor
-    // (simplified: use current_x as byte offset)
-    let sum = current_x; // full implementation would use number_of_characters_in()
+    // Number of characters from the top of the file up to the cursor — counted in
+    // CHARACTERS (C: number_of_characters_in(filetop, current) with the current
+    // line logically truncated at current_x), not as a byte offset of one line.
+    let sum = {
+        let (filetop, current) = with_state(|s| {
+            let f = s.openfile.as_ref();
+            (f.and_then(|f| f.filetop.clone()), f.and_then(|f| f.current.clone()))
+        });
+        let mut count = 0usize;
+        if let (Some(top), Some(cur)) = (filetop, current) {
+            let mut node = Some(top);
+            while let Some(n) = node {
+                if std::rc::Rc::ptr_eq(&n, &cur) {
+                    let data = n.borrow().data.clone();
+                    let upto = data.get(..current_x).unwrap_or(&data);
+                    count += crate::chars::mbstrlen(upto);
+                    break;
+                }
+                count += crate::chars::mbstrlen(&n.borrow().data) + 1;
+                node = n.borrow().next.clone();
+            }
+        }
+        count
+    };
 
     let linepct = (100 * current_lineno / filebot_lineno.max(1)) as i32;
     let colpct = (100 * column / fullwidth.max(1)) as i32;

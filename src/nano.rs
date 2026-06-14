@@ -1106,13 +1106,16 @@ pub fn get_keycode(_keyname: &str, standard: i32) -> i32 {
 /* C: void confirm_margin(void) */
 #[cfg(feature = "linenumbers")]
 pub fn confirm_margin() {
-    let (needed_margin, cols) = with_state(|s| {
+    // Use the real terminal width (COLS), exactly as C does.  The old
+    // editwincols+margin approximation omitted the sidebar (so editwincols below
+    // subtracted it twice) and, at the first call, read the 12345 margin sentinel.
+    let cols = winio::terminal_size().0 as i32;
+    let needed_margin = with_state(|s| {
         let last_lineno = s.openfile.as_ref()
             .and_then(|of| of.filebot.as_ref())
             .map(|bot| bot.borrow().lineno)
             .unwrap_or(1);
-        let needed = crate::utils::digits(last_lineno) + 1;
-        (needed, s.editwincols + s.margin) // COLS approximation
+        crate::utils::digits(last_lineno) + 1
     });
 
     let line_numbers_set = ISSET!(LINE_NUMBERS);
@@ -1272,7 +1275,10 @@ pub fn process_click() -> i32 {
         });
         let new_x = {
             let b = line.borrow();
-            crate::utils::actual_x(&b.data, winio::actual_last_column(leftedge, click_col as usize))
+            // Clamp the click column to >= 0 before the usize cast: clicking in
+            // the line-number margin yields a negative column, which would wrap to
+            // a huge usize and panic in actual_last_column.
+            crate::utils::actual_x(&b.data, winio::actual_last_column(leftedge, click_col.max(0) as usize))
         };
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
@@ -1471,6 +1477,28 @@ pub fn inject(burst: &[u8]) {
         (b.data.len(), b.lineno, of.current_x)
     });
 
+    // Capture, before the insertion, the softwrap geometry that determines
+    // whether a full refresh is needed afterwards (C inject: original_row / old_amount).
+    #[cfg(not(feature = "tiny"))]
+    let pre_col = crate::utils::xplustabs();
+    #[cfg(not(feature = "tiny"))]
+    let (original_row, old_amount) = with_state(|s| {
+        if s.flag_isset(SOFTWRAP) {
+            if let Some(ref of) = s.openfile {
+                if let Some(ref cur) = of.current {
+                    let data = cur.borrow().data.clone();
+                    let orig = if of.cursor_row == (s.editwinrows - 1) as isize {
+                        winio::chunk_for(pre_col, &data)
+                    } else {
+                        0
+                    };
+                    return (orig, winio::extra_chunks_in(&data));
+                }
+            }
+        }
+        (0usize, 0usize)
+    });
+
     // Add undo record if needed.
     #[cfg(not(feature = "tiny"))]
     {
@@ -1511,11 +1539,30 @@ pub fn inject(burst: &[u8]) {
         }
     });
 
+    // When the current line is edittop and shown from a non-first chunk, the
+    // inserted text may shift the preceding chunk; realign firstcolumn (C 1505-1508).
+    #[cfg(not(feature = "tiny"))]
+    {
+        let needs_align = with_state(|s| {
+            if let Some(ref of) = s.openfile {
+                if let (Some(cur), Some(top)) = (of.current.as_ref(), of.edittop.as_ref()) {
+                    return std::rc::Rc::ptr_eq(cur, top) && of.firstcolumn > 0;
+                }
+            }
+            false
+        });
+        if needs_align {
+            winio::ensure_firstcolumn_is_aligned();
+            with_state_mut(|s| s.refresh_needed = true);
+        }
+    }
+
+    // totsize counts CHARACTERS, not bytes (C: openfile->totsize += mbstrlen(burst)).
+    let char_count = String::from_utf8_lossy(&data).chars().count();
     with_state_mut(|s| {
         let of = s.openfile.as_mut().expect("an open buffer");
         of.current_x += count;
-        // totsize is character count, but approximate with byte count.
-        of.totsize += count;
+        of.totsize += char_count;
     });
 
     files::set_modified();
@@ -1543,6 +1590,43 @@ pub fn inject(burst: &[u8]) {
     with_state_mut(|s| {
         s.openfile.as_mut().expect("an open buffer").placewewant = placewewant;
     });
+
+    // When panning near the viewport edge, or when softwrapping and the line's
+    // chunk count changed (or the cursor moved to a new chunk on the last edit
+    // row), schedule a full refresh (C inject 1543-1556).
+    #[cfg(not(feature = "tiny"))]
+    {
+        let need_refresh = with_state(|s| {
+            if let Some(ref of) = s.openfile {
+                // panning: placewewant > brink + editwincols - CUSHION - 1
+                if s.united_sidescroll
+                    && of.placewewant + CUSHION + 1 > of.brink + s.editwincols as usize
+                {
+                    return true;
+                }
+                if s.flag_isset(SOFTWRAP) {
+                    if let Some(ref cur) = of.current {
+                        let data = cur.borrow().data.clone();
+                        if winio::extra_chunks_in(&data) != old_amount {
+                            return true;
+                        }
+                        if of.cursor_row == (s.editwinrows - 1) as isize
+                            && winio::chunk_for(of.placewewant, &data) > original_row
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        });
+        if need_refresh {
+            with_state_mut(|s| {
+                s.refresh_needed = true;
+                s.focusing = false;
+            });
+        }
+    }
 
     let refresh = with_state(|s| s.refresh_needed);
     if !refresh {
@@ -1604,12 +1688,10 @@ pub fn toggle_this(flag: u32) {
             return;
         }
         f if f == NO_HELP => {
-            let (lines, zero, minibar) = with_state(|s| {
-                let l = s.editwinrows + s.midwin.y as i32;
-                let z = s.flag_isset(ZERO);
-                let m = s.flag_isset(MINIBAR);
-                (l, z, m)
-            });
+            // C compares against LINES (the full terminal height), not
+            // editwinrows + midwin.y, which omits the footer rows.
+            let lines = winio::terminal_size().1 as i32;
+            let (zero, minibar) = with_state(|s| (s.flag_isset(ZERO), s.flag_isset(MINIBAR)));
             let minimum = if zero { 3 } else if minibar { 4 } else { 5 };
             if lines < minimum {
                 winio::statusline(MessageType::Ahem, "Too tiny");
@@ -1620,10 +1702,8 @@ pub fn toggle_this(flag: u32) {
             winio::draw_all_subwindows();
         }
         f if f == CONSTANT_SHOW => {
-            let (lines, zero, minibar) = with_state(|s| {
-                let total_rows = s.editwinrows + s.midwin.y as i32;
-                (total_rows, s.flag_isset(ZERO), s.flag_isset(MINIBAR))
-            });
+            let lines = winio::terminal_size().1 as i32;
+            let (zero, minibar) = with_state(|s| (s.flag_isset(ZERO), s.flag_isset(MINIBAR)));
             if lines == 1 {
                 winio::statusline(MessageType::Ahem, "Too tiny");
                 TOGGLE!(flag);

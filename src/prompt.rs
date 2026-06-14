@@ -305,22 +305,27 @@ pub fn process_prompt_click() -> i32 {
 
     /* When the click is in the prompt bar, position the cursor. */
     if retval == 0 {
-        // wmouse_trafo equivalent: check if click is in footwin row 0
-        let (_foot_y, _foot_cols) = with_state(|s| (s.footwin.y as i32, s.footwin.cols as i32));
-        if click_row == 0 {
+        // wmouse_trafo equivalent: translate the click to footwin-relative coords
+        // and only act when it actually falls inside footwin.  get_mouseinput
+        // returns ABSOLUTE coordinates, so comparing the raw row to 0 (the top of
+        // the screen) never matched the footwin at the bottom.
+        let (foot_y, foot_x) = with_state(|s| (s.footwin.y as i32, s.footwin.x as i32));
+        let rel_row = click_row - foot_y;
+        let rel_col = click_col - foot_x;
+        if rel_row == 0 && rel_col >= 0 {
             let prompt_str = get_prompt();
             let start_col = breadth(&prompt_str) + 2;
             let answer = with_state(|s| s.answer.clone());
             let typing_x = get_typing_x();
 
-            if click_col >= start_col as i32 {
+            if rel_col >= start_col as i32 {
                 let page_start = get_statusbar_page_start(
                     start_col,
                     start_col + wideness(&answer, typing_x),
                 );
                 let new_x = actual_x(
                     &answer,
-                    page_start + (click_col as usize) - start_col,
+                    page_start + (rel_col as usize) - start_col,
                 );
                 set_typing_x(new_x);
             } else {
@@ -1154,7 +1159,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
     let allstr = tr!("Aa");
 
     while choice == UNDECIDED {
-        let kbinput: i32;
+        let mut kbinput: i32;
 
         // Draw shortcut keys when help lines are shown.
         if !ISSET!(NO_HELP) {
@@ -1213,27 +1218,11 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
 
             /* Accept first character of an external paste and ignore the rest. */
             if kbinput == START_OF_PASTE as i32 {
-                let first = crate::winio::get_kbinput(BLIND);
-                loop {
-                    let k = crate::winio::get_kbinput(BLIND);
-                    if k == END_OF_PASTE as i32 {
-                        break;
-                    }
-                }
-                // Use `first` as the actual input (matches C behaviour).
-                // But in C the variable `kbinput` is replaced with the char after START_OF_PASTE.
-                // We need to reassign — but kbinput is not mut here in the outer scope.
-                // We handle this by falling through with `first` as the letter check.
-                let ch = first as u8 as char;
-                if yesstr.contains(ch) {
-                    choice = YES;
-                } else if nostr.contains(ch) {
-                    choice = NO;
-                } else if withall && allstr.contains(ch) {
-                    choice = ALL;
-                }
-                // Either we set choice or it stays UNDECIDED; loop continues.
-                continue;
+                kbinput = crate::winio::get_kbinput(BLIND);
+                while crate::winio::get_kbinput(BLIND) != END_OF_PASTE as i32 {}
+                // Do NOT `continue`: fall through with kbinput set to the first
+                // pasted character so the letter / shortcut / control-key checks
+                // below run, exactly as C does.
             }
         }
 
@@ -1313,11 +1302,19 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
                 let mut mouse_y: i32 = 0;
                 let mut mouse_x: i32 = 0;
                 if crate::winio::get_mouseinput(&mut mouse_y, &mut mouse_x) == 0 {
-                    // Check if click is in footwin, y > 0.
-                    let in_footwin = true; // wmouse_trafo equivalent
-                    if in_footwin && mouse_x < (width * 2) as i32 && mouse_y > 0 {
-                        let x = mouse_x / width as i32;
-                        let y = mouse_y - 1;
+                    // wmouse_trafo: translate to footwin-relative coordinates and
+                    // verify the click is inside footwin.  get_mouseinput returns
+                    // ABSOLUTE coords, so the Yes/No/All math needs relative ones.
+                    let (foot_y, foot_x, foot_rows, foot_cols) = with_state(|s| {
+                        (s.footwin.y as i32, s.footwin.x as i32,
+                         s.footwin.rows as i32, s.footwin.cols as i32)
+                    });
+                    let rel_y = mouse_y - foot_y;
+                    let rel_x = mouse_x - foot_x;
+                    let in_footwin = rel_y >= 0 && rel_y < foot_rows && rel_x >= 0 && rel_x < foot_cols;
+                    if in_footwin && rel_x < (width * 2) as i32 && rel_y > 0 {
+                        let x = rel_x / width as i32;
+                        let y = rel_y - 1;
 
                         /* x == 0 means Yes or No, y == 0 means Yes or All. */
                         choice = -2 * x * y + x - y + 1;

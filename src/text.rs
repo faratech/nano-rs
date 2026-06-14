@@ -730,7 +730,10 @@ pub fn comment_line(action: UndoType, line: &LinePtr, comment_seq: &str) -> bool
             // Verify and remove comment markers.
             let is_commented = if line_data.starts_with(pre_seq) {
                 if let Some(post) = post_seq {
-                    line_len >= post_len && &line_data[line_len - post_len..] == post
+                    // Both markers must fit WITHOUT overlapping; otherwise the line
+                    // is not properly commented and the slice below would panic
+                    // (e.g. "/*/" with pre="/*", post="*/": end < pre_len).
+                    pre_len + post_len <= line_len && &line_data[line_len - post_len..] == post
                 } else {
                     true
                 }
@@ -1658,26 +1661,30 @@ pub fn do_enter() {
         }
     }
 
-    // Truncate current line at cursor.
+    // C order (text.c:885-897): when AUTOINDENT and the prefix was all blanks,
+    // reset current_x to 0 BEFORE truncating, so the blanks are actually removed
+    // from the old line.  Truncating first (the old behaviour) kept the blanks,
+    // duplicating them onto the new line and under-counting totsize.
+    #[cfg(not(feature = "tiny"))]
+    if ISSET!(AUTOINDENT) && allblanks {
+        with_state_mut(|s| {
+            if let Some(ref mut f) = s.openfile {
+                f.current_x = 0;
+            }
+        });
+    }
+
+    // Make the current line end at the (possibly reset) cursor position.
+    let trunc_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(current_x));
     {
         let mut node = current_line.borrow_mut();
-        if current_x <= node.data.len() {
-            node.data.truncate(current_x);
+        if trunc_x <= node.data.len() && node.data.is_char_boundary(trunc_x) {
+            node.data.truncate(trunc_x);
         }
     }
 
     #[cfg(not(feature = "tiny"))]
-    {
-        if ISSET!(AUTOINDENT) && allblanks {
-            // Trim current line blanks.
-            with_state_mut(|s| {
-                if let Some(ref mut f) = s.openfile {
-                    f.current_x = 0;
-                }
-            });
-        }
-        add_undo(UndoType::Enter, None);
-    }
+    add_undo(UndoType::Enter, None);
 
     // Create and splice the new node.
     let newnode = make_new_node(Some(current_line.clone()));
@@ -3621,8 +3628,13 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
             return;
         }
         Ok(s) => {
+            // C: if (!WIFEXITED(status) || WEXITSTATUS(status) > 2) -> "Error invoking" + return;
+            //    else if (WEXITSTATUS(status) != 0) -> "Program complained".
+            // A process killed by a signal has no exit code (code()==None) and must
+            // take the error-and-return path, not fall through to read the temp file.
+            let exited_normally = s.code().is_some();
             let code = s.code().unwrap_or(-1);
-            if code > 2 {
+            if !exited_normally || code > 2 {
                 statusline(MessageType::Alert, &format!(tr!("Error invoking '{}'"), args[0]));
                 return;
             } else if code != 0 {
@@ -4231,18 +4243,16 @@ pub fn do_linter() {
                     } else if choice == YES {
                         crate::files::open_buffer_impl(&entry_filename, true);
                     } else {
-                        // Skip the messages for that unopened file.
-                        // (C scans in the direction of travel; we skip forward.)
-                        let mut idx = cur_idx;
-                        while idx < lints.len() && lints[idx].filename == entry_filename {
-                            idx += 1;
-                        }
-                        if idx >= lints.len() {
+                        // C: drop ALL messages for the declined file (not just the
+                        // consecutive run), then resume at the first remaining one.
+                        lints.retain(|l| l.filename != entry_filename);
+                        if lints.is_empty() {
                             statusline(MessageType::Remark,
-                                tr!("No messages for opened files"));
+                                tr!("No messages for this file"));
                             break;
                         }
-                        cur_idx = idx;
+                        cur_idx = 0;
+                        last_shown = None;
                         continue;
                     }
                 }
@@ -4469,16 +4479,18 @@ pub fn count_lines_words_and_characters() {
                 return;
             };
 
+            // C: if (topline != botline) chars = number_of_characters_in(topline->next, botline) + 1;
+            // which equals the sum over (topline->next ..= botline) of (mbstrlen(line)+1).
+            // botline itself MUST be counted, and the count is in CHARACTERS
+            // (mbstrlen), not bytes — otherwise the later subtraction underflows.
             let mut char_count: usize = 0;
             if tl.as_ptr() != bl.as_ptr() {
-                // Count chars in intermediate lines.
                 let mut cur = tl.borrow().next.clone();
                 while let Some(ln) = cur {
+                    char_count += mbstrlen(&ln.borrow().data) + 1;
                     if ln.as_ptr() == bl.as_ptr() { break; }
-                    char_count += ln.borrow().data.len() + 1; // +1 for newline
                     cur = ln.borrow().next.clone();
                 }
-                char_count += 1; // newline between top and next
             }
 
             let top_data = tl.borrow().data.clone();

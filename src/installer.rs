@@ -721,8 +721,12 @@ pub fn check_and_download_update() -> UpdateStatus {
                                 path: temp_file,
                             };
                         }
-                        // Confirmed not newer than current -- the pending file is stale.
+                        // Confirmed not newer than current -- the pending file is
+                        // stale.  GitHub just told us there is nothing newer, so
+                        // delete it and return rather than issuing a second,
+                        // redundant get_latest_release() request on the fall-through.
                         let _ = fs::remove_file(&temp_file);
+                        return UpdateStatus::None;
                     }
                     Err(_) => {
                         // Couldn't reach GitHub; preserve the pending update for retry.

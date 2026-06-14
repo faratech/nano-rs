@@ -431,12 +431,14 @@ parentheses:\n\n")),
                             shortcut_col.push_str(&format!("{:<7}", sc.keystr));
                         }
                     } else {
-                        // Second keystroke: parenthesized, pad to 10 cells.
-                        if has_arrow {
-                            shortcut_col.push_str(&format!("({:<10})", sc.keystr));
-                        } else {
-                            shortcut_col.push_str(&format!("({:<8})", sc.keystr));
-                        }
+                        // Second keystroke: parens hug the key, then trailing spaces
+                        // (C: "(%s)       "), not padding INSIDE the parens.  Same
+                        // total field width as before: 12 cells with an arrow, else 10.
+                        let total: usize = if has_arrow { 12 } else { 10 };
+                        let content = format!("({})", sc.keystr);
+                        let pad = total.saturating_sub(content.chars().count());
+                        shortcut_col.push_str(&content);
+                        shortcut_col.push_str(&" ".repeat(pad));
                         break;
                     }
                 }
@@ -533,7 +535,7 @@ pub fn wrap_help_text_into_buffer() {
             let st = s.borrow();
             (
                 st.midwin.cols as usize,
-                st.midwin.rows as usize + 2, // approximate LINES
+                (st.topwin.rows + st.midwin.rows + st.footwin.rows) as usize, // LINES
                 st.sidebar as usize,
                 st.flag_isset(MINIBAR),
                 st.flag_isset(EMPTY_LINE),
@@ -570,25 +572,27 @@ pub fn wrap_help_text_into_buffer() {
         }
 
         let (oneline, length) = if pos < intro_end || (pos > 0 && bytes[pos - 1] == b'\n') {
-            // Introductory section or beginning of a line: straight wrap.
+            // Introductory section or beginning of a line: straight wrap, using the
+            // faithful break_line (keystroke-area guard, step_left fallback, -1 case).
             let chunk = &text[pos..];
-            let length = break_line_bytes(chunk, wrapping_point);
-            // If the last char of the chunk we break is a space, no shim needed.
+            let raw = crate::text::break_line(chunk, wrapping_point as isize, true);
+            let length = if raw < 0 { chunk.len() } else { (raw as usize).min(chunk.len()) };
+            // C: snprintf(oneline, length+shim, "%s", ptr) copies length+shim-1 bytes,
+            // i.e. it drops the break char only when it is a space.
             let shim = if length > 0 && chunk.as_bytes().get(length - 1) == Some(&b' ') {
                 0usize
             } else {
                 1usize
             };
-            let take = length.saturating_sub(shim).min(chunk.len());
+            let take = (length + shim).saturating_sub(1).min(chunk.len());
             (chunk[..take].to_string(), length)
         } else {
             // Shortcut column: indented continuation.
             let chunk = &text[pos..];
-            let sc_wrap = (if cols < 40 { 22usize } else { cols - 18 })
-                .saturating_sub(sidebar);
-            let length = break_line_bytes(chunk, sc_wrap);
-            let take = length.min(chunk.len());
-            (format!("\t\t  {}", &chunk[..take]), length)
+            let sc_wrap = (if cols < 40 { 22isize } else { cols as isize - 18 }) - sidebar as isize;
+            let raw = crate::text::break_line(chunk, sc_wrap, true);
+            let length = if raw < 0 { chunk.len() } else { (raw as usize).min(chunk.len()) };
+            (format!("\t\t  {}", &chunk[..length]), length)
         };
 
         set_current_line_data(&oneline);
@@ -631,43 +635,6 @@ pub fn wrap_help_text_into_buffer() {
         }
     }
     set_edittop_to_current();
-}
-
-// ---------------------------------------------------------------------------
-// break_line_bytes helper
-// ---------------------------------------------------------------------------
-
-/// Rust equivalent of break_line(): find how many bytes of `text` fit within
-/// `goal` printable columns, breaking at a word boundary if possible.
-/// This is a simplified approximation; the real break_line() lives in winio.c.
-#[cfg(feature = "help")]
-fn break_line_bytes(text: &str, goal: usize) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-
-    let mut last_space = 0usize;
-    let mut col = 0usize;
-
-    for (i, ch) in text.char_indices() {
-        if ch == '\n' {
-            return i + 1;
-        }
-        // Tab counts as 8 columns (simplified).
-        let width = if ch == '\t' { 8 } else { UnicodeWidthChar::width(ch).unwrap_or(1) };
-        if col + width > goal {
-            // Return up to the last space if we found one, else hard-break here.
-            if last_space > 0 {
-                return last_space;
-            }
-            return i;
-        }
-        col += width;
-        if ch == ' ' {
-            last_space = i + ch.len_utf8();
-        }
-    }
-    text.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +739,10 @@ pub fn show_help() {
     let title = HELP_TEXT.with(|ht| {
         let text_opt = ht.borrow();
         if let Some(ref text) = *text_opt {
-            let length = break_line_bytes(text, usize::MAX);
+            // C: length = break_line(help_text, HIGHEST_POSITIVE, TRUE) returns the
+            // index OF the '\n', so the title excludes the trailing newline.
+            let raw = crate::text::break_line(text, isize::MAX, true);
+            let length = if raw < 0 { text.len() } else { (raw as usize).min(text.len()) };
             text[..length].to_string()
         } else {
             String::new()
@@ -788,7 +758,8 @@ pub fn show_help() {
     // Skip over the title to point at the start of the body text.
     let body_offset = HELP_TEXT.with(|ht| {
         if let Some(ref text) = *ht.borrow() {
-            let length = break_line_bytes(text, usize::MAX);
+            let raw = crate::text::break_line(text, isize::MAX, true);
+            let length = if raw < 0 { text.len() } else { (raw as usize).min(text.len()) };
             let mut off = length;
             let bytes = text.as_bytes();
             while off < bytes.len() && bytes[off] == b'\n' {

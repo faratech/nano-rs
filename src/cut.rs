@@ -226,19 +226,22 @@ pub fn expunge(action: UndoType) {
     if in_middle {
         // Delete the character under the cursor.
 
+        // Capture the chunk count BEFORE the deletion so we can tell, afterwards,
+        // whether the number of softwrap chunks changed (mirrors C's old_amount).
         #[cfg(not(feature = "tiny"))]
-        {
-            let _old_amount = with_state(|s| {
-                if s.flag_isset(SOFTWRAP) {
-                    if let Some(ref of) = s.openfile {
-                        if let Some(ref cur) = of.current {
-                            return extra_chunks_in(cur);
-                        }
+        let old_amount = with_state(|s| {
+            if s.flag_isset(SOFTWRAP) {
+                if let Some(ref of) = s.openfile {
+                    if let Some(ref cur) = of.current {
+                        return extra_chunks_in(cur);
                     }
                 }
-                0
-            });
+            }
+            0
+        });
 
+        #[cfg(not(feature = "tiny"))]
+        {
             // Add or update the undo item.
             let need_new = with_state(|s| {
                 if let Some(ref of) = s.openfile {
@@ -290,47 +293,27 @@ pub fn expunge(action: UndoType) {
 
         #[cfg(not(feature = "tiny"))]
         {
-            let refresh = with_state(|s| {
+            // When softwrapping, a changed number of chunks requires a refresh;
+            // otherwise, when panning near the edge of the viewport, also refresh.
+            let need_refresh = with_state(|s| {
                 if s.flag_isset(SOFTWRAP) {
                     if let Some(ref of) = s.openfile {
                         if let Some(ref cur) = of.current {
-                            let _new_amount = extra_chunks_in(cur);
-                            // If chunk count changed, need refresh.
-                            // (We can't compare against old_amount here due to borrow;
-                            //  this simplified form unconditionally triggers the check.)
-                            return true; // re-examine after borrow is released
+                            if extra_chunks_in(cur) != old_amount {
+                                return true;
+                            }
                         }
+                    }
+                }
+                if s.united_sidescroll {
+                    if let Some(ref of) = s.openfile {
+                        return of.placewewant < of.brink + CUSHION;
                     }
                 }
                 false
             });
-            // Recompute new chunk count and compare.
-            if refresh {
-                let (_old, _new_a) = with_state(|s| {
-                    if let Some(ref of) = s.openfile {
-                        if let Some(ref cur) = of.current {
-                            if s.flag_isset(SOFTWRAP) {
-                                return (0usize, extra_chunks_in(cur));
-                            }
-                        }
-                    }
-                    (0, 0)
-                });
-                // If they differ, set refresh_needed.
+            if need_refresh {
                 with_state_mut(|s| s.refresh_needed = true);
-            } else {
-                // When panning, check edge-of-viewport cushion.
-                let need_refresh = with_state(|s| {
-                    if s.united_sidescroll {
-                        if let Some(ref of) = s.openfile {
-                            return of.placewewant < of.brink + CUSHION;
-                        }
-                    }
-                    false
-                });
-                if need_refresh {
-                    with_state_mut(|s| s.refresh_needed = true);
-                }
             }
         }
 
@@ -1709,45 +1692,40 @@ fn copy_marked_region() {
         return;
     }
 
-    // Make the marked area look like a separate buffer:
-    // temporarily set botline->next = NULL and botline->data[bot_x] = '\0',
-    // and move topline->data to topline->data + top_x.
+    // Make the marked area look like a separate buffer: temporarily detach
+    // botline->next, logically truncate botline at bot_x, and move topline's
+    // data to topline->data + top_x.  C does this NON-destructively (a single
+    // '\0' written at bot_x, the rest of the bytes left in place) and restores
+    // the exact original strings afterwards, so we must do the same — these are
+    // LIVE document nodes, not copies.
     let afterline = botline.borrow().next.clone();
     botline.borrow_mut().next = None;
 
-    let saved_byte = botline.borrow().data.as_bytes().get(bot_x).copied().unwrap_or(0);
-    {
-        let mut bot_node = botline.borrow_mut();
-        let truncate_at = bot_x;
-        bot_node.data.truncate(truncate_at);
-    }
+    // Preserve the full original contents of both boundary nodes before any
+    // mutation (handles topline == botline, where the two clones alias one node).
+    let saved_top_data = topline.borrow().data.clone();
+    let saved_bot_data = botline.borrow().data.clone();
 
-    let full_top_data = topline.borrow().data.clone();
-    let saved_datastart = full_top_data[..top_x].to_string();
+    // Truncate botline at bot_x first, then drop topline's prefix before top_x.
+    // When topline == botline this yields data[top_x..bot_x] (truncate runs
+    // first, so the [top_x..] slice sees the already-truncated string), exactly
+    // matching C's pointer-bump-past-the-NUL behaviour.
+    botline.borrow_mut().data.truncate(bot_x);
     {
         let mut top_node = topline.borrow_mut();
-        top_node.data = full_top_data[top_x..].to_string();
+        let moved = top_node.data[top_x..].to_string();
+        top_node.data = moved;
     }
 
     // Deep-copy the (temporarily modified) chain.
     let cutbuf = copy_buffer(&topline);
     with_state_mut(|s| s.cutbuffer = Some(cutbuf));
 
-    // Restore the buffer to its original state.
-    {
-        let mut top_node = topline.borrow_mut();
-        let current_data = top_node.data.clone();
-        top_node.data = format!("{}{}", saved_datastart, current_data);
-    }
+    // Restore both boundary nodes to their exact original state.
+    topline.borrow_mut().data = saved_top_data;
     {
         let mut bot_node = botline.borrow_mut();
-        // Restore the byte we truncated.
-        if saved_byte != 0 {
-            // We truncated at bot_x; the original data from bot_x onward was lost.
-            // The caller should not rely on botline->data after this in C either;
-            // we restore the truncation byte by simply pushing it back.
-            bot_node.data.push(saved_byte as char);
-        }
+        bot_node.data = saved_bot_data;
         bot_node.next = afterline;
     }
 }

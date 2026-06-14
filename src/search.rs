@@ -142,10 +142,34 @@ fn ask_user(yesorallorno: bool, question: &str) -> i32 {
 #[inline] fn set_modified() { crate::files::set_modified() }
 
 fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
-    let (l, c) = crate::utils::parse_line_column(input);
-    if let Some(ln) = l { *line = ln; }
-    if let Some(cn) = c { *col = cn; }
-    l.is_some()
+    // Mirror C utils.c:parse_line_column — return TRUE only when the REQUIRED parts
+    // actually parse.  In particular, with "line,col" BOTH must parse, so an invalid
+    // column is not silently accepted (the tuple-returning utils helper cannot
+    // distinguish "no column" from "invalid column", hence the inline logic here).
+    let s = input.trim_start_matches(' ');
+    match s.find(|c| c == ',' || c == '.' || c == ':') {
+        None => match crate::utils::parse_num(s) {
+            Some(ln) => { *line = ln; true }
+            None => false,
+        },
+        Some(pos) => {
+            let col_ok = match crate::utils::parse_num(&s[pos + 1..]) {
+                Some(cn) => { *col = cn; true }
+                None => false,
+            };
+            if pos == 0 {
+                // Separator at the very start: only the column is given.
+                col_ok
+            } else {
+                // Both the line part and the column part must parse.
+                let line_ok = match crate::utils::parse_num(&s[..pos]) {
+                    Some(ln) => { *line = ln; true }
+                    None => false,
+                };
+                line_ok && col_ok
+            }
+        }
+    }
 }
 
 #[inline] fn adjust_viewport(mode: UpdateType) { crate::winio::adjust_viewport(mode) }
@@ -211,12 +235,12 @@ fn mark_is_before_cursor() -> bool {
     with_state(|s| s.mark_is_before_cursor())
 }
 
-#[cfg(not(feature = "tiny"))]
 // ---------------------------------------------------------------------------
 // strstrwrapper — search for needle in haystack starting from pos
 // ---------------------------------------------------------------------------
 // C: const char *strstrwrapper(const char *data, const char *needle, const char *from)
 // Returns the byte offset of the match within `data`, or None.
+// (Not NANO_TINY-gated: findnextstr — always compiled — calls it, matching C.)
 fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> {
     if from_offset > data.len() {
         return None;
@@ -299,9 +323,14 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
             if case_sensitive {
                 let mut start = 0;
                 while let Some(pos) = search_slice[start..].find(needle) {
-                    last_match = Some(start + pos);
-                    start += pos + 1;
-                    if start > search_slice.len() {
+                    let match_pos = start + pos;
+                    last_match = Some(match_pos);
+                    // Advance past the FIRST character of the match by its byte
+                    // length (not 1), so the next slice stays on a char boundary
+                    // (C advances by char_length).
+                    let step = search_slice[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
+                    start = match_pos + step;
+                    if start >= search_slice.len() {
                         break;
                     }
                 }
@@ -310,9 +339,11 @@ fn strstrwrapper(data: &str, needle: &str, from_offset: usize) -> Option<usize> 
                 let lower_needle = needle.to_lowercase();
                 let mut start = 0;
                 while let Some(pos) = lower_data[start..].find(&lower_needle[..]) {
-                    last_match = Some(start + pos);
-                    start += pos + 1;
-                    if start > lower_data.len() {
+                    let match_pos = start + pos;
+                    last_match = Some(match_pos);
+                    let step = lower_data[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
+                    start = match_pos + step;
+                    if start >= lower_data.len() {
                         break;
                     }
                 }
@@ -531,7 +562,7 @@ pub fn findnextstr(
     match_len: &mut usize,
     skipone: bool,
     begin: Option<&LinePtr>,
-    _begin_x: usize,
+    begin_x: usize,
 ) -> i32 {
     // The length of a match (recomputed for regex).
     let mut found_len = needle.len();
@@ -619,6 +650,18 @@ pub fn findnextstr(
             };
 
             if !is_magic_line {
+                // Ensure the found occurrence is not beyond the starting x — once the
+                // search has wrapped around (came_full_circle), a match at/after the
+                // original position must not be accepted (C search.c:311-315).
+                // begin_x and found_x are both byte offsets into the line.
+                if get_came_full_circle()
+                    && ((!backwards
+                            && (found_x > begin_x || (modus == REPLACING && found_x == begin_x)))
+                        || (backwards && found_x < begin_x))
+                {
+                    return 0;
+                }
+
                 // Found it. Update state.
                 with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
@@ -848,9 +891,11 @@ pub fn do_findnext() {
 // ---------------------------------------------------------------------------
 /* C: void not_found_msg(const char *str) */
 pub fn not_found_msg(s: &str) {
-    let cols = with_state(|st| st.editwincols.max(1) as usize);
+    // C uses the full terminal COLS (not editwincols) and truncates with
+    // actual_x(disp, wideness(disp, COLS/2)) — not breadth().min(COLS/2).
+    let cols = crate::winio::get_cols().max(1);
     let disp = display_string(s, 0, (cols / 2) + 1, false, false);
-    let numchars = actual_x(&disp, breadth(&disp).min(cols / 2));
+    let numchars = actual_x(&disp, wideness(&disp, cols / 2));
     let truncated = &disp[..numchars];
     let ellipsis = if numchars < disp.len() { "..." } else { "" };
     statusline(MessageType::Ahem, &format!("\"{}{}\" not found", truncated, ellipsis));

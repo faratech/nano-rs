@@ -511,7 +511,9 @@ pub fn strtosc(input: &str) -> Option<KeyStruct> {
         "scrollleft"  => Some(do_scroll_left as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "scrollright" => Some(do_scroll_right as FuncPtr),
+        #[cfg(any(not(feature = "tiny"), feature = "help"))]
         "scrollup"    => Some(do_scroll_up as FuncPtr),
+        #[cfg(any(not(feature = "tiny"), feature = "help"))]
         "scrolldown"  => Some(do_scroll_down as FuncPtr),
         "prevword"  => Some(to_prev_word as FuncPtr),
         "nextword"  => Some(to_next_word as FuncPtr),
@@ -767,18 +769,19 @@ fn color_to_short(colorname: &str) -> (i16, bool, bool) {
         (colorname, false, false)
     };
 
-    // Try #RGB hex color
-    if name.starts_with('#') && name.len() == 4 {
-        if vivid {
-            jot_error(&format!("Color '{}' takes no prefix", name));
-            return (BAD_COLOR, vivid, thick);
-        }
-        let hex = &name[1..];
-        if let (Some(r), Some(g), Some(b)) = (
-            i16::from_str_radix(&hex[0..1], 16).ok(),
-            i16::from_str_radix(&hex[1..2], 16).ok(),
-            i16::from_str_radix(&hex[2..3], 16).ok(),
-        ) {
+    // Try #RGB hex color: '#' followed by EXACTLY three ASCII hex digits.  Using
+    // chars() rather than byte length/indexing avoids panicking on a 4-byte input
+    // like "#€" whose interior bytes are not on char boundaries.
+    if let Some(hex) = name.strip_prefix('#') {
+        let digits: Vec<char> = hex.chars().collect();
+        if digits.len() == 3 && digits.iter().all(|c| c.is_ascii_hexdigit()) {
+            if vivid {
+                jot_error(&format!("Color '{}' takes no prefix", name));
+                return (BAD_COLOR, vivid, thick);
+            }
+            let r = digits[0].to_digit(16).unwrap() as i16;
+            let g = digits[1].to_digit(16).unwrap() as i16;
+            let b = digits[2].to_digit(16).unwrap() as i16;
             return (closest_index_color(r, g, b), vivid, thick);
         }
     }
@@ -884,10 +887,104 @@ fn set_interface_color(element: usize, combotext: &str) {
 // compile — compile a regex
 // ---------------------------------------------------------------------------
 
+/// Translate POSIX-ERE bracket-expression quirks into syntax the `regex` crate
+/// accepts.  nano's syntax files (and POSIX `regcomp`) treat a `]` that is the
+/// FIRST member of a bracket expression — e.g. `[]abc]` or `[^]abc]` — as a
+/// literal `]`, and a bare `[` inside a class as a literal `[`.  The `regex`
+/// crate instead closes the class at that `]` (or treats `[` as a nested-class
+/// start), which breaks patterns like `[^][]`.  Escape those so the meaning is
+/// preserved.  POSIX classes (`[:name:]`, `[.coll.]`, `[=equiv=]`) pass through.
 #[cfg(feature = "color")]
+fn posix_bracket_fixup(re: &str) -> String {
+    let chars: Vec<char> = re.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(re.len() + 4);
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '\\' {
+            // Copy an escape pair verbatim.
+            out.push('\\');
+            i += 1;
+            if i < n {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if c == '[' {
+            // Enter a bracket expression.
+            out.push('[');
+            i += 1;
+            if i < n && chars[i] == '^' {
+                out.push('^');
+                i += 1;
+            }
+            // A ']' as the first member is a literal ']' in POSIX.
+            if i < n && chars[i] == ']' {
+                out.push_str("\\]");
+                i += 1;
+            }
+            // Copy members until the real closing ']'.
+            while i < n && chars[i] != ']' {
+                if chars[i] == '['
+                    && i + 1 < n
+                    && (chars[i + 1] == ':' || chars[i + 1] == '.' || chars[i + 1] == '=')
+                {
+                    // POSIX class/collating/equivalence element: copy through to ":]" etc.
+                    let kind = chars[i + 1];
+                    out.push('[');
+                    out.push(kind);
+                    i += 2;
+                    while i + 1 < n && !(chars[i] == kind && chars[i + 1] == ']') {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    if i + 1 < n {
+                        out.push(kind);
+                        out.push(']');
+                        i += 2;
+                    }
+                    continue;
+                }
+                if chars[i] == '[' {
+                    // A bare '[' inside a class is a literal '[' in POSIX.
+                    out.push_str("\\[");
+                    i += 1;
+                    continue;
+                }
+                if chars[i] == '\\' {
+                    // Preserve escapes inside the class.
+                    out.push('\\');
+                    i += 1;
+                    if i < n {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            if i < n && chars[i] == ']' {
+                out.push(']');
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /* C: bool compile(const char *expression, int rex_flags, regex_t **packed) */
+#[cfg(feature = "color")]
 fn compile(expression: &str, case_insensitive: bool) -> Option<Regex> {
-    let result = RegexBuilder::new(expression)
+    // nano's syntax files are POSIX ERE; bridge the bracket-expression differences
+    // before handing the pattern to the (non-POSIX) `regex` crate.
+    let pattern = posix_bracket_fixup(expression);
+    let result = RegexBuilder::new(&pattern)
         .case_insensitive(case_insensitive)
         .build();
     match result {
@@ -1239,14 +1336,10 @@ fn parse_rule(ptr: &str, case_insensitive: bool) {
         // Mark that a color command was seen
         set_seen_color_command(true);
 
-        // Advance past trailing whitespace before next rule (if any)
-        if remaining.starts_with('"') {
-            // another rule starts
-        } else if remaining.starts_with("start=") {
-            // another start= rule
-        } else {
-            break;
-        }
+        // Loop back for another rule.  When `remaining` is empty the while-loop
+        // exits naturally; when it is non-empty but not a quoted regex or "start="
+        // (i.e. trailing garbage), the top of the loop reports the error — matching
+        // C's loop-and-validate, instead of silently stopping here.
     }
 }
 
@@ -1572,12 +1665,11 @@ fn parse_includes(ptr: &str) {
 /// Simple glob expansion using directory listing.
 /// Returns a sorted list of matched paths.
 fn expand_glob(pattern: &str) -> Vec<String> {
-    // Try direct path first (no glob characters)
+    // No glob characters: return the literal path even when it does not exist,
+    // mirroring glob()'s GLOB_NOCHECK, so parse_one_include reports the read error
+    // (C passes a non-matching include through and diagnoses it).
     if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
-        if Path::new(pattern).exists() {
-            return vec![pattern.to_string()];
-        }
-        return vec![];
+        return vec![pattern.to_string()];
     }
 
     // Split into directory and file pattern parts
@@ -1605,6 +1697,11 @@ fn expand_glob(pattern: &str) -> Vec<String> {
             .collect();
         entries.sort();
         results = entries;
+    }
+    // GLOB_NOCHECK: when a wildcard pattern matches nothing, return the pattern
+    // itself so parse_one_include emits the "Error reading" diagnostic, as C does.
+    if results.is_empty() {
+        results.push(pattern.to_string());
     }
     results
 }
@@ -1759,7 +1856,7 @@ fn check_vitals_mapped() {
 // ---------------------------------------------------------------------------
 
 /* C: void parse_rcfile(FILE *rcstream, bool just_syntax, bool intros_only) */
-pub fn parse_rcfile<R: BufRead>(reader: R, just_syntax: bool, intros_only: bool) {
+pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: bool) {
     let syntax_start_lineno = if just_syntax && !intros_only {
         #[cfg(feature = "color")]
         {
@@ -1771,13 +1868,27 @@ pub fn parse_rcfile<R: BufRead>(reader: R, just_syntax: bool, intros_only: bool)
         0
     };
 
-    for raw_line in reader.lines() {
-        let raw_line = match raw_line {
-            Err(_) => break,
-            Ok(l) => l,
-        };
+    let mut raw_bytes: Vec<u8> = Vec::new();
+    loop {
+        raw_bytes.clear();
+        match reader.read_until(b'\n', &mut raw_bytes) {
+            Ok(0) => break,      // end of file
+            Ok(_) => {}
+            Err(_) => break,     // genuine read error
+        }
 
         LINENO.with(|l| *l.borrow_mut() += 1);
+
+        // A single line that is not valid UTF-8 is reported and skipped — not fatal
+        // to the rest of the file (C only rejects that argument and continues).
+        let raw_line = match std::str::from_utf8(&raw_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                jot_error("Argument is not a valid multibyte string");
+                continue;
+            }
+        };
+
         let current_lineno = get_lineno();
 
         // If doing a full syntax parse, skip lines up to and including the 'syntax' command line
@@ -1833,8 +1944,11 @@ pub fn parse_rcfile<R: BufRead>(reader: R, just_syntax: bool, intros_only: bool)
                 // File-matching commands need to be processed immediately
                 if cmd_keyword == "header" || cmd_keyword == "magic" {
                     if cmd_keyword == "header" {
-                        // Build regex list OUTSIDE any STATE borrow (compile may call jot_error)
-                        // opensyntax is not checked here since it's an extendsyntax command
+                        // Build regex list OUTSIDE any STATE borrow (compile may call jot_error).
+                        // For extendsyntax, C sets opensyntax = TRUE (paired with drop_open =
+                        // TRUE, reset below) so grab_and_store does not reject the command with
+                        // the spurious "requires a preceding 'syntax' command" error.
+                        set_opensyntax(true);
                         let syntaxname_str = syntaxname.to_string();
                         if let Some(new_items) = grab_and_store_build("header", cmd_rest, false) {
                             with_state_mut(|s| {

@@ -57,6 +57,10 @@ pub fn set_interface_colorpairs() {
                 // Encode the pair index and attributes.
                 let pair_val = encode_pair(index + 1, combo.attributes);
                 s.interface_color_pair[index] = pair_val;
+                // Remember the configured fg/bg so winio can actually emit them
+                // (the encoded pair only carries the index + attributes; the colours
+                // were previously discarded — set_color does emit them for syntax).
+                s.interface_color_rgb[index + 1] = (combo.fg, combo.bg);
                 s.rescind_colors = false;
                 // combo is dropped here (free(color_combo[index]) in C)
             } else {
@@ -66,13 +70,15 @@ pub fn set_interface_colorpairs() {
                 } else if index == GUIDE_STRIPE {
                     s.interface_color_pair[index] = A_REVERSE;
                 } else if index == SPOTLIGHTED {
-                    // Black on yellow (or bright yellow on extended palette)
+                    // Black on yellow (built-in default).
                     s.interface_color_pair[index] = encode_pair(index + 1, A_NORMAL);
+                    s.interface_color_rgb[index + 1] = (COLOR_BLACK, COLOR_YELLOW);
                 } else if index == MINI_INFOBAR || index == PROMPT_BAR {
                     s.interface_color_pair[index] = s.interface_color_pair[TITLE_BAR];
                 } else if index == ERROR_MESSAGE {
-                    // White on red, bold
+                    // White on red, bold (built-in default).
                     s.interface_color_pair[index] = encode_pair(index + 1, A_BOLD);
+                    s.interface_color_rgb[index + 1] = (COLOR_WHITE, COLOR_RED);
                 } else {
                     s.interface_color_pair[index] = s.hilite_attribute;
                 }

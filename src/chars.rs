@@ -127,38 +127,34 @@ pub fn is_punct_char(c: &str) -> bool {
     }
 }
 
-/// Helper: Unicode punctuation check (mirrors iswpunct).
+/// Helper: Unicode punctuation check (mirrors glibc's iswpunct).
+///
+/// glibc's iswpunct returns true for any GRAPHIC (printable) character that is
+/// neither alphanumeric nor whitespace — which on glibc includes symbols.  The
+/// previous implementation blanket-classified essentially every non-alphanumeric
+/// code point (including non-graphic format/ignorable characters) as punctuation.
 fn unicode_is_punct(ch: char) -> bool {
-    // General categories: Pc, Pd, Pe, Pf, Pi, Po, Ps
-    // Also Sc, Sk, Sm, So (symbol categories are included by iswpunct on most platforms)
-    matches!(ch.general_category_group(), 'P' | 'S')
-        || ch.is_ascii_punctuation()
-}
-
-// Minimal Unicode general-category-group helper used only by unicode_is_punct.
-// We approximate via char properties available in stable Rust.
-trait CharCategory {
-    fn general_category_group(&self) -> char;
-}
-
-impl CharCategory for char {
-    fn general_category_group(&self) -> char {
-        let c = *self;
-        if c.is_alphabetic() {
-            'L'
-        } else if c.is_numeric() {
-            'N'
-        } else if c.is_whitespace() {
-            'Z'
-        } else if c.is_control() {
-            'C'
-        } else if c as u32 >= 0x2000 {
-            // Heuristic: code points in symbol/punctuation ranges
-            'P'
-        } else {
-            'P'
-        }
+    if ch.is_alphanumeric() || ch.is_whitespace() || ch.is_control() {
+        return false;
     }
+    // Exclude format / Default_Ignorable code points, which are not graphic and
+    // must not count as punctuation (they would corrupt word-boundary detection).
+    !is_ignorable_format(ch)
+}
+
+/// Well-known Cf/format and Default_Ignorable code points that are not graphic.
+fn is_ignorable_format(ch: char) -> bool {
+    matches!(ch as u32,
+        0x00AD                |   // soft hyphen
+        0x200B..=0x200F       |   // zero-width space/joiners, LRM/RLM
+        0x202A..=0x202E       |   // bidi embedding/override
+        0x2060..=0x2064       |   // word joiner, invisible operators
+        0x206A..=0x206F       |   // deprecated format controls
+        0xFEFF                |   // BOM / zero-width no-break space
+        0xFFF9..=0xFFFB       |   // interlinear annotation anchors
+        0x1D173..=0x1D17A     |   // musical symbol format controls
+        0xE0000..=0xE007F         // tag characters
+    )
 }
 
 /* C: bool is_word_char(const char *c, bool allow_punct)
