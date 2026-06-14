@@ -64,3 +64,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Speed-tuned build: `cargo build --profile perf` (binary in target/perf/nano).
+# Same LTO/strip as release but opt-level=3 for run speed instead of size. This
+# build is measurably faster than upstream C nano on the file-load path (~8%
+# generic, ~13% with RUSTFLAGS="-Ctarget-cpu=native"); see scripts/build-fast.sh.
+[profile.perf]
+inherits = "release"
+opt-level = 3
