@@ -282,6 +282,29 @@ fn ascii_ci_rfind(hay: &[u8], ndl: &[u8]) -> Option<usize> {
     }
 }
 
+/// The three search flags that are invariant for the whole duration of one
+/// findnextstr() call (they are only ever written in search_init / do_search_*,
+/// before findnextstr runs). Read once and passed by value so the per-line hot
+/// loop and strstrwrapper stop re-entering the thread-local STATE to re-read
+/// them on every line — matching C, which reads BSS globals at zero cost.
+#[derive(Clone, Copy)]
+struct SearchFlags {
+    use_regexp: bool,
+    backwards: bool,
+    case_sensitive: bool,
+}
+
+impl SearchFlags {
+    #[inline]
+    fn current() -> Self {
+        SearchFlags {
+            use_regexp: ISSET!(USE_REGEXP),
+            backwards: ISSET!(BACKWARDS_SEARCH),
+            case_sensitive: ISSET!(CASE_SENSITIVE),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // strstrwrapper — search for needle in haystack starting from pos
 // ---------------------------------------------------------------------------
@@ -293,13 +316,14 @@ fn strstrwrapper(
     needle: &str,
     from_offset: usize,
     lowered_needle: Option<&str>,
+    flags: SearchFlags,
 ) -> Option<usize> {
     if from_offset > data.len() {
         return None;
     }
 
-    let use_regexp = ISSET!(USE_REGEXP);
-    let backwards = ISSET!(BACKWARDS_SEARCH);
+    let use_regexp = flags.use_regexp;
+    let backwards = flags.backwards;
 
     if use_regexp {
         // Regex search.
@@ -362,7 +386,7 @@ fn strstrwrapper(
         result
     } else {
         // Plain string search.
-        let case_sensitive = ISSET!(CASE_SENSITIVE);
+        let case_sensitive = flags.case_sensitive;
 
         if backwards {
             // Find the last occurrence at or before from_offset.
@@ -666,11 +690,17 @@ pub fn findnextstr(
     // Record the time for "Searching..." feedback.
     let mut lastkbcheck = std::time::Instant::now();
 
+    // Read the loop-invariant search flags once (they can't change mid-search),
+    // so the per-line loop and strstrwrapper never re-enter the thread-local
+    // STATE to re-read them. came_full_circle is NOT hoisted: it is mutated
+    // mid-loop on wrap-around, so it stays read per-iteration.
+    let flags = SearchFlags::current();
+
     // Pre-lower the needle once per search for the case-insensitive plain-search
     // fallback path (non-ASCII lines), instead of re-lowering it on every line
     // scanned. The ASCII fast path inside strstrwrapper needs no lowered needle.
     let lowered_needle: Option<String> =
-        if !ISSET!(USE_REGEXP) && !ISSET!(CASE_SENSITIVE) {
+        if !flags.use_regexp && !flags.case_sensitive {
             Some(needle.to_lowercase())
         } else {
             None
@@ -686,7 +716,7 @@ pub fn findnextstr(
             }
         };
 
-        let backwards = ISSET!(BACKWARDS_SEARCH);
+        let backwards = flags.backwards;
 
         // Scan this line for the needle against a borrow of its data. The common
         // case is "no match", so borrowing avoids cloning the whole line String on
@@ -698,16 +728,16 @@ pub fn findnextstr(
                 skipone = false;
                 if backwards && from_offset != 0 {
                     let new_from = step_left(ld, from_offset);
-                    strstrwrapper(ld, needle, new_from, lowered_needle)
+                    strstrwrapper(ld, needle, new_from, lowered_needle, flags)
                         .filter(|&pos| if backwards { pos <= new_from } else { pos >= new_from })
                 } else if !backwards && from_offset < ld.len() {
                     let new_from = from_offset + char_length(&ld[from_offset..]);
-                    strstrwrapper(ld, needle, new_from, lowered_needle)
+                    strstrwrapper(ld, needle, new_from, lowered_needle, flags)
                 } else {
                     None
                 }
             } else {
-                strstrwrapper(ld, needle, from_offset, lowered_needle)
+                strstrwrapper(ld, needle, from_offset, lowered_needle, flags)
             }
         };
 
@@ -724,7 +754,7 @@ pub fn findnextstr(
             let line_data = current_line.borrow().data.clone();
 
             // When doing regex search, compute the length of the match.
-            if ISSET!(USE_REGEXP) {
+            if flags.use_regexp {
                 let (rm_so, rm_eo) = state().regmatches[0];
                 found_len = rm_eo.saturating_sub(rm_so);
             }
@@ -826,7 +856,7 @@ pub fn findnextstr(
         }
 
         // Move to the previous or next line.
-        let backwards = ISSET!(BACKWARDS_SEARCH);
+        let backwards = flags.backwards;
         let next_line: Option<LinePtr> = if backwards {
             current_line.borrow().prev.as_ref()
                 .and_then(|w| w.upgrade())
@@ -868,7 +898,7 @@ pub fn findnextstr(
         }
 
         // Set the starting position to the start or end of the new line.
-        let backwards = ISSET!(BACKWARDS_SEARCH);
+        let backwards = flags.backwards;
         from_offset = if backwards {
             line.as_ref().map(|l| l.borrow().data.len()).unwrap_or(0)
         } else {
