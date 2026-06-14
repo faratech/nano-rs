@@ -909,24 +909,46 @@ thread_local! {
     pub static STATE: NanoCell = NanoCell::new(AppState::default());
 }
 
-/// Read access to AppState — C: direct global access.
-/// Re-entrant safe: unlike RefCell, nested calls never panic.
-#[inline]
+/// Direct read access to the global `AppState`.
+///
+/// SAFETY: nano edits strictly single-threaded.  This returns a `&'static
+/// AppState` derived from the thread-local `STATE`'s `UnsafeCell` — a deliberate
+/// lifetime extension that is valid for the main thread's lifetime.  The returned
+/// reference must NEVER be moved into the background update thread (installer.rs),
+/// which has its own `STATE` and never touches `AppState`.  Overlapping
+/// `state()` / `state_mut()` views follow the same aliasing contract as the
+/// original `with_state` closures (C-style global access), NOT Rust's `&mut`
+/// uniqueness rule.
+#[inline(always)]
+pub fn state() -> &'static AppState {
+    STATE.with(|s| unsafe { &*(s.borrow() as *const AppState) })
+}
+
+/// Direct mutable access to the global `AppState`.  See `state()` for the safety
+/// contract; treat overlapping mutable views like overlapping C global writes.
+#[inline(always)]
+#[allow(clippy::mut_from_ref)]
+pub fn state_mut() -> &'static mut AppState {
+    STATE.with(|s| unsafe { &mut *(s.borrow_mut() as *mut AppState) })
+}
+
+/// Read access to AppState — thin shim over `state()`, kept so the migration to
+/// direct accessors can stay incremental.  Re-entrant safe.
+#[inline(always)]
 pub fn with_state<F, R>(f: F) -> R
 where
     F: FnOnce(&AppState) -> R,
 {
-    STATE.with(|s| f(s.borrow()))
+    f(state())
 }
 
-/// Write access to AppState — C: direct global mutation.
-/// Re-entrant safe: nested with_state / with_state_mut calls are allowed.
-#[inline]
+/// Write access to AppState — thin shim over `state_mut()`.  Re-entrant safe.
+#[inline(always)]
 pub fn with_state_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut AppState) -> R,
 {
-    STATE.with(|s| f(s.borrow_mut()))
+    f(state_mut())
 }
 
 // ---------------------------------------------------------------------------
