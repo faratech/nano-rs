@@ -2240,3 +2240,87 @@ pub fn to_next_anchor() {
 
     go_to_and_confirm(&line);
 }
+
+// ---------------------------------------------------------------------------
+// Tests — differential parity gate for the ASCII case-insensitive scan helpers.
+// These are pure functions (no STATE), so they can be exercised in isolation.
+// They guarantee ascii_ci_find/ascii_ci_rfind stay byte-identical to the
+// to_ascii_lowercase() reference they replace on the hot path.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod ci_scan_tests {
+    use super::{ascii_ci_find, ascii_ci_rfind};
+
+    /// Reference forward search: first match of the lowercased needle.
+    fn ref_find(hay: &str, ndl: &str) -> Option<usize> {
+        hay.to_ascii_lowercase().find(&ndl.to_ascii_lowercase())
+    }
+    /// Reference backward search: last match (largest start offset).
+    fn ref_rfind(hay: &str, ndl: &str) -> Option<usize> {
+        let h = hay.to_ascii_lowercase();
+        let n = ndl.to_ascii_lowercase();
+        if n.is_empty() || n.len() > h.len() {
+            return None;
+        }
+        let hb = h.as_bytes();
+        let nb = n.as_bytes();
+        (0..=h.len() - n.len()).rev().find(|&i| &hb[i..i + n.len()] == nb)
+    }
+
+    #[test]
+    fn edge_cases() {
+        // Empty needle: documented helper contract.
+        assert_eq!(ascii_ci_find(b"abc", b""), Some(0));
+        assert_eq!(ascii_ci_rfind(b"abc", b""), None);
+        // Needle longer than haystack.
+        assert_eq!(ascii_ci_find(b"ab", b"abc"), None);
+        assert_eq!(ascii_ci_rfind(b"ab", b"abc"), None);
+        // Empty haystack.
+        assert_eq!(ascii_ci_find(b"", b"a"), None);
+        assert_eq!(ascii_ci_rfind(b"", b"a"), None);
+        // Whole-string match.
+        assert_eq!(ascii_ci_find(b"AbC", b"abc"), Some(0));
+        assert_eq!(ascii_ci_rfind(b"AbC", b"abc"), Some(0));
+        // Overlap: last match must be the largest start offset.
+        assert_eq!(ascii_ci_find(b"aAaA", b"aa"), Some(0));
+        assert_eq!(ascii_ci_rfind(b"aAaA", b"aa"), Some(2));
+    }
+
+    #[test]
+    fn differential_random_ascii() {
+        // Small alphabet maximizes case/overlap collisions and includes
+        // non-alphabetic first bytes (where lower==upper).
+        let alpha = b"aAbB1 .zZ";
+        let mut s: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..500_000u64 {
+            let hlen = (next() % 12) as usize;
+            let nlen = 1 + (next() % 4) as usize; // non-empty: the usage contract
+            let mut hb = Vec::with_capacity(hlen);
+            for _ in 0..hlen {
+                hb.push(alpha[(next() as usize) % alpha.len()]);
+            }
+            let mut nb = Vec::with_capacity(nlen);
+            for _ in 0..nlen {
+                nb.push(alpha[(next() as usize) % alpha.len()]);
+            }
+            let hay = std::str::from_utf8(&hb).unwrap();
+            let ndl = std::str::from_utf8(&nb).unwrap();
+            assert_eq!(
+                ascii_ci_find(&hb, &nb),
+                ref_find(hay, ndl),
+                "find hay={hay:?} ndl={ndl:?}"
+            );
+            assert_eq!(
+                ascii_ci_rfind(&hb, &nb),
+                ref_rfind(hay, ndl),
+                "rfind hay={hay:?} ndl={ndl:?}"
+            );
+        }
+    }
+}
