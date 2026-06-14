@@ -56,3 +56,9 @@ ehthumbs.db
 
 # Claude Code session/workflow artifacts
 .claude/
+
+# Original C source & build files (reference only; the Rust port lives
+# alongside in src/ and is the source of truth on this branch)
+*.c
+*.h
+Makefile.am
