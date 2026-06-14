@@ -124,6 +124,12 @@ pub struct NanoWindow {
     pub x:    u16,
 }
 
+impl NanoWindow {
+    /// Const equivalent of `Default` — all fields zero. Lets `AppState::new()`
+    /// stay `const fn` so the thread-local `STATE` can use const-init.
+    pub const fn new() -> Self { NanoWindow { rows: 0, cols: 0, y: 0, x: 0 } }
+}
+
 // ---------------------------------------------------------------------------
 // AppState — all global variables from global.c / prototypes.h
 // ---------------------------------------------------------------------------
@@ -509,8 +515,12 @@ pub struct AppState {
 // Default impl for AppState — matches C global.c initializations
 // ---------------------------------------------------------------------------
 
-impl Default for AppState {
-    fn default() -> Self {
+impl AppState {
+    /// Const constructor for the initial global state. Being `const fn` lets the
+    /// thread-local `STATE` use const-init, which removes the per-access lazy-init
+    /// guard branch from every `state()`/`state_mut()` call (and thus from every
+    /// arena incref/decref) — no `Once`/initialized check in the hot path.
+    pub const fn new() -> Self {
         AppState {
             lines: crate::definitions::LineArena::new(),
             #[cfg(not(feature = "tiny"))]
@@ -623,9 +633,9 @@ impl Default for AppState {
             #[cfg(any(feature = "wrapping", feature = "justify"))]
             wrap_at: 0,
 
-            topwin: NanoWindow::default(),
-            midwin: NanoWindow::default(),
-            footwin: NanoWindow::default(),
+            topwin: NanoWindow::new(),
+            midwin: NanoWindow::new(),
+            footwin: NanoWindow::new(),
             editwinrows: 0,
             editwincols: -1,  // C: int editwincols = -1
             margin: 0,
@@ -750,6 +760,11 @@ impl Default for AppState {
             light_to_col: 0,
         }
     }
+}
+
+impl Default for AppState {
+    #[inline]
+    fn default() -> Self { Self::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -909,7 +924,9 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    pub static STATE: NanoCell = NanoCell::new(AppState::default());
+    // const-init: with a const initializer the thread_local! macro drops the
+    // per-access lazy-initialization guard that a runtime initializer requires.
+    pub static STATE: NanoCell = const { NanoCell::new(AppState::new()) };
 }
 
 /// Direct read access to the global `AppState`.

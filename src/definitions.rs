@@ -553,7 +553,7 @@ pub struct LineArena {
 }
 
 impl LineArena {
-    pub fn new() -> Self { LineArena { slots: Vec::new(), free: Vec::new() } }
+    pub const fn new() -> Self { LineArena { slots: Vec::new(), free: Vec::new() } }
 
     /// Allocate a node with strong refcount 1, returning an owning handle.
     #[inline]
