@@ -2484,33 +2484,57 @@ pub fn write_file(
         statusbar("Writing...");
     }
 
+    // Buffer the output. A raw File issues a syscall per write_all (2-3 per line),
+    // which dominates write time on large files; BufWriter coalesces them into
+    // ~8KB flushes, mirroring C's fdopen+fwrite buffered stdio (files.c:1818).
+    // It borrows `the_file`; the borrow is released (drop(writer)) before the
+    // sync_all below, and write-error paths just `return false` (the File closes
+    // at scope end, matching C's fclose-then-discard).
+    let mut writer = std::io::BufWriter::new(&the_file);
+
+    // The line ending (DOS vs Unix) is loop-invariant — fetch it once.
+    #[cfg(not(feature = "tiny"))]
+    let fmt = with_state(|s| {
+        s.openfile.as_ref().map(|of| of.fmt).unwrap_or(FormatType::Unspecified)
+    });
+
     // Write the buffer line by line
     let filetop = with_state(|s| s.openfile.as_ref().and_then(|of| of.filetop.clone()));
     let mut line = filetop;
 
     loop {
-        let (data, has_next) = match &line {
-            None => break,
-            Some(node) => {
-                let b = node.borrow();
-                (b.data.clone(), b.next.is_some())
-            }
+        // Write this line's data inside the node borrow (no clone), then capture
+        // what's needed to advance. Recode LF->NUL only when the line actually
+        // contains an embedded LF (i.e. it held a NUL on read) — the overwhelming
+        // majority of lines take the borrow-and-write-direct fast path, mirroring
+        // the read-side no-NUL fast path in encode_data (files.rs:1077).
+        let (data_res, has_next, data_empty, next) = {
+            let node = match &line {
+                None => break,
+                Some(n) => n,
+            };
+            let nb = node.borrow();
+            let bytes = nb.data.as_bytes();
+            let res = if bytes.contains(&b'\n') {
+                let recoded: Vec<u8> =
+                    bytes.iter().map(|&b| if b == b'\n' { 0 } else { b }).collect();
+                writer.write_all(&recoded)
+            } else {
+                writer.write_all(bytes)
+            };
+            (res, nb.next.is_some(), nb.data.is_empty(), nb.next.clone())
         };
 
-        // Recode LF as NUL for writing (inverse of encode_data)
-        let recoded: Vec<u8> = data.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
-
-        if the_file.write_all(&recoded).is_err() {
+        if data_res.is_err() {
             let e = io::Error::last_os_error();
             statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-            drop(the_file);
             if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return false;
         }
 
         // If we've reached the last line, don't write a trailing newline.
         if !has_next {
-            if !data.is_empty() {
+            if !data_empty {
                 lineswritten += 1;
             }
             break;
@@ -2518,31 +2542,24 @@ pub fn write_file(
 
         // Write newline (preceded by CR for DOS format)
         #[cfg(not(feature = "tiny"))]
-        {
-            let fmt = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.fmt).unwrap_or(FormatType::Unspecified)
-            });
-            if fmt == FormatType::DosFile {
-                if the_file.write_all(b"\r").is_err() {
-                    let e = io::Error::last_os_error();
-                    statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-                    drop(the_file);
-                    if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
-                    return false;
-                }
+        if fmt == FormatType::DosFile {
+            if writer.write_all(b"\r").is_err() {
+                let e = io::Error::last_os_error();
+                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+                if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
+                return false;
             }
         }
 
-        if the_file.write_all(b"\n").is_err() {
+        if writer.write_all(b"\n").is_err() {
             let e = io::Error::last_os_error();
             statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-            drop(the_file);
             if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return false;
         }
 
         lineswritten += 1;
-        line = line.and_then(|n| n.borrow().next.clone());
+        line = next;
     }
 
     // When prepending, append the temporary file to what we wrote above.
@@ -2553,7 +2570,6 @@ pub fn write_file(
                 Err(e) => {
                     statusline(MessageType::Alert,
                         &format!("Error reading temp file: {}", e));
-                    drop(the_file);
                     if let Some(ref tn2) = tempname { let _ = std::fs::remove_file(tn2); }
                     return false;
                 }
@@ -2561,7 +2577,7 @@ pub fn write_file(
             };
 
             // copy_file closes source; we need to keep the_file open
-            // We'll do a manual copy here
+            // We'll do a manual copy here (through the buffered writer)
             let mut buf = [0u8; 8192];
             let mut src = source;
             loop {
@@ -2571,21 +2587,29 @@ pub fn write_file(
                     Err(e) => {
                         statusline(MessageType::Alert,
                             &format!("Error reading temp file: {}", e));
-                        drop(the_file);
                         return false;
                     }
                 };
-                if the_file.write_all(&buf[..n]).is_err() {
+                if writer.write_all(&buf[..n]).is_err() {
                     let e = io::Error::last_os_error();
                     statusline(MessageType::Alert,
                         &format!("Error writing {}: {}", realname, e));
-                    drop(the_file);
                     return false;
                 }
             }
             let _ = std::fs::remove_file(tn);
         }
     }
+
+    // Flush the buffered writer and release its borrow on `the_file` before the
+    // durability sync below (sync_all is a File method, not on the BufWriter).
+    if writer.flush().is_err() {
+        let e = io::Error::last_os_error();
+        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+        if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
+        return false;
+    }
+    drop(writer);
 
     // Flush and sync (not for FIFOs)
     #[cfg(not(feature = "tiny"))]
