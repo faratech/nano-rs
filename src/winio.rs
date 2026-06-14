@@ -30,7 +30,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use crate::definitions::*;
 use crate::global::{
-    with_state, with_state_mut, NanoWindow,
+    with_state, with_state_mut, state, state_mut, NanoWindow,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
     KEY_PPAGE, KEY_NPAGE, KEY_DC, KEY_IC, KEY_BACKSPACE, KEY_ENTER,
     KEY_F0, key_f, A_REVERSE, shown_entries_for,
@@ -258,7 +258,7 @@ pub fn record_macro() {
         }
     });
 
-    if with_state(|s| s.flag_isset(STATEFLAGS)) {
+    if state().flag_isset(STATEFLAGS) {
         titlebar(None);
     }
 }
@@ -288,7 +288,7 @@ pub fn run_macro() {
     for &code in codes.iter().rev() {
         put_back(code);
     }
-    with_state_mut(|s| s.mute_modifiers = true);
+    state_mut().mute_modifiers = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ pub fn implant(string: &str) {
         *pp.borrow_mut() = Some((string.to_string(), 0));
     });
     put_back(MORE_PLANTS as i32);
-    with_state_mut(|s| s.mute_modifiers = true);
+    state_mut().mute_modifiers = true;
 }
 
 /* C: int get_code_from_plantation(void) */
@@ -437,7 +437,7 @@ pub fn get_input(frame: Option<()>) -> i32 {
     let waiting = tl_get!(WAITING_CODES);
 
     if waiting > 0 {
-        with_state_mut(|s| s.spotlighted = false);
+        state_mut().spotlighted = false;
     } else if frame.is_some() {
         read_keys_from();
     }
@@ -484,10 +484,10 @@ pub fn read_keys_from() {
 
     // Show cursor if appropriate
     let reveal = tl_get!(REVEAL_CURSOR);
-    let spotlight = with_state(|s| s.spotlighted);
-    let show_cursor_flag = with_state(|s| s.flag_isset(SHOW_CURSOR));
-    let currmenu = with_state(|s| s.currmenu);
-    let lastmessage = with_state(|s| s.lastmessage);
+    let spotlight = state().spotlighted;
+    let show_cursor_flag = state().flag_isset(SHOW_CURSOR);
+    let currmenu = state().currmenu;
+    let lastmessage = state().lastmessage;
     let lines = with_state(|s| s.midwin.rows + s.topwin.rows + s.footwin.rows);
 
     if reveal && (!spotlight || show_cursor_flag || currmenu == MSPELL)
@@ -608,7 +608,7 @@ fn translate_key_event(ke: KeyEvent) {
     // and push only the underlying code — matching how parse_kbinput handles
     // single-escape sequences.
     if alt {
-        with_state_mut(|s| s.meta_key = true);
+        state_mut().meta_key = true;
     }
 
     match ke.code {
@@ -621,7 +621,7 @@ fn translate_key_event(ke: KeyEvent) {
                 // Push ESC + character (standard nano escape-sequence convention)
                 // For lowercase letters with shift, or uppercase without shift-metas,
                 // we push the lowercase form.
-                let ch = if shift && c.is_ascii_alphabetic() && !with_state(|s| s.shifted_metas) {
+                let ch = if shift && c.is_ascii_alphabetic() && !state().shifted_metas {
                     c.to_ascii_lowercase()
                 } else {
                     c
@@ -687,15 +687,15 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Up => {
             if ctrl && shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(CONTROL_UP as i32);
             } else if ctrl {
                 push_keycode(CONTROL_UP as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_PPAGE);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_UP);
             } else if alt {
                 push_keycode(ALT_UP as i32);
@@ -705,15 +705,15 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Down => {
             if ctrl && shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(CONTROL_DOWN as i32);
             } else if ctrl {
                 push_keycode(CONTROL_DOWN as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_NPAGE);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_DOWN);
             } else if alt {
                 push_keycode(ALT_DOWN as i32);
@@ -723,15 +723,15 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Left => {
             if ctrl && shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(CONTROL_LEFT as i32);
             } else if ctrl {
                 push_keycode(CONTROL_LEFT as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_HOME);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_LEFT);
             } else if alt {
                 push_keycode(ALT_LEFT as i32);
@@ -741,15 +741,15 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Right => {
             if ctrl && shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(CONTROL_RIGHT as i32);
             } else if ctrl {
                 push_keycode(CONTROL_RIGHT as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_END);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_RIGHT);
             } else if alt {
                 push_keycode(ALT_RIGHT as i32);
@@ -761,10 +761,10 @@ fn translate_key_event(ke: KeyEvent) {
             if ctrl {
                 push_keycode(CONTROL_HOME as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_HOME);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_HOME);
             } else if alt {
                 push_keycode(ALT_HOME as i32);
@@ -776,10 +776,10 @@ fn translate_key_event(ke: KeyEvent) {
             if ctrl {
                 push_keycode(CONTROL_END as i32);
             } else if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_END);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_END);
             } else if alt {
                 push_keycode(ALT_END as i32);
@@ -789,10 +789,10 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::PageUp => {
             if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_PPAGE);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_PPAGE);
             } else if alt {
                 push_keycode(ALT_PAGEUP as i32);
@@ -802,10 +802,10 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::PageDown => {
             if shift && alt {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_NPAGE);
             } else if shift {
-                with_state_mut(|s| s.shift_held = true);
+                state_mut().shift_held = true;
                 push_keycode(KEY_NPAGE);
             } else if alt {
                 push_keycode(ALT_PAGEDOWN as i32);
@@ -904,7 +904,7 @@ pub fn convert_SS3_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                 if length > 3 {
                     match seq[2] as u8 as char {
                         '2' if length > 3 && seq[3] >= 'A' as i32 && seq[3] <= 'D' as i32 => {
-                            with_state_mut(|s| s.shift_held = true);
+                            state_mut().shift_held = true;
                             return arrow_from_ABCD(seq[3]);
                         }
                         '5' if length > 3 => {
@@ -1020,7 +1020,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                 match seq[2] as u8 as char {
                     '2' => match seq[3] as u8 as char {
                         'A' | 'B' | 'C' | 'D' => {
-                            with_state_mut(|s| s.shift_held = true);
+                            state_mut().shift_held = true;
                             return arrow_from_ABCD(seq[3]);
                         }
                         'F' => return SHIFT_END as i32,
@@ -1117,7 +1117,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                     let sc_shiftdelete = SHIFT_DELETE as i32;
                     let sc_altdelete = ALT_DELETE as i32;
                     let sc_ctrldelete = CONTROL_DELETE as i32;
-                    let sc_csd = with_state(|s| s.controlshiftdelete);
+                    let sc_csd = state().controlshiftdelete;
                     match seq[2] as u8 as char {
                         '2' => return sc_shiftdelete,
                         '3' => return sc_altdelete,
@@ -1132,7 +1132,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                 if length > 1 && seq[1] == '$' as i32 { return SHIFT_DELETE as i32; }
                 if length > 1 && seq[1] == '^' as i32 { return CONTROL_DELETE as i32; }
                 if length > 1 && seq[1] == '@' as i32 {
-                    return with_state(|s| s.controlshiftdelete);
+                    return state().controlshiftdelete;
                 }
             }
         }
@@ -1145,7 +1145,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
             if length > 3 && seq[1] == ';' as i32 && seq[3] == '~' as i32 {
                 *consumed = 4;
                 match seq[2] as u8 as char {
-                    '2' => return with_state(|s| s.shiftaltup),
+                    '2' => return state().shiftaltup,
                     '3' => return ALT_PAGEUP as i32,
                     _ => {}
                 }
@@ -1157,7 +1157,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
             if length > 3 && seq[1] == ';' as i32 && seq[3] == '~' as i32 {
                 *consumed = 4;
                 match seq[2] as u8 as char {
-                    '2' => return with_state(|s| s.shiftaltdown),
+                    '2' => return state().shiftaltdown,
                     '3' => return ALT_PAGEDOWN as i32,
                     _ => {}
                 }
@@ -1170,7 +1170,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                     '$' => return SHIFT_HOME as i32,
                     '^' => return CONTROL_HOME as i32,
                     #[cfg(not(feature = "tiny"))]
-                    '@' => return with_state(|s| s.shiftcontrolhome),
+                    '@' => return state().shiftcontrolhome,
                     _ => {}
                 }
             }
@@ -1182,7 +1182,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                     '$' => return SHIFT_END as i32,
                     '^' => return CONTROL_END as i32,
                     #[cfg(not(feature = "tiny"))]
-                    '@' => return with_state(|s| s.shiftcontrolend),
+                    '@' => return state().shiftcontrolend,
                     _ => {}
                 }
             }
@@ -1207,7 +1207,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
         'Z' => return SHIFT_TAB as i32,
         #[cfg(not(feature = "tiny"))]
         'a' | 'b' | 'c' | 'd' => {
-            with_state_mut(|s| s.shift_held = true);
+            state_mut().shift_held = true;
             return arrow_from_ABCD(seq[0] - 0x20);
         }
         '[' => {
@@ -1352,7 +1352,7 @@ pub fn assemble_unicode(symbol: i32) -> i64 {
         return out;
     }
 
-    let currmenu = with_state(|s| s.currmenu);
+    let currmenu = state().currmenu;
     if outcome == PROCEED && currmenu == MMAIN {
         let cur_digits = digits;
         let cur_uni = UNICODE_ACC.with(|u| *u.borrow());
@@ -1387,7 +1387,7 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
 
     #[cfg(feature = "utf8")]
     {
-        let using_utf8 = with_state(|s| s.using_utf8);
+        let using_utf8 = state().using_utf8;
         if using_utf8 && (keycode as u8).is_ascii_hexdigit() {
             let mut unicode = assemble_unicode(keycode);
             tl_set!(REVEAL_CURSOR, false);
@@ -1461,8 +1461,8 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
 
 /* C: char *get_verbatim_kbinput(WINDOW *frame, size_t *count) */
 pub fn get_verbatim_kbinput(count: &mut usize) -> String {
-    let _preserve = with_state(|s| s.flag_isset(PRESERVE));
-    let _raw_sequences = with_state(|s| s.flag_isset(RAW_SEQUENCES));
+    let _preserve = state().flag_isset(PRESERVE);
+    let _raw_sequences = state().flag_isset(RAW_SEQUENCES);
 
     // Disable bracketed paste
     #[cfg(not(feature = "tiny"))]
@@ -1481,7 +1481,7 @@ pub fn get_verbatim_kbinput(count: &mut usize) -> String {
             put_back(input[0]);
             *count = 999;
         } else {
-            let as_at = with_state(|s| s.as_an_at);
+            let as_at = state().as_an_at;
             if (input[0] == '\n' as i32 && as_at) || (input[0] == 0 && !as_at) {
                 *count = 0;
             }
@@ -1565,7 +1565,7 @@ pub fn parse_kbinput() -> i32 {
             }
             #[cfg(feature = "utf8")]
             {
-                let using_utf8 = with_state(|s| s.using_utf8);
+                let using_utf8 = state().using_utf8;
                 if keycode >= 0xC0 && keycode <= 0xFF && using_utf8 {
                     // Skip continuation bytes
                     while tl_get!(WAITING_CODES) > 0 {
@@ -1582,7 +1582,7 @@ pub fn parse_kbinput() -> i32 {
                 }
             }
             if keycode < 0x20 && !last_alone {
-                with_state_mut(|s| s.meta_key = true);
+                state_mut().meta_key = true;
             }
         } else {
             // ASCII printable range
@@ -1598,13 +1598,13 @@ pub fn parse_kbinput() -> i32 {
             if waiting == 0 || next_is_esc
                || (keycode != 'O' as i32 && keycode != '[' as i32)
             {
-                let shifted = with_state(|s| s.shifted_metas);
+                let shifted = state().shifted_metas;
                 let kc = if keycode >= 'A' as i32 && keycode <= 'Z' as i32 && !shifted {
                     keycode | 0x20
                 } else {
                     keycode
                 };
-                with_state_mut(|s| s.meta_key = true);
+                state_mut().meta_key = true;
                 return kc;
             } else {
                 return parse_escape_sequence(keycode);
@@ -1632,18 +1632,18 @@ pub fn parse_kbinput() -> i32 {
                 'C' => CONTROL_RIGHT as i32,
                 'D' => CONTROL_LEFT as i32,
                 #[cfg(not(feature = "tiny"))]
-                'a' => { with_state_mut(|s| s.shift_held = true); KEY_PPAGE }
+                'a' => { state_mut().shift_held = true; KEY_PPAGE }
                 #[cfg(not(feature = "tiny"))]
-                'b' => { with_state_mut(|s| s.shift_held = true); KEY_NPAGE }
+                'b' => { state_mut().shift_held = true; KEY_NPAGE }
                 #[cfg(not(feature = "tiny"))]
-                'c' => { with_state_mut(|s| s.shift_held = true); KEY_HOME }
+                'c' => { state_mut().shift_held = true; KEY_HOME }
                 #[cfg(not(feature = "tiny"))]
-                'd' => { with_state_mut(|s| s.shift_held = true); KEY_END }
+                'd' => { state_mut().shift_held = true; KEY_END }
                 _ => ERR_CODE,
             };
         } else if waiting > 0 && next != ESC && (keycode == '[' as i32 || keycode == 'O' as i32) {
             let result = parse_escape_sequence(keycode);
-            with_state_mut(|s| s.meta_key = true);
+            state_mut().meta_key = true;
             return result;
         } else if keycode >= '0' as i32 && (keycode <= '2' as i32
             || (keycode <= '9' as i32 && tl_get!(DIGIT_COUNT) > 0))
@@ -1655,7 +1655,7 @@ pub fn parse_kbinput() -> i32 {
             }
             #[cfg(feature = "utf8")]
             {
-                let using_utf8 = with_state(|s| s.using_utf8);
+                let using_utf8 = state().using_utf8;
                 if byte > 0x7F && using_utf8 {
                     if (byte as u8) < 0xC0 {
                         put_back(byte as u8 as i32);
@@ -1675,13 +1675,13 @@ pub fn parse_kbinput() -> i32 {
             let first_alone = tl_get!(FIRST_ESCAPE_WAS_ALONE);
             let last_alone = tl_get!(LAST_ESCAPE_WAS_ALONE);
             if first_alone && !last_alone {
-                let shifted = with_state(|s| s.shifted_metas);
+                let shifted = state().shifted_metas;
                 let kc = if keycode >= 'A' as i32 && keycode <= 'Z' as i32 && !shifted {
                     keycode | 0x20
                 } else {
                     keycode
                 };
-                with_state_mut(|s| s.meta_key = true);
+                state_mut().meta_key = true;
                 return kc;
             } else {
                 return convert_to_control(keycode);
@@ -1726,14 +1726,14 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
 
         if keycode == cdelete { return CONTROL_DELETE as i32; }
         if keycode == cshdelete { return CONTROL_SHIFT_DELETE as i32; }
-        if keycode == sup { with_state_mut(|s| s.shift_held = true); return KEY_UP; }
-        if keycode == sdown { with_state_mut(|s| s.shift_held = true); return KEY_DOWN; }
-        if keycode == scl { with_state_mut(|s| s.shift_held = true); return CONTROL_LEFT as i32; }
-        if keycode == scr { with_state_mut(|s| s.shift_held = true); return CONTROL_RIGHT as i32; }
-        if keycode == scu { with_state_mut(|s| s.shift_held = true); return CONTROL_UP as i32; }
-        if keycode == scd { with_state_mut(|s| s.shift_held = true); return CONTROL_DOWN as i32; }
-        if keycode == sch { with_state_mut(|s| s.shift_held = true); return CONTROL_HOME as i32; }
-        if keycode == sce { with_state_mut(|s| s.shift_held = true); return CONTROL_END as i32; }
+        if keycode == sup { state_mut().shift_held = true; return KEY_UP; }
+        if keycode == sdown { state_mut().shift_held = true; return KEY_DOWN; }
+        if keycode == scl { state_mut().shift_held = true; return CONTROL_LEFT as i32; }
+        if keycode == scr { state_mut().shift_held = true; return CONTROL_RIGHT as i32; }
+        if keycode == scu { state_mut().shift_held = true; return CONTROL_UP as i32; }
+        if keycode == scd { state_mut().shift_held = true; return CONTROL_DOWN as i32; }
+        if keycode == sch { state_mut().shift_held = true; return CONTROL_HOME as i32; }
+        if keycode == sce { state_mut().shift_held = true; return CONTROL_END as i32; }
         if keycode == al { return ALT_LEFT as i32; }
         if keycode == ar { return ALT_RIGHT as i32; }
         if keycode == au { return ALT_UP as i32; }
@@ -1744,10 +1744,10 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
         if keycode == apgdn { return ALT_PAGEDOWN as i32; }
         if keycode == ains { return ALT_INSERT as i32; }
         if keycode == adel { return ALT_DELETE as i32; }
-        if keycode == sal { with_state_mut(|s| s.shift_held = true); return KEY_HOME; }
-        if keycode == sar { with_state_mut(|s| s.shift_held = true); return KEY_END; }
-        if keycode == sau { with_state_mut(|s| s.shift_held = true); return KEY_PPAGE; }
-        if keycode == sad { with_state_mut(|s| s.shift_held = true); return KEY_NPAGE; }
+        if keycode == sal { state_mut().shift_held = true; return KEY_HOME; }
+        if keycode == sar { state_mut().shift_held = true; return KEY_END; }
+        if keycode == sau { state_mut().shift_held = true; return KEY_PPAGE; }
+        if keycode == sad { state_mut().shift_held = true; return KEY_NPAGE; }
 
         // Out-of-range function keys
         if keycode > (KEY_F0 + 24) && keycode < (KEY_F0 + 64) {
@@ -1764,10 +1764,10 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
     // Shift+arrow variants
     match keycode {
         k if k == KEY_DC => {
-            return if with_state(|s| s.flag_isset(REBIND_DELETE)) { KEY_BACKSPACE } else { KEY_DC };
+            return if state().flag_isset(REBIND_DELETE) { KEY_BACKSPACE } else { KEY_DC };
         }
         k if k == KEY_BACKSPACE => {
-            return if with_state(|s| s.flag_isset(REBIND_DELETE)) { KEY_DC } else { KEY_BACKSPACE };
+            return if state().flag_isset(REBIND_DELETE) { KEY_DC } else { KEY_BACKSPACE };
         }
         _ => {}
     }
@@ -1787,7 +1787,7 @@ pub fn get_kbinput(showcursor: bool) -> i32 {
         kbinput = parse_kbinput();
     }
 
-    let currmenu = with_state(|s| s.currmenu);
+    let currmenu = state().currmenu;
     // When reading from the edit window, blank status bar when countdown expires
     // (midwin is the "frame" in C terms)
     if currmenu == MMAIN || currmenu == 0 {
@@ -1820,19 +1820,19 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
         && event.x >= mid_x && event.x < mid_x + mid_cols;
     let in_footer = event.y >= foot_y && event.y < foot_y + foot_rows;
 
-    let margin = with_state(|s| s.margin);
+    let margin = state().margin;
     *mouse_x = event.x as i32 - if in_middle { margin } else { 0 };
     *mouse_y = event.y as i32;
 
     let bstate = event.bstate;
 
     if bstate & (BUTTON1_RELEASED | BUTTON1_CLICKED) != 0 {
-        let sidebar = with_state(|s| s.sidebar);
-        let currmenu = with_state(|s| s.currmenu);
+        let sidebar = state().sidebar;
+        let currmenu = state().currmenu;
 
         if in_middle && sidebar != 0 && event.x == cols - 1 && currmenu == MMAIN {
             // Clicking in the "scrollbar" goes to the roughly corresponding line.
-            let editwinrows = with_state(|s| s.editwinrows) as isize;
+            let editwinrows = state().editwinrows as isize;
             let (total_lines, placewewant) = with_state(|s| {
                 let f = s.openfile.as_ref();
                 (
@@ -1847,13 +1847,13 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
                 placewewant + 1,
                 true,
             );
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
             // Fall out as "handled" like C (the click must not also be
             // treated as an edit-window positioning click).
             return 2;
         }
 
-        if in_footer && !with_state(|s| s.flag_isset(NO_HELP)) && currmenu != MYESNO {
+        if in_footer && !state().flag_isset(NO_HELP) && currmenu != MYESNO {
             let lines_val = with_state(|s| s.footwin.rows + s.midwin.rows + s.topwin.rows);
             if *mouse_y == lines_val as i32 - 3 {
                 return 0;
@@ -1862,7 +1862,7 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
             let foot_rel_y = (*mouse_y - foot_y as i32).max(0) as usize;
             let foot_rel_x = (*mouse_x).max(0) as usize;
 
-            let currmenu = with_state(|s| s.currmenu);
+            let currmenu = state().currmenu;
             let number = shown_entries_for(currmenu);
             if number == 0 { return 2; }
 
@@ -1968,7 +1968,7 @@ pub fn blank_statusbar() {
 
 /* C: void wipe_statusbar(void) */
 pub fn wipe_statusbar() {
-    with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+    state_mut().lastmessage = MessageType::Vacuum;
 
     let (zero, minibar, lines, currmenu) = with_state(|s| (
         s.flag_isset(ZERO),
@@ -2475,7 +2475,7 @@ pub fn titlebar(path: Option<&str>) {
     // Move back to start to overprint with actual title text.
     let _ = queue!(stdout, MoveTo(topwin_x, topwin_y));
 
-    with_state_mut(|s| s.as_an_at = false);
+    state_mut().as_an_at = false;
 
     let (upperleft, prefix, state, caption) = compute_titlebar_strings(path, currmenu, inhelp);
 
@@ -2552,7 +2552,7 @@ pub fn titlebar(path: Option<&str>) {
             if stat_use < cols {
                 let state_col = (cols + 2).saturating_sub(stat_use);
                 let _ = queue!(stdout, MoveTo(topwin_x + state_col as u16, topwin_y));
-                show_states_at_win(&with_state(|s| s.topwin.clone()), 0, state_col as u16);
+                show_states_at_win(&crate::global::state().topwin.clone(), 0, state_col as u16);
             }
         } else {
             print_state_word(&state, stat_use, cols, topwin_x, topwin_y);
@@ -2620,7 +2620,7 @@ fn compute_titlebar_strings(
     if !inhelp {
         #[cfg(feature = "multibuffer")]
         {
-            let more_than_one = with_state(|s| s.more_than_one);
+            let more_than_one = crate::global::state().more_than_one;
             if more_than_one {
                 upperleft = format!("[{}/{}]", buffer_number(), buffer_count());
             } else {
@@ -2705,7 +2705,7 @@ pub fn minibar() {
     let spaces = " ".repeat(cols);
     let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Print(&spaces));
 
-    with_state_mut(|s| s.as_an_at = false);
+    state_mut().as_an_at = false;
 
     let thename = if !filename.is_empty() {
         display_string(&filename, 0, cols, false, false)
@@ -2768,7 +2768,7 @@ pub fn minibar() {
     // shown (C gates this on !successor).
     if stateflags && !had_successor && namewidth + 14 + 2 * padding < cols {
         let state_col = (cols - 11 - padding) as u16;
-        show_states_at_win(&with_state(|s| s.footwin.clone()), 0, state_col);
+        show_states_at_win(&state().footwin.clone(), 0, state_col);
     }
 
     // Display anchor indicator
@@ -2897,7 +2897,7 @@ pub fn statusline(importance: MessageType, msg: &str) {
         NEXTCODES_IDX.with(|ni| *ni.borrow_mut() = 0);
     }
 
-    let lastmessage = with_state(|s| s.lastmessage);
+    let lastmessage = state().lastmessage;
 
     // Ignore lower-importance messages
     if importance < lastmessage && lastmessage > MessageType::Notice {
@@ -2920,7 +2920,7 @@ pub fn statusline(importance: MessageType, msg: &str) {
     if lastmessage == MessageType::Alert {
         let start_col = STATUSLINE_START_COL.with(|sc| *sc.borrow());
         if start_col > 4 {
-            let alert_pair = with_state(|s| s.interface_color_pair[ERROR_MESSAGE]);
+            let alert_pair = state().interface_color_pair[ERROR_MESSAGE];
             apply_interface_color(alert_pair);
             let col = (cols + 2).saturating_sub(start_col) as u16;
             let _ = queue!(stdout, MoveTo(footwin_x + col, footwin_y), Print("..."));
@@ -2933,11 +2933,11 @@ pub fn statusline(importance: MessageType, msg: &str) {
 
     // Determine color pair
     let colorpair = if importance > MessageType::Notice {
-        with_state(|s| s.interface_color_pair[ERROR_MESSAGE])
+        state().interface_color_pair[ERROR_MESSAGE]
     } else if importance == MessageType::Notice {
-        with_state(|s| s.interface_color_pair[SELECTED_TEXT])
+        state().interface_color_pair[SELECTED_TEXT]
     } else {
-        with_state(|s| s.interface_color_pair[STATUS_BAR])
+        state().interface_color_pair[STATUS_BAR]
     };
 
     if importance == MessageType::Alert {
@@ -2945,12 +2945,12 @@ pub fn statusline(importance: MessageType, msg: &str) {
         let _ = print!("\x07");
     }
 
-    with_state_mut(|s| s.lastmessage = importance);
+    state_mut().lastmessage = importance;
 
     blank_statusbar();
 
     // Temporarily disable WHITESPACE_DISPLAY for the message
-    let showed_whitespace = with_state(|s| s.flag_isset(WHITESPACE_DISPLAY));
+    let showed_whitespace = state().flag_isset(WHITESPACE_DISPLAY);
     if showed_whitespace {
         with_state_mut(|s| {
             s.flags[flag_index(WHITESPACE_DISPLAY)] &= !flag_mask(WHITESPACE_DISPLAY);
@@ -2983,7 +2983,7 @@ pub fn statusline(importance: MessageType, msg: &str) {
     let _ = stdout.flush();
 
     // Set countdown for auto-blank
-    let quick_blank = with_state(|s| s.flag_isset(QUICK_BLANK));
+    let quick_blank = state().flag_isset(QUICK_BLANK);
     tl_set!(COUNTDOWN, if quick_blank { 1 } else { 20 });
 }
 
@@ -2996,7 +2996,7 @@ pub fn statusbar(msg: &str) {
 pub fn warn_and_briefly_pause(msg: &str) {
     blank_bottombars();
     statusline(MessageType::Alert, msg);
-    with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+    state_mut().lastmessage = MessageType::Vacuum;
     // Sleep 1500ms equivalent
     std::thread::sleep(std::time::Duration::from_millis(1500));
 }
@@ -3013,7 +3013,7 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
     let mut stdout = out();
 
     // Key name in KEY_COMBO color (reverse video by default).
-    let key_pair = with_state(|s| s.interface_color_pair[KEY_COMBO]);
+    let key_pair = state().interface_color_pair[KEY_COMBO];
     queue_interface_color(&mut stdout, key_pair);
     let ks_len = actual_x(keystroke, width);
     let ks_display = &keystroke[..ks_len];
@@ -3027,7 +3027,7 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
     let _ = queue!(stdout, Print(" "));
 
     // Function name in FUNCTION_TAG color (normal by default).
-    let func_pair = with_state(|s| s.interface_color_pair[FUNCTION_TAG]);
+    let func_pair = state().interface_color_pair[FUNCTION_TAG];
     queue_interface_color(&mut stdout, func_pair);
     let tag_len = actual_x(tag, remaining - 1);
     let tag_display = &tag[..tag_len];
@@ -3045,7 +3045,7 @@ fn post_one_key_at(keystroke: &str, tag: &str, width: usize, row: u16, col: u16)
 
 /* C: void bottombars(int menu) */
 pub fn bottombars(menu: u32) {
-    with_state_mut(|s| s.currmenu = menu);
+    state_mut().currmenu = menu;
 
     let (no_help, lines, zero, minibar_on) = with_state(|s| (
         s.flag_isset(NO_HELP),
@@ -3060,7 +3060,7 @@ pub fn bottombars(menu: u32) {
     let number = shown_entries_for(menu);
     if number == 0 { return; }
 
-    let cols = with_state(|s| s.footwin.cols) as usize;
+    let cols = state().footwin.cols as usize;
     let itemwidth = if number == 0 { return } else { cols / ((number + 1) / 2) };
     if itemwidth == 0 { return; }
 
@@ -3116,7 +3116,7 @@ pub fn place_the_cursor() {
     let mut row: isize;
 
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let (edittop, firstcolumn, current) = with_state(|s| {
             let f = s.openfile.as_ref();
             (
@@ -3193,9 +3193,9 @@ pub fn get_softwrap_breakpoint(
     kickoff: &mut bool,
     end_of_line: &mut bool,
 ) -> usize {
-    let editwincols = with_state(|s| s.editwincols) as usize;
-    let at_blanks = with_state(|s| s.flag_isset(AT_BLANKS));
-    let tabsize = with_state(|s| s.tabsize) as usize;
+    let editwincols = state().editwincols as usize;
+    let at_blanks = state().flag_isset(AT_BLANKS);
+    let tabsize = state().tabsize as usize;
     let _tabsize = if tabsize == 0 { 8 } else { tabsize };
 
     let rightside = leftedge + editwincols;
@@ -3304,7 +3304,7 @@ pub fn leftedge_for(column: usize, linedata: &str) -> usize {
 /* C: void ensure_firstcolumn_is_aligned(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn ensure_firstcolumn_is_aligned() {
-    let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+    let softwrap = state().flag_isset(SOFTWRAP);
     if softwrap {
         let (firstcolumn, edittop_data) = with_state(|s| (
             s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
@@ -3316,13 +3316,13 @@ pub fn ensure_firstcolumn_is_aligned() {
     } else {
         with_state_mut(|s| { s.openfile.as_mut().map(|f| f.firstcolumn = 0); });
     }
-    with_state_mut(|s| s.focusing = false);
+    state_mut().focusing = false;
 }
 
 /* C: size_t actual_last_column(size_t leftedge, size_t column) */
 pub fn actual_last_column(leftedge: usize, column: usize) -> usize {
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let linedata = with_state(|s| {
             s.openfile.as_ref()
                 .and_then(|f| f.current.as_ref())
@@ -3346,7 +3346,7 @@ pub fn actual_last_column(leftedge: usize, column: usize) -> usize {
 /* C: bool current_is_above_screen(void) */
 pub fn current_is_above_screen() -> bool {
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let (cur_lineno, et_lineno, _cur_col, firstcol) = with_state(|s| {
             let f = s.openfile.as_ref();
             let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
@@ -3376,7 +3376,7 @@ pub fn current_is_below_screen() -> bool {
     });
 
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let (edittop, firstcol, current) = with_state(|s| {
             let f = s.openfile.as_ref();
             (
@@ -3422,7 +3422,7 @@ pub fn go_back_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -> i
     let mut i = nrows;
 
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         // Recede through the requested number of chunks.
         while i > 0 {
             let chunk = { let b = line.borrow(); chunk_for(*leftedge, &b.data) };
@@ -3470,7 +3470,7 @@ pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -
     let mut i = nrows;
 
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let mut current_leftedge = *leftedge;
         let mut kickoff = true;
 
@@ -3518,7 +3518,7 @@ pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -
 /* C: bool less_than_a_screenful(size_t was_lineno, size_t was_leftedge) */
 pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         let (editwinrows, current) = with_state(|s| (
             s.editwinrows,
             s.openfile.as_ref().and_then(|f| f.current.clone()),
@@ -3563,11 +3563,11 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     // Line numbers
     #[cfg(feature = "linenumbers")]
     if margin > 0 {
-        let ln_pair = with_state(|s| s.interface_color_pair[LINE_NUMBER]);
+        let ln_pair = state().interface_color_pair[LINE_NUMBER];
         apply_interface_color(ln_pair);
 
         #[cfg(not(feature = "tiny"))]
-        let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+        let softwrap = state().flag_isset(SOFTWRAP);
         #[cfg(feature = "tiny")]
         let softwrap = false;
 
@@ -3583,7 +3583,7 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
         // Anchor indicator
         #[cfg(not(feature = "tiny"))]
         if has_anchor && (from_col == 0 || !softwrap) {
-            let using_utf8 = with_state(|s| s.using_utf8);
+            let using_utf8 = state().using_utf8;
             let dagger = if using_utf8 { "\u{2020}" } else { "+" };
             let _ = queue!(stdout, Print(dagger));
         } else {
@@ -3600,7 +3600,7 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     let is_shorter = tl_get!(IS_SHORTER);
     let softwrap_on = {
         #[cfg(not(feature = "tiny"))]
-        { with_state(|s| s.flag_isset(SOFTWRAP)) }
+        { state().flag_isset(SOFTWRAP) }
         #[cfg(feature = "tiny")]
         { false }
     };
@@ -3612,9 +3612,9 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     // Scrollbar character
     #[cfg(not(feature = "tiny"))]
     {
-        let sidebar_val = with_state(|s| s.sidebar);
+        let sidebar_val = state().sidebar;
         if sidebar_val != 0 {
-            let bardata = with_state(|s| s.bardata.get(row as usize).copied().unwrap_or(b' ' as i32));
+            let bardata = state().bardata.get(row as usize).copied().unwrap_or(b' ' as i32);
             let bar_char = (bardata & 0xFF) as u8 as char;
             let bar_reverse = (bardata & A_REVERSE) != 0;
             if bar_reverse {
@@ -3635,9 +3635,9 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     // Guide stripe
     #[cfg(not(feature = "tiny"))]
     {
-        let stripe_col = with_state(|s| s.stripe_column);
+        let stripe_col = state().stripe_column;
         let sequel = tl_get!(SEQUEL_COLUMN);
-        let inhelp = with_state(|s| s.inhelp);
+        let inhelp = state().inhelp;
         let from_col_usize = from_col;
         if stripe_col > from_col_usize as isize && !inhelp
             && (sequel == 0 || stripe_col as usize <= sequel)
@@ -3652,7 +3652,7 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
                 " ".to_string()
             };
 
-            let guide_pair = with_state(|s| s.interface_color_pair[GUIDE_STRIPE]);
+            let guide_pair = state().interface_color_pair[GUIDE_STRIPE];
             apply_interface_color(guide_pair);
             let _ = queue!(stdout, MoveTo(midwin_x + margin as u16 + target_column as u16, abs_y),
                 Print(&striped_char));
@@ -3686,7 +3686,7 @@ fn apply_syntax_highlighting(
             .map(|p| unsafe { &*p })
     });
 
-    let no_syntax = with_state(|s| s.flag_isset(NO_SYNTAX));
+    let no_syntax = state().flag_isset(NO_SYNTAX);
     if no_syntax { return; }
     let Some(syntax) = syntax else { return };
 
@@ -3918,7 +3918,7 @@ fn apply_mark_highlighting(
             None // paint all
         };
 
-        let selected_pair = with_state(|s| s.interface_color_pair[SELECTED_TEXT]);
+        let selected_pair = state().interface_color_pair[SELECTED_TEXT];
         apply_interface_color(selected_pair);
 
         let stdout = out();
@@ -3938,7 +3938,7 @@ fn apply_mark_highlighting(
 /* C: int update_line(linestruct *line, size_t index) */
 pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     #[cfg(not(feature = "tiny"))]
-    if with_state(|s| s.flag_isset(SOFTWRAP)) {
+    if state().flag_isset(SOFTWRAP) {
         return update_softwrapped_line(line);
     }
 
@@ -3949,7 +3949,7 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
 
     let from_col = {
         #[cfg(not(feature = "tiny"))]
-        if with_state(|s| s.united_sidescroll) {
+        if state().united_sidescroll {
             with_state(|s| s.openfile.as_ref().map(|f| f.brink).unwrap_or(0))
         } else {
             let b = line.borrow();
@@ -4086,13 +4086,13 @@ pub fn line_needs_update(old_column: usize, new_column: usize) -> bool {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let united = with_state(|s| s.united_sidescroll);
+        let united = state().united_sidescroll;
         if united {
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
     }
 
-    !with_state(|s| s.refresh_needed)
+    !state().refresh_needed
 }
 
 // ---------------------------------------------------------------------------
@@ -4155,7 +4155,7 @@ pub fn draw_scrollbar() {
     let highest = if editwinrows as isize > total_lines && !softwrap { editwinrows as isize } else { highest };
 
     let (midwin_x, midwin_y, cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
-    let bar_pair = with_state(|s| s.interface_color_pair[SCROLL_BAR]);
+    let bar_pair = state().interface_color_pair[SCROLL_BAR];
 
     let stdout = out();
     let mut bardata = Vec::with_capacity(editwinrows as usize);
@@ -4181,7 +4181,7 @@ pub fn draw_scrollbar() {
         }
     }
 
-    with_state_mut(|s| s.bardata = bardata);
+    state_mut().bardata = bardata;
 }
 
 // ---------------------------------------------------------------------------
@@ -4246,10 +4246,10 @@ pub fn edit_scroll(direction: bool) {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let sidebar = with_state(|s| s.sidebar);
+        let sidebar = state().sidebar;
         if sidebar != 0 { draw_scrollbar(); }
 
-        let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+        let softwrap = state().flag_isset(SOFTWRAP);
         if softwrap {
             // Compensate for the earlier chunks of a softwrapped line.
             nrows += { let b = draw_line.borrow(); chunk_for(draw_leftedge, &b.data) as i32 };
@@ -4284,19 +4284,19 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
 
     // If the current line is offscreen, scroll until it's onscreen.
     if current_is_offscreen() {
-        let jump = with_state(|s| s.flag_isset(JUMPY_SCROLLING));
+        let jump = state().flag_isset(JUMPY_SCROLLING);
         adjust_viewport(if jump { UpdateType::Centering } else { manner });
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
         return;
     }
 
     #[cfg(not(feature = "tiny"))]
     {
-        let united = with_state(|s| s.united_sidescroll);
+        let united = state().united_sidescroll;
         let brink = with_state(|s| s.openfile.as_ref().map(|f| f.brink).unwrap_or(0));
         let page = get_page_start(new_pww);
         if united && brink != page {
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
             return;
         }
     }
@@ -4348,15 +4348,15 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
 /* C: void edit_refresh(void) */
 pub fn edit_refresh() {
     if current_is_offscreen() {
-        let focusing = with_state(|s| s.focusing);
-        let jumpy = with_state(|s| s.flag_isset(JUMPY_SCROLLING));
+        let focusing = state().focusing;
+        let jumpy = state().flag_isset(JUMPY_SCROLLING);
         let manner = if focusing || jumpy { UpdateType::Centering } else { UpdateType::Flowing };
         adjust_viewport(manner);
     }
 
     #[cfg(not(feature = "tiny"))]
     {
-        let united = with_state(|s| s.united_sidescroll);
+        let united = state().united_sidescroll;
         if united {
             let col = xplustabs();
             let page = get_page_start(col);
@@ -4399,7 +4399,7 @@ pub fn edit_refresh() {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let sidebar = with_state(|s| s.sidebar);
+        let sidebar = state().sidebar;
         if sidebar != 0 { draw_scrollbar(); }
     }
 
@@ -4431,9 +4431,9 @@ pub fn edit_refresh() {
 
         #[cfg(not(feature = "tiny"))]
         {
-            let sidebar = with_state(|s| s.sidebar);
+            let sidebar = state().sidebar;
             if sidebar != 0 {
-                let bardata = with_state(|s| s.bardata.get(row as usize).copied().unwrap_or(b' ' as i32));
+                let bardata = state().bardata.get(row as usize).copied().unwrap_or(b' ' as i32);
                 let in_bar = (bardata & A_REVERSE) != 0;
                 if in_bar { let _ = queue!(stdout, SetAttribute(Attribute::Reverse)); }
                 let _ = queue!(stdout, MoveTo(midwin_x + midwin_cols - 1, midwin_y + row as u16), Print(" "));
@@ -4445,7 +4445,7 @@ pub fn edit_refresh() {
 
     place_the_cursor();
     let _ = stdout.flush();
-    with_state_mut(|s| s.refresh_needed = false);
+    state_mut().refresh_needed = false;
 }
 
 /* C: void adjust_viewport(update_type manner) */
@@ -4460,9 +4460,9 @@ pub fn adjust_viewport(manner: UpdateType) {
         UpdateType::Centering  => editwinrows / 2,
         UpdateType::Flowing    => {
             if !current_is_above_screen() {
-                let shim = if with_state(|s| s.flag_isset(ZERO))
-                    && (with_state(|s| s.currmenu) == MREPLACEWITH
-                        || with_state(|s| s.currmenu) == MYESNO)
+                let shim = if state().flag_isset(ZERO)
+                    && (state().currmenu == MREPLACEWITH
+                        || state().currmenu == MYESNO)
                 { 1 } else { 0 };
                 editwinrows - 1 - shim
             } else {
@@ -4477,7 +4477,7 @@ pub fn adjust_viewport(manner: UpdateType) {
     let mut edittop = current.clone();
 
     #[cfg(not(feature = "tiny"))]
-    let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+    let softwrap = state().flag_isset(SOFTWRAP);
     #[cfg(feature = "tiny")]
     let softwrap = false;
 
@@ -4639,14 +4639,14 @@ pub fn spotlight(from_col: usize, to_col: usize) {
 
     place_the_cursor();
 
-    let spot_pair = with_state(|s| s.interface_color_pair[SPOTLIGHTED]);
+    let spot_pair = state().interface_color_pair[SPOTLIGHTED];
     apply_interface_color(spot_pair);
 
     let stdout = out();
     let _ = queue!(stdout, Print(&word[..actual_x(&word, to_col_eff)]));
 
     if overshoots {
-        let cols = with_state(|s| s.midwin.cols);
+        let cols = state().midwin.cols;
         let _ = queue!(stdout,
             MoveTo(midwin_x + cols - 1 - sidebar, midwin_y + cursor_row as u16),
             Print('>'),
@@ -4674,7 +4674,7 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
     let mut kickoff = true;
     let mut end_of_line = false;
 
-    let spot_pair = with_state(|s| s.interface_color_pair[SPOTLIGHTED]);
+    let spot_pair = state().interface_color_pair[SPOTLIGHTED];
 
     while row < editwinrows {
         let break_col = {
@@ -4711,8 +4711,8 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
 
 /* C: void do_credits(void) — #ifdef ENABLE_EXTRA */
 pub fn do_credits() {
-    let with_interface = !with_state(|s| s.flag_isset(ZERO));
-    let with_help = !with_state(|s| s.flag_isset(NO_HELP));
+    let with_interface = !state().flag_isset(ZERO);
+    let with_help = !state().flag_isset(NO_HELP);
 
     if with_interface || with_help {
         with_state_mut(|s| {
@@ -4789,8 +4789,8 @@ pub fn do_credits() {
         "Thank you for using nano!",
     ];
 
-    let editwinrows = with_state(|s| s.editwinrows);
-    let cols = with_state(|s| s.midwin.cols) as usize;
+    let editwinrows = state().editwinrows;
+    let cols = state().midwin.cols as usize;
 
     blank_edit();
     let _ = out().flush();
@@ -4839,10 +4839,10 @@ pub fn do_credits() {
     }
 
     if with_interface {
-        with_state_mut(|s| s.flags[flag_index(ZERO)] &= !flag_mask(ZERO));
+        state_mut().flags[flag_index(ZERO)] &= !flag_mask(ZERO);
     }
     if with_help {
-        with_state_mut(|s| s.flags[flag_index(NO_HELP)] &= !flag_mask(NO_HELP));
+        state_mut().flags[flag_index(NO_HELP)] &= !flag_mask(NO_HELP);
     }
     window_init();
     draw_all_subwindows();
@@ -4915,7 +4915,7 @@ pub fn napms(ms: u64) {
 
 /// Return the number of columns in the terminal (COLS equivalent).
 pub fn get_cols() -> usize {
-    with_state(|s| s.footwin.cols) as usize
+    state().footwin.cols as usize
 }
 
 /// Move the cursor within the footwin to (row, col).
@@ -4991,25 +4991,25 @@ pub fn footwin_wnoutrefresh() {
 
 /// Return the number of edit window rows.
 pub fn get_editwinrows() -> i32 {
-    with_state(|s| s.editwinrows)
+    state().editwinrows
 }
 
 /// Return the margin (line-number column width).
 pub fn get_margin() -> i32 {
-    with_state(|s| s.margin)
+    state().margin
 }
 
 /// Return reference to topwin for external use.
 pub fn get_topwin() -> NanoWindow {
-    with_state(|s| s.topwin.clone())
+    state().topwin.clone()
 }
 
 /// Return reference to midwin for external use.
 pub fn get_midwin() -> NanoWindow {
-    with_state(|s| s.midwin.clone())
+    state().midwin.clone()
 }
 
 /// Return reference to footwin for external use.
 pub fn get_footwin() -> NanoWindow {
-    with_state(|s| s.footwin.clone())
+    state().footwin.clone()
 }
