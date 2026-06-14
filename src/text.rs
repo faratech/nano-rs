@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET, tr};
-use crate::global::{with_state, with_state_mut,
+use crate::global::{with_state, with_state_mut, state, state_mut,
     flag_index, flag_mask,
 };
 #[allow(unused_imports)] // some of these are used only under feature gates
@@ -286,11 +286,11 @@ fn begpar(line: &LinePtr, depth: i32) -> bool {
 
 /// Access the global cutbuffer.
 fn get_cutbuffer() -> Option<LinePtr> {
-    with_state(|s| s.cutbuffer.clone())
+    state().cutbuffer.clone()
 }
 
 fn set_cutbuffer(buf: Option<LinePtr>) {
-    with_state_mut(|s| s.cutbuffer = buf);
+    state_mut().cutbuffer = buf;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ pub fn do_mark() {
             }
         });
         statusbar(tr!("Mark Unset"));
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
     }
 }
 
@@ -367,7 +367,7 @@ pub fn do_tab() {
     #[cfg(not(feature = "tiny"))]
     {
         if ISSET!(TABS_TO_SPACES) {
-            let tabsize = with_state(|s| s.tabsize) as usize;
+            let tabsize = state().tabsize as usize;
             let col = xplustabs();
             let length = tabsize - (col % tabsize);
             let spaces: String = " ".repeat(length);
@@ -470,7 +470,7 @@ fn build_indentation() -> String {
         }
     }
 
-    let tabsize = with_state(|s| s.tabsize) as usize;
+    let tabsize = state().tabsize as usize;
     if ISSET!(TABS_TO_SPACES) {
         " ".repeat(tabsize)
     } else {
@@ -516,7 +516,7 @@ pub fn length_of_white(text: &str) -> usize {
         }
     }
 
-    let tabsize = with_state(|s| s.tabsize) as usize;
+    let tabsize = state().tabsize as usize;
     let mut white_count = 0usize;
     let bytes = text.as_bytes();
     loop {
@@ -654,7 +654,7 @@ pub fn handle_indent_action(u: &UndoStruct, undoing: bool, add_indent: bool) {
             goto_line_posx(u.head_lineno, u.head_x);
         }
     }
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -880,7 +880,7 @@ pub fn handle_comment_action(u: &UndoStruct, undoing: bool, add_comment: bool) {
         goto_line_posx(u.head_lineno, u.head_x);
     }
 
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,7 +1095,7 @@ pub fn do_undo() {
                         .unwrap_or(0)
                 });
                 goto_line_posx(filebot_lineno, 0);
-                with_state_mut(|s| s.focusing = false);
+                state_mut().focusing = false;
             } else if let Some(ref ln) = line {
                 {
                     let mut node = ln.borrow_mut();
@@ -1238,7 +1238,7 @@ pub fn do_undo() {
 
     // The CoupleBegin case borrows u_ptr.strdata as undidmsg; after this point
     // we must not read from u_ptr.strdata for CoupleBegin.
-    let pletion_line_is_none = with_state(|s| s.pletion_line.is_none());
+    let pletion_line_is_none = state().pletion_line.is_none();
     if let Some(msg) = undidmsg {
         if !ISSET!(ZERO) && pletion_line_is_none {
             statusline(MessageType::Hush, &format!("{} {}", tr!("Undid"), msg));
@@ -1264,7 +1264,7 @@ pub fn do_undo() {
                 check_the_multis(ln);
             }
         } else if u_type == UndoType::Insert || u_type == UndoType::CoupleBegin {
-            with_state_mut(|s| s.recook = true);
+            state_mut().recook = true;
         }
     }
 
@@ -1548,7 +1548,7 @@ pub fn do_redo() {
                 check_the_multis(ln);
             }
         } else if u_type == UndoType::Insert || u_type == UndoType::CoupleEnd {
-            with_state_mut(|s| s.recook = true);
+            state_mut().recook = true;
         }
     }
 
@@ -2364,7 +2364,7 @@ pub fn do_wrap() {
         }
     };
 
-    let wrap_at = with_state(|s| s.wrap_at);
+    let wrap_at = state().wrap_at;
     let lead_width = wideness(&line_data, lead_len);
     let wrap_loc_rel = break_line(&line_data[lead_len..], (wrap_at as isize) - (lead_width as isize), false);
 
@@ -2608,7 +2608,7 @@ pub fn do_wrap() {
     #[cfg(not(feature = "tiny"))]
     add_undo(UndoType::SplitEnd, None);
 
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2618,7 +2618,7 @@ pub fn do_wrap() {
 /* C: ssize_t break_line(const char *textstart, ssize_t goal, bool snap_at_nl) */
 #[cfg(any(feature = "help", feature = "wrapping", feature = "justify"))]
 pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
-    let inhelp = with_state(|s| s.inhelp);
+    let inhelp = state().inhelp;
     let mut lastblank: Option<usize> = None;
     let mut pos = 0usize;
     let mut column: usize = 0;
@@ -2853,8 +2853,8 @@ pub fn concat_paragraph(line: &LinePtr, count: usize) {
 #[cfg(feature = "justify")]
 pub fn squeeze(line: &LinePtr, skip: usize) {
     let data = line.borrow().data.clone();
-    let punct = with_state(|s| s.punct.clone()).unwrap_or_default();
-    let brackets = with_state(|s| s.brackets.clone()).unwrap_or_default();
+    let punct = state().punct.clone().unwrap_or_default();
+    let brackets = state().brackets.clone().unwrap_or_default();
 
     let start_bytes = &data[skip..];
     let mut result = String::with_capacity(data.len());
@@ -2917,7 +2917,7 @@ pub fn squeeze(line: &LinePtr, skip: usize) {
 /* C: void rewrap_paragraph(linestruct **line, char *lead_string, size_t lead_len) */
 #[cfg(feature = "justify")]
 pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &str, lead_len: usize) {
-    let wrap_at = with_state(|s| s.wrap_at);
+    let wrap_at = state().wrap_at;
 
     loop {
         let line_data = line.borrow().data.clone();
@@ -2959,9 +2959,9 @@ pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &str, lead_len: usize) 
 
     #[cfg(feature = "color")]
     {
-        let editwinrows = with_state(|s| s.editwinrows);
+        let editwinrows = state().editwinrows;
         if line.borrow().lineno >= editwinrows as isize {
-            with_state_mut(|s| s.recook = true);
+            state_mut().recook = true;
         }
     }
 
@@ -3225,7 +3225,7 @@ pub fn justify_text(whole_buffer: bool) {
                     }
                 });
             } else {
-                with_state_mut(|s| s.focusing = false);
+                state_mut().focusing = false;
             }
 
             add_undo(UndoType::CoupleEnd, Some("justification"));
@@ -3354,7 +3354,7 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
             });
             discard_until(undotop_next);
         }
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
         // Return dummy values; caller checks linecount.
         let fl = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
         return (fl.clone(), 0, fl, 0);
@@ -3470,7 +3470,7 @@ pub fn do_justify() {
 #[cfg(feature = "justify")]
 pub fn do_full_justify() {
     justify_text(true);
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
     #[cfg(feature = "color")]
     with_state_mut(|s| s.recook = true);
 }
@@ -3613,7 +3613,7 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
         doupdate();
         #[cfg(not(feature = "tiny"))]
         {
-            let resized = with_state(|s| s.the_window_resized);
+            let resized = state().the_window_resized;
             if resized {
                 regenerate_screen();
             }
@@ -3807,11 +3807,11 @@ pub fn fix_spello(word: &str) -> bool {
 
     if result == 0 {
         statusline(MessageType::Alert, &format!(tr!("Unfindable word: {}"), word));
-        with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+        state_mut().lastmessage = MessageType::Vacuum;
         proceed = true;
         napms(2800);
     } else if result == 1 {
-        with_state_mut(|s| s.spotlighted = true);
+        state_mut().spotlighted = true;
         let col_start = xplustabs();
         let col_end = col_start + breadth(word);
         with_state_mut(|s| {
@@ -3840,7 +3840,7 @@ pub fn fix_spello(word: &str) -> bool {
         );
         proceed = result2 != -1;
 
-        with_state_mut(|s| s.spotlighted = false);
+        state_mut().spotlighted = false;
 
         #[cfg(not(feature = "tiny"))]
         with_state_mut(|s| {
@@ -3849,7 +3849,7 @@ pub fn fix_spello(word: &str) -> bool {
             }
         });
 
-        let answer = with_state(|s| s.answer.clone());
+        let answer = state().answer.clone();
         if proceed && word != answer {
             let mut was_x_mut = was_x;
             do_replace_loop(word, true, &was_current, &mut was_x_mut);
@@ -4014,7 +4014,7 @@ pub fn spell_check(tempfile_name: &str) {
     let misspellings = String::from_utf8_lossy(&uniq_output);
 
     // Save/restore flag states for case-sensitive forward non-regex search.
-    let stash = with_state(|s| s.flags);
+    let stash = state().flags;
     SET!(CASE_SENSITIVE);
     UNSET!(BACKWARDS_SEARCH);
     UNSET!(USE_REGEXP);
@@ -4028,15 +4028,15 @@ pub fn spell_check(tempfile_name: &str) {
         }
     }
 
-    with_state_mut(|s| s.flags = stash);
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().flags = stash;
+    state_mut().refresh_needed = true;
     statusline(MessageType::Remark, tr!("Finished checking spelling"));
 }
 
 /* C: void do_spell(void) */
 #[cfg(feature = "speller")]
 pub fn do_spell() {
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
 
     if in_restricted_mode() {
         return;
@@ -4108,7 +4108,7 @@ pub fn do_linter() {
     use std::process::{Command, Stdio};
     
 
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
 
     if in_restricted_mode() {
         return;
@@ -4162,7 +4162,7 @@ pub fn do_linter() {
     }
 
     blank_bottombars();
-    with_state_mut(|s| s.currmenu = MLINTER);
+    state_mut().currmenu = MLINTER;
     statusbar(tr!("Invoking linter..."));
 
     let args = construct_argument_list(&linter_cmd, &filename);
@@ -4205,7 +4205,7 @@ pub fn do_linter() {
     }
 
     let helpless = ISSET!(NO_HELP);
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     if helpless && editwinrows > 5 {
         UNSET!(NO_HELP);
         window_init();
@@ -4236,7 +4236,7 @@ pub fn do_linter() {
                     let choice = ask_user(false, &format!(
                         tr!("This message is for unopened file {}, open it in a new buffer?"),
                         entry_filename));
-                    with_state_mut(|s| s.currmenu = MLINTER);
+                    state_mut().currmenu = MLINTER;
                     if choice == CANCEL {
                         statusbar(tr!("Cancelled"));
                         break;
@@ -4349,7 +4349,7 @@ pub fn do_linter() {
     if helpless {
         SET!(NO_HELP);
         window_init();
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
     }
 
     with_state_mut(|s| {
@@ -4401,7 +4401,7 @@ fn parse_lint_line(line: &str) -> Option<LintEntry> {
 /* C: void do_formatter(void) */
 #[cfg(feature = "formatter")]
 pub fn do_formatter() {
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
 
     if in_restricted_mode() {
         return;
@@ -4599,7 +4599,7 @@ pub fn do_verbatim_input() {
     if count > 0 {
         let show_pos = ISSET!(CONSTANT_SHOW) || ISSET!(MINIBAR);
         if show_pos {
-            with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+            state_mut().lastmessage = MessageType::Vacuum;
         }
 
         if count < 999 {
@@ -4655,7 +4655,7 @@ pub fn complete_a_word() {
     let was_set_wrapping = ISSET!(BREAK_LONG_LINES);
 
     // Determine if this is a fresh attempt or continuation.
-    let is_fresh = with_state(|s| s.pletion_line.is_none());
+    let is_fresh = state().pletion_line.is_none();
 
     if is_fresh {
         // Clear previous completions.
@@ -4669,7 +4669,7 @@ pub fn complete_a_word() {
         });
 
         let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()));
-        with_state_mut(|s| s.pletion_line = filetop);
+        state_mut().pletion_line = filetop;
 
         wipe_statusbar();
     } else {
@@ -4693,7 +4693,7 @@ pub fn complete_a_word() {
 
     if start_of_shard == current_x {
         statusline(MessageType::Ahem, tr!("No word fragment"));
-        with_state_mut(|s| s.pletion_line = None);
+        state_mut().pletion_line = None;
         return;
     }
 
@@ -4702,7 +4702,7 @@ pub fn complete_a_word() {
 
     // Search through all lines for a completion.
     loop {
-        let pletion_line = with_state(|s| s.pletion_line.clone());
+        let pletion_line = state().pletion_line.clone();
         let pl = match pletion_line {
             Some(pl) => pl,
             None => break,
@@ -4789,7 +4789,7 @@ pub fn complete_a_word() {
 
         // Move to next line.
         let next_line = pl.borrow().next.clone();
-        with_state_mut(|s| s.pletion_line = next_line);
+        state_mut().pletion_line = next_line;
         PLETION_X.with(|px| *px.borrow_mut() = 0);
 
         #[cfg(feature = "multibuffer")]
