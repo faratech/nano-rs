@@ -1,209 +1,105 @@
-# nano-rs: Rust Port of GNU nano
+# nano-rs
 
-⚠️ **Disclaimer**: This is an **independent, unofficial Rust transliteration** of the [GNU nano](https://www.nano-editor.org/) text editor. This project is **NOT affiliated with or endorsed by the official GNU nano project**. For the official nano, visit https://www.nano-editor.org/.
+A faithful, line-by-line Rust port of [GNU nano](https://www.nano-editor.org/) — the small, friendly terminal text editor — translated module-for-module from the original C and then hardened into a real, shippable editor.
 
-## Overview
+> **Unofficial.** This is an independent project, **not affiliated with or endorsed by GNU nano**. Report bugs here → [faratech/nano-rs/issues](https://github.com/faratech/nano-rs/issues), never to the upstream nano project. For the official C editor, see [nano-editor.org](https://www.nano-editor.org/).
 
-This is a **pure Rust implementation** of the nano text editor — a 1:1 educational port from the C codebase that preserves the original architecture and behavior while leveraging Rust's type safety and memory guarantees. 
+## How it got here
 
-This repository contains **only the Rust implementation**. The original C code is not included; for reference, see the [official GNU nano repository](https://git.savannah.gnu.org/git/nano.git).
+It started as a mechanical 1:1 transliteration of nano's C source — same files, same functions, same control flow — so the architecture would stay legible to anyone who knows the original. From there it grew into something you can actually use:
 
-### Why Rust?
+- **Wired the skeleton up.** The first port compiled but was full of stubs. Search/replace, go-to-line, navigation, cut/copy/paste, the file browser, and the help viewer were each ported back to behavioral parity with their C originals.
+- **Got the details right.** Unicode input, cursor placement, display fill, mouse-click positioning, multibuffer via a real buffer ring, full syntax-highlight painting with lazy syntax loading, reading from a pipe, and emergency-saving modified buffers on `SIGHUP`/`SIGTERM`/crash.
+- **Hunted the parity bugs.** A focused audit pass eliminated **57 correctness-and-parity bugs** in one sweep — restoring C-style linked-list walks in the renderer, killing per-keystroke state lookups in hot paths, and replacing every "simplified" stub that diverged from nano's behavior.
+- **Made it small and portable.** A size pass shrank the optimized release binary **4.65× (2.63 MiB → ~580 KB)** with *all* features compiled in, and CI ships static musl Linux builds and native Windows MSVC builds with a built-in self-updater.
 
-- **Memory safety**: Eliminates entire classes of bugs (buffer overflows, use-after-free)
-- **Fearless concurrency**: Rust's ownership system prevents data races at compile time
-- **Same performance**: Direct translation maintains nano's efficient design
-- **Cross-platform**: Single codebase compiles on Linux, macOS, Windows, and more
+The result is ~36k lines of Rust across 19 modules that track the C source one-to-one.
 
-## ⚠️ Bug Reports
-
-**This is an independent project.** If you encounter bugs:
-- ✅ **Report to nano-rs**: https://github.com/faratech/nano-rs/issues
-- ❌ **DO NOT report to official nano**: Use only for bugs in the official C nano
-
-Bugs in nano-rs should not be reported to the official GNU nano project at https://www.nano-editor.org/ - they maintain the official C implementation separately.
-
-## Supported Platforms
-
-- ✅ Linux (aarch64, x86_64)
-- ✅ Windows MSVC (x86_64, aarch64)
-- ✅ macOS (via standard Rust toolchain)
-
-## Building
-
-### Prerequisites
-
-- Rust 1.70+ (includes Cargo)
-- For MSVC targets on non-Windows: xwin and lld-link
-
-### Quick Start
+## Quick start
 
 ```bash
-cargo build --release
+cargo build --release      # → target/release/nano
+./target/release/nano file.txt
 ```
 
-The binary will be at `target/release/nano` (or `target/release/nano.exe` on Windows).
+Requires **Rust 1.85+** (2024 edition). The default build enables the full feature set; a `cargo build --release` yields a stripped, LTO'd binary under 1 MB (a `build-std` size pass takes it to ~580 KB).
 
-### Build Options
+## Features & build flags
 
-#### Feature Flags
-
-Control which nano features to compile:
+Cargo features mirror nano's `./configure` switches one-for-one. The default build turns on the lot; `--no-default-features` gives you a bare editor you can opt into:
 
 ```bash
-# Minimal build (tiny mode)
-cargo build --no-default-features --features=tiny
-
-# Full-featured build
-cargo build --all-features
-
-# Custom features
-cargo build --features=color,nanorc,utf8
+cargo build --no-default-features                 # minimal core
+cargo build --no-default-features \
+  --features=color,nanorc,utf8                    # pick your own
+cargo build --release                             # everything (default)
 ```
 
-Available features:
-- `tiny` - Minimal feature set
-- `color` - Syntax highlighting
-- `nanorc` - Configuration file support
-- `utf8` - Unicode support
-- `browser` - File browser
-- `help` - Help system
-- `histories` - Search/replace history
-- `justify` - Paragraph justification
-- `linter` - Lint integration
-- `formatter` - Code formatting
-- `speller` - Spell checker
-- `mouse` - Mouse support
-- And more...
+| Feature | What it adds |
+|---|---|
+| `color` | Syntax highlighting |
+| `nanorc` | `nanorc` config-file support |
+| `utf8` | Unicode text & input |
+| `multibuffer` | Multiple open files (buffer ring) |
+| `browser` | Built-in file browser |
+| `help` | `^G` help viewer |
+| `histories` | Search/replace & position history |
+| `justify` · `wrapping` | Paragraph justify, hard wrapping |
+| `linter` · `formatter` · `speller` | External lint/format/spell hooks |
+| `mouse` · `linenumbers` · `comment` | Mouse, line numbers, comment toggle |
+| `tabcomp` · `wordcomp` · `operatingdir` | Tab/word completion, `-o` confinement |
+| `libmagic` | Magic-bytes syntax fallback (off by default, +~35 KB) |
+| `tiny` | Strip to the smallest editor (mirrors `--enable-tiny`) |
 
-#### Cross-Compilation to Windows
+Dependencies are deliberately few: `crossterm` (terminal I/O), `regex-lite`, `unicode-width`, and `libc`.
+
+## Platforms
+
+| Platform | Targets | Notes |
+|---|---|---|
+| Linux | `x86_64`, `aarch64` (musl) | Fully static, portable |
+| Windows | `x86_64`, `aarch64` (MSVC) | Native; built-in self-updater |
+| macOS | standard toolchain | Builds with stock Rust |
+
+Cross-compiling to Windows from Linux uses [`xwin`](https://github.com/Jake-Shadle/xwin) + `lld-link`:
 
 ```bash
-# Download Windows SDK (one-time setup)
-echo "yes" | xwin splat --output /opt/xwin
-
-# Build for Windows x86_64
-cargo build --target x86_64-pc-windows-msvc --release
-
-# Build for Windows ARM64
-cargo build --target aarch64-pc-windows-msvc --release
+xwin splat --output /opt/xwin                     # one-time SDK fetch
+cargo build --release --target x86_64-pc-windows-msvc
 ```
-
-### Cargo Configuration
-
-A `.cargo/config.toml` is included for MSVC cross-compilation setup.
 
 ## Architecture
 
-### Module Mapping
+The Rust modules mirror the C source file-for-file, so the [upstream nano internals](https://git.savannah.gnu.org/git/nano.git) remain the best reference:
 
-The Rust code mirrors the C source structure:
-
-| C File | Rust Module | Purpose |
-|--------|------------|---------|
-| `definitions.h` | `definitions.rs` | Type definitions, enums, constants |
-| `global.c` | `global.rs` | Global state, keybindings |
-| `nano.c` | `nano.rs` | Main loop, event dispatch |
+| C file | Rust module | Role |
+|---|---|---|
+| `definitions.h` | `definitions.rs` | Types, enums, flag constants |
+| `global.c` | `global.rs` | Global state, keybinding tables |
+| `nano.c` | `nano.rs` / `main.rs` | Main loop, event dispatch |
 | `winio.c` | `winio.rs` | Terminal I/O (crossterm) |
 | `move.c` | `move_.rs` | Cursor movement |
-| `files.c` | `files.rs` | File I/O, locking |
-| `search.c` | `search.rs` | Search/replace |
-| `text.c` | `text.rs` | Text manipulation |
-| `cut.c` | `cut.rs` | Cut/copy/paste |
-| ... | ... | ... |
+| `text.c` · `cut.c` | `text.rs` · `cut.rs` | Editing, undo/redo, cut buffer |
+| `files.c` · `search.c` | `files.rs` · `search.rs` | File I/O & locking, search/replace |
 
-### Key Design Decisions
+A few decisions that make the C semantics work in Rust:
 
-**Global State**: Uses `NanoCell(UnsafeCell<AppState>)` in `global.rs` for re-entrant access matching C semantics, avoiding the limitations of `RefCell`.
+- **Re-entrant global state** — `NanoCell(UnsafeCell<AppState>)` accessed via `with_state` / `with_state_mut`, because C functions freely call each other while "borrowing" the globals (a plain `RefCell` panics here).
+- **Document as a linked list** — `Rc<RefCell<LineNode>>` with `Weak` back-pointers, walked the same way the C list is.
+- **Flag macros** — `ISSET!` / `SET!` / `UNSET!` / `TOGGLE!` stand in for the C bit-flag macros.
+- **crossterm replaces ncurses**, and `tr!(...)` stands in for gettext.
 
-**Linked Lists**: `type LinePtr = Rc<RefCell<LineNode>>` with `Weak` back-pointers for the document tree.
-
-**Flag Macros**: `ISSET!(FLAG)`, `SET!(FLAG)`, `UNSET!(FLAG)`, `TOGGLE!(FLAG)` macros defined in `global.rs`.
-
-**Terminal Handling**: `crossterm` crate replaces ncurses for cross-platform terminal control.
-
-**Localization**: `tr!("string")` macro for gettext-style i18n.
-
-## Development
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-### Type Checking Only
-
-```bash
-cargo check
-```
-
-### Linting
-
-```bash
-cargo clippy
-```
-
-### Formatting
-
-```bash
-cargo fmt
-```
-
-## Differences from C Nano
-
-### Intentional Changes
-
-1. **Platform-specific code is properly gated**: Unix-only features (signals, termios) are guarded with `#[cfg(unix)]`
-2. **Modern file APIs**: Uses Rust's `std::fs` instead of libc where possible
-3. **Structured error handling**: Results and Options instead of sentinel values
-4. **No global mutable state**: State accessed through `with_state()`/`with_state_mut()` helpers
-
-### Preserved Behavior
-
-- Command syntax and keybindings
-- File handling and locking
-- Search/replace regex patterns
-- Undo/redo system
-- Syntax highlighting rules
-- Configuration file format
-
-## License
-
-GNU General Public License v3 or later (GPL-3.0+). This Rust port maintains the same license as the original GNU nano project. See `COPYING` and `COPYING.DOC`.
+Where Rust offers something safer for free, the port takes it: platform code is `#[cfg]`-gated, file APIs use `std::fs`, and sentinel return values become `Result`/`Option` — without changing nano's observable behavior, keybindings, or config format.
 
 ## Contributing
 
-Contributions to this Rust port are welcome! Please ensure:
+PRs welcome. Keep changes faithful to nano's behavior, run `cargo fmt` and `cargo clippy` (warning-free is the default-build standard), and remember this is independent of upstream — patches for the official C editor go to [nano-editor.org](https://www.nano-editor.org/).
 
-- Code follows Rust idioms and conventions
-- Changes preserve nano's functionality and behavior
-- All tests pass: `cargo test`
-- Code is formatted: `cargo fmt`
-- No clippy warnings: `cargo clippy`
+## License & credits
 
-**Note**: This is an independent community project. For contributions to the official GNU nano, visit https://www.nano-editor.org/
+GPL-3.0-or-later, same as GNU nano. See `COPYING` / `COPYING.DOC`.
 
-## See Also
+- **Rust port:** Mike Fara
+- **Original GNU nano:** Chris Allegretta and the nano contributors
 
-- **[GNU nano (Official)](https://www.nano-editor.org/)** - The original and official C implementation
-- **[nano Repository](https://git.savannah.gnu.org/git/nano.git)** - Official development repository (Savannah)
-
-## Status
-
-**Educational Project**: This Rust port is feature-complete and demonstrates a 1:1 translation of nano's architecture. It is suitable for learning and study purposes, but should not be considered an official GNU nano release.
-
-**Platform Support**:
-- Linux: ✅ Fully supported
-- Windows: ✅ Fully supported (MSVC only)
-- macOS: ✅ Fully supported
-
-**Known Issues**:
-- On Windows, history file initialization may require manual directory creation (`%USERPROFILE%\.nano\`)
-
-## Authors & Attribution
-
-**Rust Port (Independent Project)**: Mike Fara  
-**Original GNU nano**: Chris Allegretta and the official nano contributors
-
-This Rust port is not created, maintained, or endorsed by the GNU nano project or its maintainers. It is an independent educational project that transliterates the original C code into Rust for learning and demonstration purposes.
+Not created, maintained, or endorsed by the GNU nano project.
