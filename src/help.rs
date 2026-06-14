@@ -130,7 +130,7 @@ mod stubs {
             let mut sum = 0usize;
             let mut line = of.filetop.clone();
             while let Some(l) = line {
-                if std::rc::Rc::ptr_eq(&l, edittop) {
+                if crate::definitions::LinePtr::ptr_eq(&l, edittop) {
                     break;
                 }
                 sum += l.borrow().data.len();
@@ -646,7 +646,7 @@ pub fn show_help() {
     use help_state::*;
     use stubs::*;
     use crate::definitions::FuncPtr;
-    use crate::global::{state, state_mut, 
+    use crate::global::{
         flag_index, flag_mask,
         interpret,
         do_left, do_right, do_up, do_down,

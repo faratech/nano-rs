@@ -250,9 +250,7 @@ pub fn copy_the_answer() {
     if !answer.is_empty() {
         // free_lines(cutbuffer)  →  drop old cutbuffer
         // cutbuffer = make_new_node(NULL);  cutbuffer->data = copy_of(answer)
-        use std::rc::Rc;
-        use std::cell::RefCell;
-        let new_node = Rc::new(RefCell::new(LineNode {
+        let new_node = state_mut().lines.alloc(LineNode {
             data: answer,
             lineno: 0,
             next: None,
@@ -261,7 +259,7 @@ pub fn copy_the_answer() {
             multidata: Vec::new(),
             #[cfg(not(feature = "tiny"))]
             has_anchor: false,
-        }));
+        });
         with_state_mut(|s| {
             s.cutbuffer = Some(new_node.clone());
             s.cutbottom = Some(new_node);

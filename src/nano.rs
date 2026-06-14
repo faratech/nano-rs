@@ -30,18 +30,19 @@ pub static THE_WINDOW_RESIZED: AtomicBool = AtomicBool::new(false);
 // ---------------------------------------------------------------------------
 /* C: linestruct *make_new_node(linestruct *prevnode) */
 pub fn make_new_node(prev: Option<&LinePtr>) -> LinePtr {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    Rc::new(RefCell::new(LineNode {
+    let lineno = prev.map(|p| p.borrow().lineno + 1).unwrap_or(1);
+    let prev_link = prev.map(LinePtr::downgrade);
+    // Allocate after dropping any read guard so the slab may grow freely.
+    state_mut().lines.alloc(LineNode {
         data: String::new(),
-        lineno: prev.map(|p| p.borrow().lineno + 1).unwrap_or(1),
+        lineno,
         next: None,
-        prev: prev.map(Rc::downgrade),
+        prev: prev_link,
         #[cfg(feature = "color")]
         multidata: Vec::new(),
         #[cfg(not(feature = "tiny"))]
         has_anchor: false,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -49,15 +50,14 @@ pub fn make_new_node(prev: Option<&LinePtr>) -> LinePtr {
 // ---------------------------------------------------------------------------
 /* C: void splice_node(linestruct *afterthis, linestruct *newnode) */
 pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
-    use std::rc::Rc;
     // newnode->next = afterthis->next
     let old_next = afterthis.borrow().next.clone();
     newnode.borrow_mut().next = old_next.clone();
     // newnode->prev = afterthis (weak)
-    newnode.borrow_mut().prev = Some(Rc::downgrade(afterthis));
+    newnode.borrow_mut().prev = Some(LinePtr::downgrade(afterthis));
     // if afterthis->next: afterthis->next->prev = newnode
     if let Some(ref next_node) = old_next {
-        next_node.borrow_mut().prev = Some(Rc::downgrade(&newnode));
+        next_node.borrow_mut().prev = Some(LinePtr::downgrade(&newnode));
     }
     // afterthis->next = newnode
     afterthis.borrow_mut().next = Some(newnode.clone());
@@ -67,7 +67,7 @@ pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             let is_filebot = of.filebot.as_ref()
-                .map(|b| Rc::ptr_eq(b, afterthis))
+                .map(|b| LinePtr::ptr_eq(b, afterthis))
                 .unwrap_or(false);
             if is_filebot {
                 of.filebot = Some(newnode.clone());
@@ -81,12 +81,11 @@ pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
 // ---------------------------------------------------------------------------
 /* C: void delete_node(linestruct *line) */
 pub fn delete_node(line: &LinePtr) {
-    use std::rc::Rc;
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             // If the first line on the screen gets deleted, step one back.
             let is_edittop = of.edittop.as_ref()
-                .map(|e| Rc::ptr_eq(e, line))
+                .map(|e| LinePtr::ptr_eq(e, line))
                 .unwrap_or(false);
             if is_edittop {
                 let prev = line.borrow().prev.clone()
@@ -97,7 +96,7 @@ pub fn delete_node(line: &LinePtr) {
             #[cfg(feature = "wrapping")]
             {
                 let is_spillage = of.spillage_line.as_ref()
-                    .map(|sl| Rc::ptr_eq(sl, line))
+                    .map(|sl| LinePtr::ptr_eq(sl, line))
                     .unwrap_or(false);
                 if is_spillage {
                     of.spillage_line = None;
@@ -105,7 +104,8 @@ pub fn delete_node(line: &LinePtr) {
             }
         }
     });
-    // The node's data is freed automatically when the Rc drops.
+    // The node's data is freed automatically when the last LinePtr handle
+    // drops and the arena refcount reaches zero.
 }
 
 // ---------------------------------------------------------------------------
@@ -126,19 +126,16 @@ pub fn unlink_node(line: &LinePtr) {
     }
 
     // Update filebot when removing a node at the end of file.
-    {
-        use std::rc::Rc;
-        with_state_mut(|s| {
-            if let Some(ref mut of) = s.openfile {
-                let is_filebot = of.filebot.as_ref()
-                    .map(|b| Rc::ptr_eq(b, line))
-                    .unwrap_or(false);
-                if is_filebot {
-                    of.filebot = prev_weak.and_then(|w| w.upgrade());
-                }
+    with_state_mut(|s| {
+        if let Some(ref mut of) = s.openfile {
+            let is_filebot = of.filebot.as_ref()
+                .map(|b| LinePtr::ptr_eq(b, line))
+                .unwrap_or(false);
+            if is_filebot {
+                of.filebot = prev_weak.and_then(|w| w.upgrade());
             }
-        });
-    }
+        }
+    });
 
     delete_node(line);
 }
@@ -148,11 +145,11 @@ pub fn unlink_node(line: &LinePtr) {
 // ---------------------------------------------------------------------------
 /* C: void free_lines(linestruct *src) */
 pub fn free_lines(mut src: Option<LinePtr>) {
-    // Simply let the Rc chain drop; the linked-list nodes will be freed.
-    // We traverse forward and drop references to ensure no cycles linger.
+    // Walk forward, severing each node's links as we go. Severing forward links
+    // iteratively (rather than letting one head handle drop the whole chain)
+    // keeps the arena refcount cascade flat instead of recursing the list depth.
     while let Some(node) = src {
         let next = node.borrow().next.clone();
-        // Sever forward link so this node's Rc can drop.
         node.borrow_mut().next = None;
         node.borrow_mut().prev = None;
         src = next;
@@ -164,19 +161,20 @@ pub fn free_lines(mut src: Option<LinePtr>) {
 // ---------------------------------------------------------------------------
 /* C: linestruct *copy_node(const linestruct *src) */
 pub fn copy_node(src: &LinePtr) -> LinePtr {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    let src_b = src.borrow();
-    Rc::new(RefCell::new(LineNode {
-        data: src_b.data.clone(),
-        lineno: src_b.lineno,
-        next: None,
-        prev: None,
-        #[cfg(feature = "color")]
-        multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
-        has_anchor: src_b.has_anchor,
-    }))
+    let node = {
+        let src_b = src.borrow();
+        LineNode {
+            data: src_b.data.clone(),
+            lineno: src_b.lineno,
+            next: None,
+            prev: None,
+            #[cfg(feature = "color")]
+            multidata: Vec::new(),
+            #[cfg(not(feature = "tiny"))]
+            has_anchor: src_b.has_anchor,
+        }
+    };
+    state_mut().lines.alloc(node)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,14 +182,13 @@ pub fn copy_node(src: &LinePtr) -> LinePtr {
 // ---------------------------------------------------------------------------
 /* C: linestruct *copy_buffer(const linestruct *src) */
 pub fn copy_buffer(src: &LinePtr) -> LinePtr {
-    use std::rc::Rc;
     let head = copy_node(src);
     let mut item = head.clone();
     let mut cur_src = src.borrow().next.clone();
 
     while let Some(ref next_src) = cur_src.clone() {
         let new_node = copy_node(next_src);
-        new_node.borrow_mut().prev = Some(Rc::downgrade(&item));
+        new_node.borrow_mut().prev = Some(LinePtr::downgrade(&item));
         item.borrow_mut().next = Some(new_node.clone());
         item = new_node;
         cur_src = next_src.borrow().next.clone();
@@ -1398,13 +1395,10 @@ pub fn changes_something(f: FuncPtr) -> bool {
 /* C: void suck_up_input_and_paste_it(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn suck_up_input_and_paste_it() {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-
     let was_cutbuffer = state().cutbuffer.clone();
 
     // Create a new line node as start of paste buffer.
-    let head = Rc::new(RefCell::new(LineNode {
+    let head = state_mut().lines.alloc(LineNode {
         data: String::new(),
         lineno: 1,
         next: None,
@@ -1413,7 +1407,7 @@ pub fn suck_up_input_and_paste_it() {
         multidata: Vec::new(),
         #[cfg(not(feature = "tiny"))]
         has_anchor: false,
-    }));
+    });
 
     state_mut().cutbuffer = Some(head.clone());
 
@@ -1428,16 +1422,18 @@ pub fn suck_up_input_and_paste_it() {
             let c = input as u8 as char;
             line.borrow_mut().data.push(c);
         } else if input == b'\r' as i32 || input == b'\n' as i32 {
-            let new_line = Rc::new(RefCell::new(LineNode {
+            let lineno = line.borrow().lineno + 1;
+            let prev_link = Some(LinePtr::downgrade(&line));
+            let new_line = state_mut().lines.alloc(LineNode {
                 data: String::new(),
-                lineno: line.borrow().lineno + 1,
+                lineno,
                 next: None,
-                prev: Some(Rc::downgrade(&line)),
+                prev: prev_link,
                 #[cfg(feature = "color")]
                 multidata: Vec::new(),
                 #[cfg(not(feature = "tiny"))]
                 has_anchor: false,
-            }));
+            });
             line.borrow_mut().next = Some(new_line.clone());
             line = new_line;
         } else {
@@ -1546,7 +1542,7 @@ pub fn inject(burst: &[u8]) {
         let needs_align = with_state(|s| {
             if let Some(ref of) = s.openfile {
                 if let (Some(cur), Some(top)) = (of.current.as_ref(), of.edittop.as_ref()) {
-                    return std::rc::Rc::ptr_eq(cur, top) && of.firstcolumn > 0;
+                    return LinePtr::ptr_eq(cur, top) && of.firstcolumn > 0;
                 }
             }
             false

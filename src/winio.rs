@@ -27,7 +27,6 @@ use crossterm::{
 use std::io::{self, Write, stdout};
 use std::time::Duration;
 use std::cell::RefCell;
-use std::rc::Rc;
 use crate::definitions::*;
 use crate::global::{
     with_state, with_state_mut, state, state_mut, NanoWindow,
@@ -3132,7 +3131,7 @@ pub fn place_the_cursor() {
         // Calculate how many rows the lines from edittop to current use.
         let mut line = Some(edittop);
         while let Some(l) = line {
-            if Rc::ptr_eq(&l, &current) { break; }
+            if LinePtr::ptr_eq(&l, &current) { break; }
             row += 1 + { let b = l.borrow(); extra_chunks_in(&b.data) as isize };
             line = l.borrow().next.clone();
         }
@@ -4003,7 +4002,7 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
         s.light_to_col,
         s.openfile.as_ref().and_then(|f| f.current.clone()),
     ));
-    if spotlighted && current.as_ref().is_some_and(|c| Rc::ptr_eq(line, c)) {
+    if spotlighted && current.as_ref().is_some_and(|c| LinePtr::ptr_eq(line, c)) {
         spotlight(light_from, light_to);
     }
 
@@ -4021,7 +4020,7 @@ pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
     let Some(edittop) = edittop else { return 0 };
 
     let mut row = 0i32;
-    let mut from_col = if Rc::ptr_eq(line, &edittop) {
+    let mut from_col = if LinePtr::ptr_eq(line, &edittop) {
         edittop_firstcol
     } else {
         let b = edittop.borrow();
@@ -4032,7 +4031,7 @@ pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
     // Find out on which screen row the target line should be shown.
     let mut someline = Some(edittop);
     while let Some(sl) = someline {
-        if Rc::ptr_eq(&sl, line) { break; }
+        if LinePtr::ptr_eq(&sl, line) { break; }
         row += 1 + { let b = sl.borrow(); extra_chunks_in(&b.data) as i32 };
         someline = sl.borrow().next.clone();
     }
@@ -4062,7 +4061,7 @@ pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
         s.spotlighted, s.light_from_col, s.light_to_col,
         s.openfile.as_ref().and_then(|f| f.current.clone()),
     ));
-    if spotlighted && current.as_ref().is_some_and(|c| Rc::ptr_eq(line, c)) {
+    if spotlighted && current.as_ref().is_some_and(|c| LinePtr::ptr_eq(line, c)) {
         spotlight_softwrapped(light_from, light_to);
     }
 
@@ -4255,7 +4254,7 @@ pub fn edit_scroll(direction: bool) {
             nrows += { let b = draw_line.borrow(); chunk_for(draw_leftedge, &b.data) as i32 };
 
             // Don't compensate for the chunks that are offscreen.
-            if Rc::ptr_eq(&draw_line, &edittop) {
+            if LinePtr::ptr_eq(&draw_line, &edittop) {
                 nrows -= { let b = draw_line.borrow(); chunk_for(leftedge, &b.data) as i32 };
             }
         }
@@ -4266,7 +4265,7 @@ pub fn edit_scroll(direction: bool) {
     let mut walker = Some(draw_line);
     while nrows > 0 {
         let Some(l) = walker else { break };
-        let ix = if current.as_ref().is_some_and(|c| Rc::ptr_eq(&l, c)) { current_x } else { 0 };
+        let ix = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) { current_x } else { 0 };
         nrows -= update_line(&l, ix);
         walker = l.borrow().next.clone();
     }
@@ -4316,7 +4315,7 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
         {
             let current_lineno = current.borrow().lineno;
             let mut line = old_current.clone();
-            while !Rc::ptr_eq(&line, &current) {
+            while !LinePtr::ptr_eq(&line, &current) {
                 update_line(&line, 0);
                 let neighbour = if line.borrow().lineno > current_lineno {
                     line.borrow().prev.as_ref().and_then(|w| w.upgrade())
@@ -4329,7 +4328,7 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
                 }
             }
         }
-    } else if !Rc::ptr_eq(old_current, &current) && get_page_start(was_pww) > 0 {
+    } else if !LinePtr::ptr_eq(old_current, &current) && get_page_start(was_pww) > 0 {
         // Otherwise, update old_current only if it differs from current
         // and was horizontally scrolled.
         update_line(old_current, 0);
@@ -4339,7 +4338,7 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
     // differs from old_current and needs to be horizontally scrolled.
     let current_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     if line_needs_update(was_pww, new_pww)
-        || (!Rc::ptr_eq(old_current, &current) && get_page_start(new_pww) > 0)
+        || (!LinePtr::ptr_eq(old_current, &current) && get_page_start(new_pww) > 0)
     {
         update_line(&current, current_x);
     }
@@ -4415,7 +4414,7 @@ pub fn edit_refresh() {
 
     while row < editwinrows {
         let Some(l) = line else { break };
-        let index = if current.as_ref().is_some_and(|c| Rc::ptr_eq(&l, c)) { current_x } else { 0 };
+        let index = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) { current_x } else { 0 };
         row += update_line(&l, index);
         line = l.borrow().next.clone();
     }
@@ -4578,7 +4577,7 @@ pub fn report_cursor_position() {
         if let (Some(top), Some(cur)) = (filetop, current) {
             let mut node = Some(top);
             while let Some(n) = node {
-                if std::rc::Rc::ptr_eq(&n, &cur) {
+                if LinePtr::ptr_eq(&n, &cur) {
                     let data = n.borrow().data.clone();
                     let upto = data.get(..current_x).unwrap_or(&data);
                     count += crate::chars::mbstrlen(upto);

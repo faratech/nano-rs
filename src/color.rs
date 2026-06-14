@@ -8,7 +8,6 @@ use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::global::{state, state_mut, with_state, with_state_mut, A_REVERSE};
 #[allow(unused_imports)] // some of these are used only under feature gates
-use std::rc::Rc;
 
 
 // ncurses attribute constants (matching winio.rs conventions)
@@ -630,7 +629,7 @@ pub fn precalc_multicolorinfo() {
                 // (In C this also advances `line` in the main loop.)
                 let mut mid = lp.borrow().next.clone();
                 while let Some(m) = mid {
-                    if tailline.as_ref().is_some_and(|t| Rc::ptr_eq(&m, t)) { break; }
+                    if tailline.as_ref().is_some_and(|t| LinePtr::ptr_eq(&m, t)) { break; }
                     {
                         let mut b = m.borrow_mut();
                         if id < b.multidata.len() { b.multidata[id] = WHOLELINE; }

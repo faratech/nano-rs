@@ -13,7 +13,6 @@
 // (at your option) any later version.
 
 #[allow(unused_imports)] // some of these are used only under feature gates
-use std::rc::Rc;
 #[allow(unused_imports)] // some of these are used only under feature gates
 use std::cell::RefCell;
 use crate::definitions::*;
@@ -2515,7 +2514,7 @@ pub fn do_wrap() {
             (f.edittop.clone(), f.firstcolumn)
         });
         if let Some(mut et) = edittop {
-            if std::rc::Rc::ptr_eq(&et, &line) && firstcolumn > 0 && current_x_val >= wrap_loc {
+            if LinePtr::ptr_eq(&et, &line) && firstcolumn > 0 && current_x_val >= wrap_loc {
                 let mut fc = firstcolumn;
                 crate::winio::go_forward_chunks(1, &mut et, &mut fc);
                 with_state_mut(|s| {
@@ -3157,7 +3156,7 @@ pub fn justify_text(whole_buffer: bool) {
 
                 // If region started in middle of line, prepend an empty line.
                 if sx > 0 {
-                    let empty = Rc::new(RefCell::new(LineNode {
+                    let empty = state_mut().lines.alloc(LineNode {
                         data: String::new(),
                         lineno: 0,
                         next: None,
@@ -3166,17 +3165,17 @@ pub fn justify_text(whole_buffer: bool) {
                         multidata: Vec::new(),
                         #[cfg(not(feature = "tiny"))]
                         has_anchor: false,
-                    }));
+                    });
                     // Link empty before cutbuffer.
                     let cur_cb = get_cutbuffer().unwrap();
                     empty.borrow_mut().next = Some(cur_cb.clone());
-                    cur_cb.borrow_mut().prev = Some(Rc::downgrade(&empty));
+                    cur_cb.borrow_mut().prev = Some(LinePtr::downgrade(&empty));
                     set_cutbuffer(Some(empty));
                 }
 
                 // If region ended in middle of line, append lead-only line.
                 if ex > 0 && before_eol {
-                    let trail = Rc::new(RefCell::new(LineNode {
+                    let trail = state_mut().lines.alloc(LineNode {
                         data: primary_lead.clone(),
                         lineno: 0,
                         next: None,
@@ -3185,10 +3184,10 @@ pub fn justify_text(whole_buffer: bool) {
                         multidata: Vec::new(),
                         #[cfg(not(feature = "tiny"))]
                         has_anchor: false,
-                    }));
+                    });
                     // Append trail after jusline.
                     jusline.borrow_mut().next = Some(trail.clone());
-                    trail.borrow_mut().prev = Some(Rc::downgrade(&jusline));
+                    trail.borrow_mut().prev = Some(LinePtr::downgrade(&jusline));
                 }
             }
 

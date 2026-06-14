@@ -217,7 +217,7 @@ fn update_history(history: &Option<LinePtr>, answer: &str, prune: bool) {
     // Determine which history list by comparing the pointer with the global search/replace histories.
     let kind = with_state(|s| {
         let is_replace = s.replace_history.as_ref().zip(history.as_ref())
-            .map(|(r, h)| std::rc::Rc::ptr_eq(r, h))
+            .map(|(r, h)| LinePtr::ptr_eq(r, h))
             .unwrap_or(false);
         if is_replace { HistoryKind::Replace } else { HistoryKind::Search }
     });
@@ -943,7 +943,7 @@ pub fn go_looking() {
     });
 
     let same_spot = was_current.as_ref().zip(now_current.as_ref()).map(|(w, n)| {
-        std::rc::Rc::ptr_eq(w, n)
+        LinePtr::ptr_eq(w, n)
     }).unwrap_or(false) && was_x == now_x;
 
     if result == 1 && same_spot {
@@ -1140,8 +1140,8 @@ pub fn do_replace_loop(
                         let cl = cur.borrow().lineno;
                         cl > bot.borrow().lineno
                             || cl < top.borrow().lineno
-                            || (std::rc::Rc::ptr_eq(cur, bot) && cx + match_len > bot_x)
-                            || (std::rc::Rc::ptr_eq(cur, top) && cx < top_x)
+                            || (LinePtr::ptr_eq(cur, bot) && cx + match_len > bot_x)
+                            || (LinePtr::ptr_eq(cur, top) && cx < top_x)
                     }
                     _ => false,
                 }
@@ -1233,7 +1233,7 @@ pub fn do_replace_loop(
                         let cur = of.current.clone();
                         let cx = of.current_x;
                         if let (Some(cur), Some(wm)) = (cur, was_mark.as_ref()) {
-                            if std::rc::Rc::ptr_eq(&cur, wm) && of.mark_x > cx {
+                            if LinePtr::ptr_eq(&cur, wm) && of.mark_x > cx {
                                 if of.mark_x < cx + match_len {
                                     of.mark_x = cx;
                                 } else {
@@ -1255,7 +1255,7 @@ pub fn do_replace_loop(
                     let (is_real, cx_lt_rx) = with_state(|s| {
                         let is_real = real_current.map(|rc| {
                             s.openfile.as_ref().and_then(|f| f.current.as_ref())
-                                .map(|cur| std::rc::Rc::ptr_eq(cur, rc))
+                                .map(|cur| LinePtr::ptr_eq(cur, rc))
                                 .unwrap_or(false)
                         }).unwrap_or(false);
                         let cx = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
@@ -1278,7 +1278,7 @@ pub fn do_replace_loop(
                 let (is_real, cx_lt_rx) = with_state(|s| {
                     let is_real = real_current.map(|rc| {
                         s.openfile.as_ref().and_then(|f| f.current.as_ref())
-                            .map(|cur| std::rc::Rc::ptr_eq(cur, rc))
+                            .map(|cur| LinePtr::ptr_eq(cur, rc))
                             .unwrap_or(false)
                     }).unwrap_or(false);
                     let cx = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
@@ -1626,7 +1626,7 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
             let next = current.as_ref().and_then(|l| l.borrow().next.clone());
             let is_bot = with_state(|s| {
                 let bot = s.openfile.as_ref().and_then(|f| f.filebot.clone());
-                current.as_ref().zip(bot.as_ref()).map(|(c, b)| std::rc::Rc::ptr_eq(c, b)).unwrap_or(false)
+                current.as_ref().zip(bot.as_ref()).map(|(c, b)| LinePtr::ptr_eq(c, b)).unwrap_or(false)
             });
             if is_bot {
                 break;
@@ -1959,7 +1959,7 @@ pub fn put_or_lift_anchor() {
         let x = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
         let is_top = s.openfile.as_ref().map(|f| {
             f.current.as_ref().zip(f.filetop.as_ref())
-                .map(|(c, t)| std::rc::Rc::ptr_eq(c, t))
+                .map(|(c, t)| LinePtr::ptr_eq(c, t))
                 .unwrap_or(false)
         }).unwrap_or(false);
         let anchor = lp.as_ref().map(|l| l.borrow().has_anchor).unwrap_or(false);
@@ -2002,7 +2002,7 @@ pub fn go_to_and_confirm(target: &LinePtr) {
     });
 
     let is_current = was_current.as_ref()
-        .map(|c| std::rc::Rc::ptr_eq(c, target))
+        .map(|c| LinePtr::ptr_eq(c, target))
         .unwrap_or(false);
 
     if !is_current {
@@ -2093,7 +2093,7 @@ pub fn to_prev_anchor() {
         }
 
         // If we've wrapped all the way back to current, stop.
-        if std::rc::Rc::ptr_eq(&line, &current_lp) {
+        if LinePtr::ptr_eq(&line, &current_lp) {
             break;
         }
     }
@@ -2137,7 +2137,7 @@ pub fn to_next_anchor() {
         }
 
         // If we've wrapped all the way back to current, stop.
-        if std::rc::Rc::ptr_eq(&line, &current_lp) {
+        if LinePtr::ptr_eq(&line, &current_lp) {
             break;
         }
     }

@@ -1373,7 +1373,7 @@ pub fn do_left() {
         let is_filetop = with_state(|s| {
             s.openfile.as_ref().map(|of| {
                 match (&of.current, &of.filetop) {
-                    (Some(c), Some(ft)) => std::rc::Rc::ptr_eq(c, ft),
+                    (Some(c), Some(ft)) => LinePtr::ptr_eq(c, ft),
                     _ => true,
                 }
             }).unwrap_or(true)
@@ -1432,7 +1432,7 @@ pub fn do_right() {
         let is_filebot = with_state(|s| {
             s.openfile.as_ref().map(|of| {
                 match (&of.current, &of.filebot) {
-                    (Some(c), Some(fb)) => std::rc::Rc::ptr_eq(c, fb),
+                    (Some(c), Some(fb)) => LinePtr::ptr_eq(c, fb),
                     _ => true,
                 }
             }).unwrap_or(true)
@@ -1556,7 +1556,7 @@ pub fn do_scroll_right() {
                     .is_some();
                 let edittop_lp = s.openfile.as_ref().and_then(|of| of.edittop.clone());
                 let is_edittop = match (&candidate, &edittop_lp) {
-                    (Some(c), Some(e)) => std::rc::Rc::ptr_eq(c, e),
+                    (Some(c), Some(e)) => LinePtr::ptr_eq(c, e),
                     _ => true,
                 };
                 (lp_short, has_prev_lp, !is_edittop)

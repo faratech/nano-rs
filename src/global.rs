@@ -129,6 +129,9 @@ pub struct NanoWindow {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
+    /// Backing storage for every line node (all buffers, cutbuffer, undo
+    /// snapshots, completion, histories).  LinePtr/LineWeak index into this.
+    pub lines: crate::definitions::LineArena,
     // --- Signal flags (volatile sig_atomic_t in C) ---
     /// Set to true whenever SIGWINCH occurs (not NANO_TINY only).
     #[cfg(not(feature = "tiny"))]
@@ -509,6 +512,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         AppState {
+            lines: crate::definitions::LineArena::new(),
             #[cfg(not(feature = "tiny"))]
             the_window_resized: false,
             #[cfg(not(feature = "tiny"))]
@@ -785,25 +789,24 @@ impl AppState {
     /// C: new_magicline()
     pub fn append_magicline(&mut self) {
         // Create a new empty line and append it to filebot.
-        use std::rc::Rc;
-        use std::cell::RefCell;
-        let new_line = Rc::new(RefCell::new(LineNode {
+        let lineno = self.openfile.as_ref()
+            .and_then(|f| f.filebot.as_ref())
+            .map(|lb| self.lines.node(lb.idx).lineno + 1)
+            .unwrap_or(1);
+        let new_line = self.lines.alloc(LineNode {
             data: String::new(),
-            lineno: self.openfile.as_ref()
-                .and_then(|f| f.filebot.as_ref())
-                .map(|lb| lb.borrow().lineno + 1)
-                .unwrap_or(1),
+            lineno,
             next: None,
             prev: None,
             #[cfg(feature = "color")]
             multidata: Vec::new(),
             #[cfg(not(feature = "tiny"))]
             has_anchor: false,
-        }));
+        });
         if let Some(ref mut of) = self.openfile {
             if let Some(ref bot) = of.filebot.clone() {
                 // Link the new line as successor of filebot.
-                let weak_bot = Rc::downgrade(bot);
+                let weak_bot = LinePtr::downgrade(bot);
                 new_line.borrow_mut().prev = Some(weak_bot);
                 bot.borrow_mut().next = Some(new_line.clone());
             }
