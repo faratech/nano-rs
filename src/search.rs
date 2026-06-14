@@ -4,7 +4,7 @@
 //             Copyright (C) 2015-2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 use crate::{ISSET, SET, UNSET, TOGGLE};
 use regex_lite::RegexBuilder;
 
@@ -232,7 +232,7 @@ fn update_history(history: &Option<LinePtr>, answer: &str, prune: bool) {
 
 #[cfg(not(feature = "tiny"))]
 fn mark_is_before_cursor() -> bool {
-    with_state(|s| s.mark_is_before_cursor())
+    state().mark_is_before_cursor()
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ pub fn tidy_up_after_search() {
             s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()
         });
         if has_mark {
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
     }
 
@@ -428,9 +428,9 @@ pub fn tidy_up_after_search() {
 pub fn search_init(replacing: bool, retain_answer: bool) {
     // Build the default string (last searched text, truncated).
     let thedefault: String = {
-        let last = with_state(|s| s.last_search.clone());
+        let last = state().last_search.clone();
         if !last.is_empty() {
-            let cols = with_state(|s| s.editwincols.max(1) as usize);
+            let cols = state().editwincols.max(1) as usize;
             let disp = display_string(&last, 0, cols / 3, false, false);
             let is_long = breadth(&last) > cols / 3;
             format!(" [{}{}]", disp, if is_long { "..." } else { "" })
@@ -465,21 +465,21 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
                               backwards_str, replace_str, thedefault);
 
         let menu = {
-            let inhelp = with_state(|s| s.inhelp);
+            let inhelp = state().inhelp;
             if inhelp { MFINDINHELP } else if replacing { MREPLACE } else { MWHEREIS }
         };
 
         let initial = if retain_answer {
-            with_state(|s| s.answer.clone())
+            state().answer.clone()
         } else {
             String::new()
         };
 
-        let _search_hist = with_state(|s| s.search_history.clone());
+        let _search_hist = state().search_history.clone();
         let response = do_prompt(menu, &initial,
             None, crate::winio::edit_refresh, &prompt);
 
-        let last_search_empty = with_state(|s| s.last_search.is_empty());
+        let last_search_empty = state().last_search.is_empty();
 
         // If the search was cancelled, or we have a blank answer and
         // nothing was searched for yet during this session, get out.
@@ -490,20 +490,20 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
 
         // If Enter was pressed, prepare to do a replace or a search.
         if response == 0 || response == -2 {
-            let answer = with_state(|s| s.answer.clone());
+            let answer = state().answer.clone();
             if !answer.is_empty() {
                 with_state_mut(|s| {
                     s.last_search = answer.clone();
                 });
                 #[cfg(feature = "histories")]
                 {
-                    let hist = with_state(|s| s.search_history.clone());
+                    let hist = state().search_history.clone();
                     update_history(&hist, &answer, PRUNE_DUPLICATE);
                 }
             }
 
             if ISSET!(USE_REGEXP) {
-                let ls = with_state(|s| s.last_search.clone());
+                let ls = state().last_search.clone();
                 if !regexp_init(&ls) {
                     break;
                 }
@@ -542,7 +542,7 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
         }
     }
 
-    let inhelp = with_state(|s| s.inhelp);
+    let inhelp = state().inhelp;
     if !inhelp {
         tidy_up_after_search();
     }
@@ -629,7 +629,7 @@ pub fn findnextstr(
         if let Some(found_x) = found_offset {
             // When doing regex search, compute the length of the match.
             if ISSET!(USE_REGEXP) {
-                let (rm_so, rm_eo) = with_state(|s| s.regmatches[0]);
+                let (rm_so, rm_eo) = state().regmatches[0];
                 found_len = rm_eo.saturating_sub(rm_so);
             }
 
@@ -716,7 +716,7 @@ pub fn findnextstr(
         // Check for window resize.
         #[cfg(not(feature = "tiny"))]
         {
-            let resized = with_state(|s| s.the_window_resized);
+            let resized = state().the_window_resized;
             if resized {
                 regenerate_screen();
                 statusbar("Searching...");
@@ -834,35 +834,35 @@ pub fn do_research() {
                     .map(|p| p.borrow().data.clone())
             });
             if let Some(data) = prev_data {
-                with_state_mut(|s| s.last_search = data);
+                state_mut().last_search = data;
             }
         }
     }
 
-    let last_empty = with_state(|s| s.last_search.is_empty());
+    let last_empty = state().last_search.is_empty();
     if last_empty {
         statusline(MessageType::Ahem, "No current search pattern");
         return;
     }
 
     if ISSET!(USE_REGEXP) {
-        let ls = with_state(|s| s.last_search.clone());
+        let ls = state().last_search.clone();
         if !regexp_init(&ls) {
             return;
         }
     }
 
     // Use the search-menu key bindings to allow cancelling.
-    with_state_mut(|s| s.currmenu = MWHEREIS);
+    state_mut().currmenu = MWHEREIS;
 
-    let lines = with_state(|s| s.editwinrows);
+    let lines = state().editwinrows;
     if lines > 1 {
         wipe_statusbar();
     }
 
     go_looking();
 
-    let inhelp = with_state(|s| s.inhelp);
+    let inhelp = state().inhelp;
     if !inhelp {
         tidy_up_after_search();
     }
@@ -920,7 +920,7 @@ pub fn go_looking() {
         (lp, x)
     });
 
-    let needle = with_state(|s| s.last_search.clone());
+    let needle = state().last_search.clone();
 
     let mut match_len: usize = 0;
     let result = findnextstr(
@@ -933,7 +933,7 @@ pub fn go_looking() {
         begin_x,
     );
 
-    with_state_mut(|s| s.didfind = result);
+    state_mut().didfind = result;
 
     // If found and we're back at exact same spot, this is the only occurrence.
     let (now_current, now_x) = with_state(|s| {
@@ -964,7 +964,7 @@ pub fn go_looking() {
 // In Rust: always returns the replacement string (create=true) or just the size.
 // We return the replacement as a String.
 pub fn replace_regexp_str() -> String {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let mut result = String::new();
     let chars: Vec<char> = answer.chars().collect();
     let mut i = 0;
@@ -979,7 +979,7 @@ pub fn replace_regexp_str() -> String {
                     s.search_regexp.as_ref().map(|re| re.captures_len()).unwrap_or(0)
                 });
                 if (num as usize) < nsub {
-                    let (rm_so, rm_eo) = with_state(|s| s.regmatches[num as usize]);
+                    let (rm_so, rm_eo) = state().regmatches[num as usize];
                     let current_data = with_state(|s| {
                         s.openfile.as_ref()
                             .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
@@ -1019,12 +1019,12 @@ pub fn replace_line(needle: &str) -> String {
     let replacement: String;
 
     if use_regexp {
-        let (rm_so, rm_eo) = with_state(|s| s.regmatches[0]);
+        let (rm_so, rm_eo) = state().regmatches[0];
         match_len = rm_eo.saturating_sub(rm_so);
         replacement = replace_regexp_str();
     } else {
         match_len = needle.len();
-        replacement = with_state(|s| s.answer.clone());
+        replacement = state().answer.clone();
     }
 
     let head = &current_data[..current_x];
@@ -1195,7 +1195,7 @@ pub fn do_replace_loop(
 
             choice = ask_user(YESORALLORNO, "Replace this instance?");
 
-            with_state_mut(|s| s.spotlighted = false);
+            state_mut().spotlighted = false;
 
             if choice == CANCEL {
                 break;
@@ -1335,11 +1335,11 @@ pub fn do_replace_loop(
                 if let Some(ref l) = cur {
                     check_the_multis(l);
                 }
-                with_state_mut(|s| s.refresh_needed = false);
+                state_mut().refresh_needed = false;
             }
 
             set_modified();
-            with_state_mut(|s| s.as_an_at = true);
+            state_mut().as_an_at = true;
             numreplaced += 1;
         }
     }
@@ -1390,7 +1390,7 @@ pub fn ask_for_and_do_replacements() {
         s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0)
     });
 
-    let replacee = with_state(|s| s.last_search.clone());
+    let replacee = state().last_search.clone();
 
     // Prompt for replacement string.
     let response = do_prompt(MREPLACEWITH, "",
@@ -1398,12 +1398,12 @@ pub fn ask_for_and_do_replacements() {
         "Replace with");
 
     // Restore the search string (it may have changed at the prompt).
-    with_state_mut(|s| s.last_search = replacee.clone());
+    state_mut().last_search = replacee.clone();
 
     #[cfg(feature = "histories")]
     if response == 0 {
-        let answer = with_state(|s| s.answer.clone());
-        let hist = with_state(|s| s.replace_history.clone());
+        let answer = state().answer.clone();
+        let hist = state().replace_history.clone();
         update_history(&hist, &answer, PRUNE_DUPLICATE);
     }
 
@@ -1414,7 +1414,7 @@ pub fn ask_for_and_do_replacements() {
         return;
     }
 
-    let needle = with_state(|s| s.last_search.clone());
+    let needle = state().last_search.clone();
     let numreplaced = do_replace_loop(&needle, false, beginline.as_ref(), &mut begin_x);
 
     // Restore where we were.
@@ -1540,7 +1540,7 @@ pub fn ask_for_line_and_column(provided: &str) {
         return;
     }
 
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
 
     // A ++ or -- before the number signifies a relative jump.
     let doublesign = if answer.starts_with("++") || answer.starts_with("--") { 1usize } else { 0 };
@@ -1568,7 +1568,7 @@ pub fn ask_for_line_and_column(provided: &str) {
 
     let mode = if answer.starts_with(',') { UpdateType::Stationary } else { UpdateType::Centering };
     adjust_viewport(mode);
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1697,10 +1697,10 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
 
     #[cfg(not(feature = "tiny"))]
     {
-        let softwrap = with_state(|s| s.flag_isset(SOFTWRAP));
+        let softwrap = state().flag_isset(SOFTWRAP);
         if softwrap {
             let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
-            let editwinrows = with_state(|s| s.editwinrows);
+            let editwinrows = state().editwinrows;
             let mut currentline = cur;
             let mut leftedge = with_state(|s| {
                 s.openfile.as_ref().and_then(|f| f.current.as_ref().map(|l| {
@@ -1737,7 +1737,7 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
         rows_from_tail = (bot_lineno - cur_lineno) as i32;
     }
 
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     let jumpy = ISSET!(JUMPY_SCROLLING);
 
     if rows_from_tail < editwinrows / 2 && !jumpy {
@@ -1973,7 +1973,7 @@ pub fn put_or_lift_anchor() {
     let new_anchor = !has_anchor;
 
     if is_filetop {
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
     } else if let Some(ref l) = current_lp {
         update_line(l, current_x);
     }
@@ -2039,7 +2039,7 @@ pub fn go_to_and_confirm(target: &LinePtr) {
             edit_redraw(was, UpdateType::Centering);
         }
 
-        let line_numbers = with_state(|s| s.flag_isset(LINE_NUMBERS));
+        let line_numbers = state().flag_isset(LINE_NUMBERS);
         if !line_numbers {
             statusbar("Jumped to anchor");
         }

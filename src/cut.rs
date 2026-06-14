@@ -7,7 +7,7 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 
 // ---------------------------------------------------------------------------
 // Forward stubs for functions not yet ported to Rust.
@@ -313,7 +313,7 @@ pub fn expunge(action: UndoType) {
                 false
             });
             if need_refresh {
-                with_state_mut(|s| s.refresh_needed = true);
+                state_mut().refresh_needed = true;
             }
         }
 
@@ -442,7 +442,7 @@ pub fn expunge(action: UndoType) {
             if let Some(ref cur) = cur_clone {
                 renumber_from(cur);
             }
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
 
             // Adjust totsize and undo newsize.
             with_state_mut(|s| {
@@ -463,7 +463,7 @@ pub fn expunge(action: UndoType) {
     }
 
     // Post-deletion refresh (only reached for the in_middle branch).
-    let refresh_needed = with_state(|s| s.refresh_needed);
+    let refresh_needed = state().refresh_needed;
     if !refresh_needed {
         #[cfg(feature = "color")]
         {
@@ -671,8 +671,8 @@ fn chop_word(forward: bool) {
     });
 
     // Save and blank the cutbuffer.
-    let is_cutbuffer = with_state(|s| s.cutbuffer.clone());
-    with_state_mut(|s| s.cutbuffer = None);
+    let is_cutbuffer = state().cutbuffer.clone();
+    state_mut().cutbuffer = None;
 
     if !forward {
         do_prev_word();
@@ -707,7 +707,7 @@ fn chop_word(forward: bool) {
             }
         }
     } else {
-        let after_ends = with_state(|s| s.flag_isset(AFTER_ENDS));
+        let after_ends = state().flag_isset(AFTER_ENDS);
         do_next_word(after_ends);
         let (moved_line, was_char_at_x) = with_state(|s| {
             let moved = s.openfile.as_ref().and_then(|of| of.current.clone())
@@ -762,11 +762,11 @@ fn chop_word(forward: bool) {
     update_undo(UndoType::Cut);
 
     // Discard the cut word and restore the original cutbuffer.
-    let new_cutbuffer = with_state(|s| s.cutbuffer.clone());
+    let new_cutbuffer = state().cutbuffer.clone();
     if let Some(cb) = new_cutbuffer {
         free_lines(cb);
     }
-    with_state_mut(|s| s.cutbuffer = is_cutbuffer);
+    state_mut().cutbuffer = is_cutbuffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +1017,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
     });
 
     // Merge taken chain into the cutbuffer (append or replace).
-    let cutbuffer_empty = with_state(|s| s.cutbuffer.is_none());
+    let cutbuffer_empty = state().cutbuffer.is_none();
 
     if cutbuffer_empty {
         with_state_mut(|s| {
@@ -1066,11 +1066,11 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
             s.cutbottom.as_ref().and_then(|cb| cb.borrow().next.clone())
         });
         if let Some(ref ncbn) = new_cutbottom_next {
-            let cb = with_state(|s| s.cutbottom.clone());
+            let cb = state().cutbottom.clone();
             if let Some(ref cb_node) = cb {
                 ncbn.borrow_mut().prev = Some(Rc::downgrade(cb_node));
             }
-            with_state_mut(|s| s.cutbottom = Some(last.clone()));
+            state_mut().cutbottom = Some(last.clone());
         }
     }
 
@@ -1140,7 +1140,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
     // Adjust viewport if edittop was inside the excision.
     if edittop_inside {
         adjust_viewport(UpdateType::Stationary);
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
     }
 
     // Ensure the buffer ends with a newline if required.
@@ -1330,7 +1330,7 @@ fn copy_from_buffer(somebuffer: &LinePtr) {
         s.openfile.as_ref().and_then(|of| of.edittop.as_ref())
             .map(|et| et.borrow().lineno)
             .unwrap_or(0)
-            + with_state(|s| s.editwinrows) as isize - 1
+            + state().editwinrows as isize - 1
     });
 
     let the_copy = copy_buffer(somebuffer);
@@ -1344,10 +1344,10 @@ fn copy_from_buffer(somebuffer: &LinePtr) {
                 .map(|c| c.borrow().lineno)
                 .unwrap_or(0)
         });
-        if cur_lineno > threshold || with_state(|s| s.flag_isset(SOFTWRAP)) {
-            with_state_mut(|s| s.recook = true);
+        if cur_lineno > threshold || state().flag_isset(SOFTWRAP) {
+            state_mut().recook = true;
         } else {
-            with_state_mut(|s| s.perturbed = true);
+            state_mut().perturbed = true;
         }
     }
 }
@@ -1404,13 +1404,13 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
     }
 
     // If cuts were not continuous, or cutting a region, clear the cutbuffer.
-    let keep = with_state(|s| s.keep_cutbuffer);
+    let keep = state().keep_cutbuffer;
     if (marked || until_eof || !keep) && !append {
-        let old_cb = with_state(|s| s.cutbuffer.clone());
+        let old_cb = state().cutbuffer.clone();
         if let Some(cb) = old_cb {
             free_lines(cb);
         }
-        with_state_mut(|s| s.cutbuffer = None);
+        state_mut().cutbuffer = None;
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -1436,7 +1436,7 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
                         of.mark = None;
                     }
                 });
-            } else if with_state(|s| s.flag_isset(CUT_FROM_CURSOR)) {
+            } else if state().flag_isset(CUT_FROM_CURSOR) {
                 let (line_clone, cur_x, has_data, _next_is_filebot, is_filebot) =
                     with_state(|s| {
                         let of = s.openfile.as_ref().expect("openfile");
@@ -1522,7 +1522,7 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
     });
 
     set_modified();
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 
     #[cfg(feature = "color")]
     with_state_mut(|s| s.perturbed = true);
@@ -1548,7 +1548,7 @@ pub fn cut_text() {
             of.last_action != UndoType::Cut || !s.keep_cutbuffer
         });
         if need_new_undo {
-            with_state_mut(|s| s.keep_cutbuffer = false);
+            state_mut().keep_cutbuffer = false;
             add_undo(UndoType::Cut, None);
         }
 
@@ -1575,7 +1575,7 @@ pub fn cut_text() {
 /* C: void cut_till_eof(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn cut_till_eof() {
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
 
     let nothing_to_cut = with_state(|s| {
         let of = s.openfile.as_ref().expect("openfile");
@@ -1621,7 +1621,7 @@ pub fn cut_till_eof() {
 /* C: void zap_text(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn zap_text() {
-    let was_cutbuffer = with_state(|s| s.cutbuffer.clone());
+    let was_cutbuffer = state().cutbuffer.clone();
 
     let test_cliff = with_state(|s| {
         s.flag_isset(CUT_FROM_CURSOR)
@@ -1647,7 +1647,7 @@ pub fn zap_text() {
         }
         unsafe { (*of.current_undo).cutbuffer.clone() }
     });
-    with_state_mut(|s| s.cutbuffer = undo_cutbuffer);
+    state_mut().cutbuffer = undo_cutbuffer;
 
     let has_mark = with_state(|s| {
         s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
@@ -1657,7 +1657,7 @@ pub fn zap_text() {
     update_undo(UndoType::Zap);
     wipe_statusbar();
 
-    with_state_mut(|s| s.cutbuffer = was_cutbuffer);
+    state_mut().cutbuffer = was_cutbuffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +1719,7 @@ fn copy_marked_region() {
 
     // Deep-copy the (temporarily modified) chain.
     let cutbuf = copy_buffer(&topline);
-    with_state_mut(|s| s.cutbuffer = Some(cutbuf));
+    state_mut().cutbuffer = Some(cutbuf);
 
     // Restore both boundary nodes to their exact original state.
     topline.borrow_mut().data = saved_top_data;
@@ -1754,17 +1754,17 @@ pub fn copy_text() {
             of.mark.is_some() || of.last_action != UndoType::Copy
         });
         if reset {
-            with_state_mut(|s| s.keep_cutbuffer = false);
+            state_mut().keep_cutbuffer = false;
         }
     }
 
-    let keep = with_state(|s| s.keep_cutbuffer);
+    let keep = state().keep_cutbuffer;
     if !keep {
-        let old_cb = with_state(|s| s.cutbuffer.clone());
+        let old_cb = state().cutbuffer.clone();
         if let Some(cb) = old_cb {
             free_lines(cb);
         }
-        with_state_mut(|s| s.cutbuffer = None);
+        state_mut().cutbuffer = None;
     }
 
     wipe_statusbar();
@@ -1801,14 +1801,14 @@ pub fn copy_text() {
         addition.borrow_mut().data = cur_data[from_x..].to_string();
     }
 
-    let sans_newline = if with_state(|s| s.flag_isset(CUT_FROM_CURSOR)) {
+    let sans_newline = if state().flag_isset(CUT_FROM_CURSOR) {
         !at_eol
     } else {
         sans_newline_base
     };
 
     // Insert/append addition into the cutbuffer in the right position.
-    let cutbuf_empty = with_state(|s| s.cutbuffer.is_none());
+    let cutbuf_empty = state().cutbuffer.is_none();
 
     if cutbuf_empty && sans_newline {
         // cutbuffer = addition; cutbottom = addition.
@@ -1840,7 +1840,7 @@ pub fn copy_text() {
             }
             s.cutbottom = Some(addition.clone());
         });
-    } else if with_state(|s| s.flag_isset(CUT_FROM_CURSOR)) {
+    } else if state().flag_isset(CUT_FROM_CURSOR) {
         // Append addition after cutbottom (no sentinel manipulation).
         with_state_mut(|s| {
             if let Some(ref cb) = s.cutbottom.clone() {
@@ -1909,7 +1909,7 @@ pub fn copy_text() {
         }
     });
 
-    with_state_mut(|s| s.keep_cutbuffer = true);
+    state_mut().keep_cutbuffer = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1917,7 +1917,7 @@ pub fn copy_text() {
 // ---------------------------------------------------------------------------
 /* C: void paste_text(void) */
 pub fn paste_text() {
-    let cutbuffer_empty = with_state(|s| s.cutbuffer.is_none());
+    let cutbuffer_empty = state().cutbuffer.is_none();
     if cutbuffer_empty {
         statusline(MessageType::Ahem, &crate::tr!("Cutbuffer is empty"));
         return;
@@ -1948,7 +1948,7 @@ pub fn paste_text() {
     {
         add_undo(UndoType::Paste, None);
 
-        if with_state(|s| s.flag_isset(SOFTWRAP)) {
+        if state().flag_isset(SOFTWRAP) {
             let col = crate::utils::xplustabs();
             let line = with_state(|s| {
                 s.openfile.as_ref().and_then(|of| of.current.clone())
@@ -1960,7 +1960,7 @@ pub fn paste_text() {
     }
 
     // Graft a copy of the cutbuffer into the current buffer.
-    let cutbuf = with_state(|s| s.cutbuffer.clone().expect("cutbuffer"));
+    let cutbuf = state().cutbuffer.clone().expect("cutbuffer");
     copy_from_buffer(&cutbuf);
 
     #[cfg(not(feature = "tiny"))]
@@ -2006,14 +2006,14 @@ pub fn paste_text() {
                 .map(|(cur, wc)| Rc::ptr_eq(&cur, &wc))
                 .unwrap_or(false)
         });
-        if same_line && with_state(|s| s.flag_isset(BREAK_LONG_LINES)) {
+        if same_line && state().flag_isset(BREAK_LONG_LINES) {
             do_wrap();
         }
     }
 
     // If we pasted less than a screenful, don't center the cursor.
     if less_than_a_screenful(was_lineno, was_leftedge) {
-        with_state_mut(|s| s.focusing = false);
+        state_mut().focusing = false;
     } else {
         #[cfg(feature = "color")]
         precalc_multicolorinfo();
@@ -2029,7 +2029,7 @@ pub fn paste_text() {
 
     set_modified();
     wipe_statusbar();
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------

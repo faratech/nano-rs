@@ -4,7 +4,7 @@
 //             Copyright (C) 2015-2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET, TOGGLE};
 use std::fs::{File, OpenOptions};
@@ -205,13 +205,13 @@ fn update_history(_history: &mut Option<LinePtr>, s: &str, prune: bool) {
 
 // Stub display helper
 fn COLS() -> usize {
-    with_state(|s| s.midwin.cols as usize)
+    state().midwin.cols as usize
 }
 fn LINES() -> usize {
-    with_state(|s| s.midwin.rows as usize)
+    state().midwin.rows as usize
 }
 fn editwinrows() -> i32 {
-    with_state(|s| s.editwinrows)
+    state().editwinrows
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +460,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
                 let pidstring = format!("{}", lockpid);
 
                 // Display newlines in filenames as ^J
-                with_state_mut(|s| s.as_an_at = false);
+                state_mut().as_an_at = false;
 
                 let question = "File %s is being edited by %s (with %s, PID %s); open anyway?";
                 let total_fixed = breadth(question)
@@ -478,7 +478,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
                 let choice = ask_user(YESORNO, &promptstr);
 
                 // When the user cancelled while we're still starting up, quit.
-                let we_are_running = with_state(|s| s.we_are_running);
+                let we_are_running = state().we_are_running;
                 if choice == CANCEL && !we_are_running {
                     finish();
                 }
@@ -702,7 +702,7 @@ pub fn make_new_buffer() {
 // ---------------------------------------------------------------------------
 pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     // Display newlines in filenames as ^J
-    with_state_mut(|s| s.as_an_at = false);
+    state_mut().as_an_at = false;
 
     #[cfg(feature = "operatingdir")]
     {
@@ -712,7 +712,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                 .unwrap_or(false)
         });
         if confined {
-            let od = with_state(|s| s.operating_dir.clone().unwrap_or_default());
+            let od = state().operating_dir.clone().unwrap_or_default();
             statusline(MessageType::Alert,
                 &format!("Can't read file from outside of {}", od));
             return false;
@@ -876,7 +876,7 @@ pub fn set_modified() {
 // C: void prepare_for_display(void)
 // ---------------------------------------------------------------------------
 pub fn prepare_for_display() {
-    let inhelp = with_state(|s| s.inhelp);
+    let inhelp = state().inhelp;
     if !inhelp {
         titlebar(None);
     }
@@ -892,9 +892,9 @@ pub fn prepare_for_display() {
         if needs_precalc {
             precalc_multicolorinfo();
         }
-        with_state_mut(|s| s.have_palette = false);
+        state_mut().have_palette = false;
     }
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -923,7 +923,7 @@ pub fn mention_name_and_linecount() {
         let minibar = ISSET!(MINIBAR);
         let zero = ISSET!(ZERO);
         if minibar {
-            with_state_mut(|s| s.report_size = true);
+            state_mut().report_size = true;
             return;
         }
         if zero {
@@ -958,7 +958,7 @@ pub fn mention_name_and_linecount() {
 #[cfg(feature = "multibuffer")]
 pub fn redecorate_after_switch() {
     // If only one file buffer is open, there is nothing to update.
-    if with_state(|s| s.buffer_ring.is_empty()) {
+    if state().buffer_ring.is_empty() {
         statusline(MessageType::Ahem, "No more open file buffers");
         return;
     }
@@ -1124,7 +1124,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(true);
 
-    with_state_mut(|s| s.control_C_was_pressed = false);
+    state_mut().control_C_was_pressed = false;
 
     // Read the entire file contents
     let mut content = Vec::new();
@@ -1155,7 +1155,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         statusline(MessageType::Alert, &error_msg);
     }
 
-    let ctrl_c = with_state(|s| s.control_C_was_pressed);
+    let ctrl_c = state().control_C_was_pressed;
     if ctrl_c {
         statusline(MessageType::Alert, "Interrupted");
     }
@@ -1182,7 +1182,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     let mut format = FormatType::NixFile;
 
     for &byte in &content {
-        if with_state(|s| s.control_C_was_pressed) {
+        if state().control_C_was_pressed {
             break;
         }
 
@@ -1237,7 +1237,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     } else {
         let zero = ISSET!(ZERO);
         let minibar = ISSET!(MINIBAR);
-        let we_are_running = with_state(|s| s.we_are_running);
+        let we_are_running = state().we_are_running;
         if (zero || minibar) && !(we_are_running && undoable) {
             // No blurb for new buffers with --zero or --mini
         } else {
@@ -1269,11 +1269,11 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         }
     }
 
-    with_state_mut(|s| s.report_size = true);
+    state_mut().report_size = true;
 
     // If we inserted less than a screenful, don't center the cursor.
     if undoable && less_than_a_screenful(was_lineno, was_leftedge) {
-        with_state_mut(|s| s.focusing = false);
+        state_mut().focusing = false;
         #[cfg(feature = "color")]
         with_state_mut(|s| s.perturbed = true);
     } else if undoable {
@@ -1368,7 +1368,7 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
             }
 
             let zero = ISSET!(ZERO);
-            let we_are_running = with_state(|s| s.we_are_running);
+            let we_are_running = state().we_are_running;
             if !zero || we_are_running {
                 statusbar("Reading...");
             }
@@ -1664,7 +1664,7 @@ pub fn execute_command(command: &str) {
         }
 
         // If there was an error, undo and discard what the command did.
-        let last_msg = with_state(|s| s.lastmessage);
+        let last_msg = state().lastmessage;
         if last_msg == MessageType::Alert {
             do_undo();
             let current_undo = with_state(|s| {
@@ -1693,13 +1693,13 @@ pub fn insert_a_file_or(execute: bool) {
     #[cfg(feature = "multibuffer")]
     let was_multibuffer = ISSET!(MULTIBUFFER);
 
-    with_state_mut(|s| s.as_an_at = false);
-    with_state_mut(|s| s.ran_a_tool = false);
+    state_mut().as_an_at = false;
+    state_mut().ran_a_tool = false;
 
     #[cfg(not(feature = "tiny"))]
     {
         if execute {
-            let foretext = with_state(|s| s.foretext.clone().unwrap_or_default());
+            let foretext = state().foretext.clone().unwrap_or_default();
             if !foretext.is_empty() {
                 given = foretext;
             }
@@ -1755,7 +1755,7 @@ pub fn insert_a_file_or(execute: bool) {
         #[cfg(feature = "tiny")]
         { msg = "File to insert [from %s]"; }
 
-        with_state_mut(|s| s.present_path = Some("./".to_string()));
+        state_mut().present_path = Some("./".to_string());
 
         let menu = if execute { MEXECUTE } else { MINSERTFILE };
         let operating_dir_str = with_state(|s| {
@@ -1766,7 +1766,7 @@ pub fn insert_a_file_or(execute: bool) {
         });
 
         let prompt_default = operating_dir_str.as_deref().unwrap_or("./");
-        let mut exec_hist = with_state(|s| s.execute_history.clone());
+        let mut exec_hist = state().execute_history.clone();
 
         response = do_prompt(
             menu,
@@ -1777,7 +1777,7 @@ pub fn insert_a_file_or(execute: bool) {
             prompt_default,
         );
 
-        let ran = with_state(|s| s.ran_a_tool);
+        let ran = state().ran_a_tool;
         let multibuf = ISSET!(MULTIBUFFER);
 
         if response == -1 || (response == -2 && !multibuf) {
@@ -1795,7 +1795,7 @@ pub fn insert_a_file_or(execute: bool) {
             s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
         });
 
-        let answer = with_state(|s| s.answer.clone());
+        let answer = state().answer.clone();
         given = answer.clone();
 
         if ran {
@@ -1827,7 +1827,7 @@ pub fn insert_a_file_or(execute: bool) {
             }
             if function == Some(crate::global::flip_pipe as FuncPtr) {
                 add_or_remove_pipe_symbol_from_answer();
-                let new_answer = with_state(|s| s.answer.clone());
+                let new_answer = state().answer.clone();
                 given = new_answer;
                 continue;
             }
@@ -1837,7 +1837,7 @@ pub fn insert_a_file_or(execute: bool) {
         {
             if function == Some(crate::global::to_files as FuncPtr) {
                 if let Some(chosen) = browse_in(&answer) {
-                    with_state_mut(|s| s.answer = chosen.clone());
+                    state_mut().answer = chosen.clone();
                     response = 0;
                 } else {
                     continue;
@@ -1851,7 +1851,7 @@ pub fn insert_a_file_or(execute: bool) {
             continue;
         }
 
-        let final_answer = with_state(|s| s.answer.clone());
+        let final_answer = state().answer.clone();
 
         #[cfg(not(feature = "tiny"))]
         if execute {
@@ -1864,9 +1864,9 @@ pub fn insert_a_file_or(execute: bool) {
                 execute_command(&final_answer);
                 #[cfg(feature = "histories")]
                 {
-                    let mut exec_hist_local = with_state(|s| s.execute_history.clone());
+                    let mut exec_hist_local = state().execute_history.clone();
                     update_history(&mut exec_hist_local, &final_answer, PRUNE_DUPLICATE);
-                    with_state_mut(|s| s.execute_history = exec_hist_local);
+                    state_mut().execute_history = exec_hist_local;
                 }
             }
 
@@ -1911,7 +1911,7 @@ pub fn insert_a_file_or(execute: bool) {
             if cur_lineno != was_lineno || cur_x != was_x {
                 set_modified();
             }
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
 
         break;
@@ -2067,7 +2067,7 @@ pub fn safe_tempfile() -> Option<(String, File)> {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "operatingdir")]
 pub fn init_operating_dir() {
-    let od = with_state(|s| s.operating_dir.clone()).unwrap_or_default();
+    let od = state().operating_dir.clone().unwrap_or_default();
     let target = get_full_path(&od);
 
     match target {
@@ -2080,7 +2080,7 @@ pub fn init_operating_dir() {
                 eprintln!("Invalid operating directory: {}", od);
                 std::process::exit(1);
             }
-            with_state_mut(|s| s.operating_dir = Some(t));
+            state_mut().operating_dir = Some(t);
         }
     }
 }
@@ -2094,7 +2094,7 @@ pub fn outside_of_confinement(somepath: &str, tabbing: bool) -> bool {
         Some(p) => p,
     };
 
-    let operating_dir = with_state(|s| s.operating_dir.clone().unwrap_or_default());
+    let operating_dir = state().operating_dir.clone().unwrap_or_default();
 
     let is_inside = fullpath.starts_with(&operating_dir);
     let begins_to_be = tabbing && operating_dir.starts_with(&fullpath);
@@ -2108,7 +2108,7 @@ pub fn outside_of_confinement(somepath: &str, tabbing: bool) -> bool {
 // ---------------------------------------------------------------------------
 #[cfg(not(feature = "tiny"))]
 pub fn init_backup_dir() {
-    let bd = with_state(|s| s.backup_dir.clone()).unwrap_or_default();
+    let bd = state().backup_dir.clone().unwrap_or_default();
     let target = get_full_path(&bd);
 
     match target {
@@ -2121,7 +2121,7 @@ pub fn init_backup_dir() {
                 eprintln!("Invalid backup directory: {}", bd);
                 std::process::exit(1);
             }
-            with_state_mut(|s| s.backup_dir = Some(t));
+            state_mut().backup_dir = Some(t);
         }
     }
 }
@@ -2174,7 +2174,7 @@ pub fn copy_file(mut inn: File, mut out: File, close_out: bool) -> i32 {
 pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
     statusbar("Making backup...");
 
-    let backup_dir = with_state(|s| s.backup_dir.clone());
+    let backup_dir = state().backup_dir.clone();
 
     let backupname: String = if backup_dir.is_none() {
         format!("{}~", realname)
@@ -2308,7 +2308,7 @@ pub fn write_file(
                 .unwrap_or(false)
         });
         if confined {
-            let od = with_state(|s| s.operating_dir.clone().unwrap_or_default());
+            let od = state().operating_dir.clone().unwrap_or_default();
             statusline(MessageType::Alert, &format!("Can't write outside of {}", od));
             return false;
         }
@@ -2602,10 +2602,10 @@ pub fn write_file(
 
             if is_enospc && normal {
                 napms(3200);
-                with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+                state_mut().lastmessage = MessageType::Vacuum;
                 statusline(MessageType::Alert, "File on disk has been truncated!");
                 napms(3200);
-                with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+                state_mut().lastmessage = MessageType::Vacuum;
                 statusline(MessageType::Alert,
                     "Maybe ^T^Z, make room on disk, resume, then ^S^X");
                 let st = stat_with_alloc(&realname);
@@ -2718,7 +2718,7 @@ pub fn write_file(
         let zero = ISSET!(ZERO);
         let lines = LINES();
         if minibar && !zero && lines > 1 && annotate {
-            with_state_mut(|s| s.report_size = true);
+            state_mut().report_size = true;
             if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return true;
         }
@@ -2864,7 +2864,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
     let mut maychange = maychange_initial;
     let mut method = KindOfWritingType::Overwrite;
 
-    with_state_mut(|s| s.as_an_at = false);
+    state_mut().as_an_at = false;
 
     #[cfg(feature = "extra")]
     let mut did_credits = false;
@@ -2914,7 +2914,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
             "Write to File"
         };
 
-        with_state_mut(|s| s.present_path = Some("./".to_string()));
+        state_mut().present_path = Some("./".to_string());
 
         let save_on_exit = ISSET!(SAVE_ON_EXIT);
         let has_filename = with_state(|s| {
@@ -2925,7 +2925,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
         if skip_prompt {
             let fname = with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default());
-            with_state_mut(|s| s.answer = fname);
+            state_mut().answer = fname;
             response = 0;
         } else {
             let prompt_str = format!("{}{}{}", msg, formatstr, backupstr);
@@ -2948,11 +2948,11 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
         // Handle discard
         if function == Some(crate::global::discard_buffer as FuncPtr) {
-            with_state_mut(|s| s.final_status = 2);
+            state_mut().final_status = 2;
             return 2;
         }
 
-        let answer = with_state(|s| s.answer.clone());
+        let answer = state().answer.clone();
         given = answer.clone();
 
         #[cfg(feature = "browser")]
@@ -2960,14 +2960,14 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
             let restricted = ISSET!(RESTRICTED);
             if function == Some(crate::global::to_files as FuncPtr) && !restricted {
                 if let Some(chosen) = browse_in(&answer) {
-                    with_state_mut(|s| s.answer = chosen);
+                    state_mut().answer = chosen;
                 } else {
                     continue;
                 }
             }
         }
 
-        let answer2 = with_state(|s| s.answer.clone());
+        let answer2 = state().answer.clone();
 
         #[cfg(not(feature = "tiny"))]
         {
@@ -3162,7 +3162,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
     }
 
     // Write the file
-    let final_answer = with_state(|s| s.answer.clone());
+    let final_answer = state().answer.clone();
 
     #[cfg(not(feature = "tiny"))]
     {
@@ -3210,7 +3210,7 @@ pub fn expand_leading_tilde(path: &str) -> String {
     let tilded: String = if username_part.is_empty() {
         // Just ~, use $HOME
         crate::utils::get_homedir();
-        with_state(|s| s.homedir.clone().unwrap_or_default())
+        state().homedir.clone().unwrap_or_default()
     } else {
         // ~user — look up in passwd
         #[cfg(unix)]
@@ -3305,7 +3305,7 @@ pub fn username_completion(morsel: &str, length: usize) -> Vec<String> {
                     let dir = std::ffi::CStr::from_ptr((*pw).pw_dir)
                         .to_string_lossy()
                         .into_owned();
-                    let od = with_state(|s| s.operating_dir.clone());
+                    let od = state().operating_dir.clone();
                     if let Some(_od_str) = od {
                         if outside_of_confinement(&dir, true) {
                             continue;
@@ -3369,14 +3369,14 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
 
             #[cfg(feature = "operatingdir")]
             {
-                if with_state(|s| s.operating_dir.is_some()) {
+                if state().operating_dir.is_some() {
                     if outside_of_confinement(&fullname, true) {
                         continue;
                     }
                 }
             }
 
-            let currmenu = with_state(|s| s.currmenu);
+            let currmenu = state().currmenu;
             if currmenu == MGOTODIR && !is_dir(&fullname) {
                 continue;
             }

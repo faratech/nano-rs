@@ -12,7 +12,7 @@
 // inpar likewise forward to crate::text.
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 use crate::ISSET;
 
 // ── External helpers (winio.c / text.c — delegating to real implementations) ──
@@ -190,7 +190,7 @@ pub fn to_first_line() {
 /* C: void to_last_line(void)
  * Move to the last line of the file. */
 pub fn to_last_line() {
-    let inhelp = with_state(|s| s.inhelp);
+    let inhelp = state().inhelp;
     let last_x = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.filebot.as_ref())
@@ -206,7 +206,7 @@ pub fn to_last_line() {
     });
 
     let pww = xplustabs();
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
 
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
@@ -266,8 +266,8 @@ pub fn proper_x(
     #[cfg(not(feature = "tiny"))]
     {
         if ISSET!(SOFTWRAP) {
-            let tabsize = with_state(|s| s.tabsize as usize);
-            let editwincols = with_state(|s| s.editwincols as usize);
+            let tabsize = state().tabsize as usize;
+            let editwincols = state().editwincols as usize;
 
             if data.as_bytes().get(index).copied() == Some(b'\t') {
                 let w = wideness(&data, index);
@@ -336,7 +336,7 @@ pub fn set_proper_index_and_pww(leftedge: &mut usize, target: usize, forward: bo
 /* C: void do_page_up(void)
  * Move up almost one screenful. */
 pub fn do_page_up() {
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     let mustmove: i32 = if editwinrows < 3 { 1 } else { editwinrows - 2 };
     let mut leftedge: usize = 0;
     let mut target_column: usize = 0;
@@ -377,13 +377,13 @@ pub fn do_page_up() {
 
     // Move the viewport so that the cursor stays immobile, if possible.
     adjust_viewport(UpdateType::Stationary);
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 /* C: void do_page_down(void)
  * Move down almost one screenful. */
 pub fn do_page_down() {
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     let mustmove: i32 = if editwinrows < 3 { 1 } else { editwinrows - 2 };
     let mut leftedge: usize = 0;
     let mut target_column: usize = 0;
@@ -424,7 +424,7 @@ pub fn do_page_down() {
 
     // Move the viewport so that the cursor stays immobile, if possible.
     adjust_viewport(UpdateType::Stationary);
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 /* C: void to_top_row(void) — #ifndef NANO_TINY
@@ -450,7 +450,7 @@ pub fn to_top_row() {
     let has_mark = with_state(|s| {
         s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
     });
-    with_state_mut(|s| s.refresh_needed = has_mark);
+    state_mut().refresh_needed = has_mark;
 }
 
 /* C: void to_bottom_row(void) — #ifndef NANO_TINY
@@ -463,7 +463,7 @@ pub fn to_bottom_row() {
 
     let edittop_lp = with_state(|s| s.openfile.as_ref().and_then(|of| of.edittop.clone()));
     let firstcolumn = with_state(|s| s.openfile.as_ref().map(|of| of.firstcolumn).unwrap_or(0));
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
 
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
@@ -485,18 +485,18 @@ pub fn to_bottom_row() {
     let has_mark = with_state(|s| {
         s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
     });
-    with_state_mut(|s| s.refresh_needed = has_mark);
+    state_mut().refresh_needed = has_mark;
 }
 
 /* C: void do_cycle(void) — #ifndef NANO_TINY
  * Put the cursor line at the center, then the top, then the bottom. */
 #[cfg(not(feature = "tiny"))]
 pub fn do_cycle() {
-    let cycling_aim = with_state(|s| s.cycling_aim);
+    let cycling_aim = state().cycling_aim;
     if cycling_aim == 0 {
         adjust_viewport(UpdateType::Centering);
     } else {
-        let editwinrows = with_state(|s| s.editwinrows);
+        let editwinrows = state().editwinrows;
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
                 of.cursor_row = if cycling_aim == 1 { 0 } else { (editwinrows - 1) as isize };
@@ -505,7 +505,7 @@ pub fn do_cycle() {
         adjust_viewport(UpdateType::Stationary);
     }
 
-    with_state_mut(|s| s.cycling_aim = (cycling_aim + 1) % 3);
+    state_mut().cycling_aim = (cycling_aim + 1) % 3;
 
     draw_all_subwindows();
     full_refresh();
@@ -1211,8 +1211,8 @@ pub fn do_up() {
     let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
     let jumpy = ISSET!(JUMPY_SCROLLING);
     let softwrap = ISSET!(SOFTWRAP);
-    let tabsize = with_state(|s| s.tabsize as usize);
-    let editwincols = with_state(|s| s.editwincols as usize);
+    let tabsize = state().tabsize as usize;
+    let editwincols = state().editwincols as usize;
 
     if cursor_row == 0 && !jumpy && (tabsize < editwincols || !softwrap) {
         edit_scroll(BACKWARD);
@@ -1251,11 +1251,11 @@ pub fn do_down() {
     set_proper_index_and_pww(&mut leftedge, target_column, true);
 
     let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     let jumpy = ISSET!(JUMPY_SCROLLING);
     let softwrap = ISSET!(SOFTWRAP);
-    let tabsize = with_state(|s| s.tabsize as usize);
-    let editwincols = with_state(|s| s.editwincols as usize);
+    let tabsize = state().tabsize as usize;
+    let editwincols = state().editwincols as usize;
 
     if cursor_row == (editwinrows - 1) as isize && !jumpy && (tabsize < editwincols || !softwrap) {
         edit_scroll(FORWARD);
@@ -1289,12 +1289,12 @@ pub fn do_scroll_up() {
     }
 
     let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     if cursor_row == (editwinrows - 1) as isize {
         do_up();
     }
 
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     if editwinrows > 1 {
         edit_scroll(BACKWARD);
     }
@@ -1309,7 +1309,7 @@ pub fn do_scroll_down() {
         do_down();
     }
 
-    let editwinrows = with_state(|s| s.editwinrows);
+    let editwinrows = state().editwinrows;
     let has_next_line = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.edittop.as_ref())
@@ -1471,7 +1471,7 @@ pub fn do_scroll_left() {
         return;
     }
 
-    let tabsize = with_state(|s| s.tabsize as usize);
+    let tabsize = state().tabsize as usize;
     let brink = with_state(|s| s.openfile.as_ref().map(|of| of.brink).unwrap_or(0));
     let step = if brink < tabsize { brink } else if tabsize < 2 { 2 } else { tabsize };
 
@@ -1503,7 +1503,7 @@ pub fn do_scroll_left() {
         });
     }
 
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }
 
 /* C: void do_scroll_right(void) — #ifndef NANO_TINY
@@ -1519,8 +1519,8 @@ pub fn do_scroll_right() {
         return;
     }
 
-    let tabsize = with_state(|s| s.tabsize as usize);
-    let editwinrows = with_state(|s| s.editwinrows);
+    let tabsize = state().tabsize as usize;
+    let editwinrows = state().editwinrows;
 
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
@@ -1629,5 +1629,5 @@ pub fn do_scroll_right() {
         });
     }
 
-    with_state_mut(|s| s.refresh_needed = true);
+    state_mut().refresh_needed = true;
 }

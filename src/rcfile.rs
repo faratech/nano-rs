@@ -6,7 +6,7 @@
 //             Copyright (C) 2014-2021, 2024 Benno Schulenberg
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET};
 use std::cell::RefCell;
@@ -2211,7 +2211,7 @@ fn handle_non_color_option(option: &str, argument: &str) {
 
     #[cfg(feature = "operatingdir")]
     if option == "operatingdir" {
-        with_state_mut(|s| s.operating_dir = Some(argument.to_string()));
+        state_mut().operating_dir = Some(argument.to_string());
         return;
     }
 
@@ -2219,11 +2219,11 @@ fn handle_non_color_option(option: &str, argument: &str) {
     if option == "fill" {
         match parse_num(argument) {
             Some(n) => {
-                with_state_mut(|s| s.fill = n);
+                state_mut().fill = n;
             }
             None => {
                 jot_error(&format!("Requested fill size \"{}\" is invalid", argument));
-                with_state_mut(|s| s.fill = -(COLUMNS_FROM_EOL as isize));
+                state_mut().fill = -(COLUMNS_FROM_EOL as isize);
             }
         }
         return;
@@ -2236,7 +2236,7 @@ fn handle_non_color_option(option: &str, argument: &str) {
         } else if mbstrlen(argument) % 2 != 0 {
             jot_error("Even number of characters required");
         } else {
-            with_state_mut(|s| s.matchbrackets = Some(argument.to_string()));
+            state_mut().matchbrackets = Some(argument.to_string());
         }
         return;
     }
@@ -2263,7 +2263,7 @@ fn handle_non_color_option(option: &str, argument: &str) {
             if has_blank_char(argument) {
                 jot_error("Non-blank characters required");
             } else {
-                with_state_mut(|s| s.punct = Some(argument.to_string()));
+                state_mut().punct = Some(argument.to_string());
             }
             return;
         }
@@ -2271,40 +2271,40 @@ fn handle_non_color_option(option: &str, argument: &str) {
             if has_blank_char(argument) {
                 jot_error("Non-blank characters required");
             } else {
-                with_state_mut(|s| s.brackets = Some(argument.to_string()));
+                state_mut().brackets = Some(argument.to_string());
             }
             return;
         }
         if option == "quotestr" {
-            with_state_mut(|s| s.quotestr = Some(argument.to_string()));
+            state_mut().quotestr = Some(argument.to_string());
             return;
         }
     }
 
     #[cfg(feature = "speller")]
     if option == "speller" {
-        with_state_mut(|s| s.alt_speller = Some(argument.to_string()));
+        state_mut().alt_speller = Some(argument.to_string());
         return;
     }
 
     #[cfg(not(feature = "tiny"))]
     {
         if option == "backupdir" {
-            with_state_mut(|s| s.backup_dir = Some(argument.to_string()));
+            state_mut().backup_dir = Some(argument.to_string());
             return;
         }
         if option == "wordchars" {
-            with_state_mut(|s| s.word_chars = Some(argument.to_string()));
+            state_mut().word_chars = Some(argument.to_string());
             return;
         }
         if option == "guidestripe" {
             match parse_num(argument) {
                 Some(n) if n > 0 => {
-                    with_state_mut(|s| s.stripe_column = n);
+                    state_mut().stripe_column = n;
                 }
                 _ => {
                     jot_error(&format!("Guide column \"{}\" is invalid", argument));
-                    with_state_mut(|s| s.stripe_column = 0);
+                    state_mut().stripe_column = 0;
                 }
             }
             return;
@@ -2312,11 +2312,11 @@ fn handle_non_color_option(option: &str, argument: &str) {
         if option == "tabsize" {
             match parse_num(argument) {
                 Some(n) if n > 0 => {
-                    with_state_mut(|s| s.tabsize = n);
+                    state_mut().tabsize = n;
                 }
                 _ => {
                     jot_error(&format!("Requested tab size \"{}\" is invalid", argument));
-                    with_state_mut(|s| s.tabsize = -1);
+                    state_mut().tabsize = -1;
                 }
             }
             return;
@@ -2398,7 +2398,7 @@ pub fn do_rcfiles() {
 
         crate::utils::get_homedir();
 
-        let homedir = with_state(|s| s.homedir.clone());
+        let homedir = state().homedir.clone();
         let xdgconfdir = std::env::var("XDG_CONFIG_HOME").ok();
 
         // Try user nanorc in priority order

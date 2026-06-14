@@ -6,7 +6,7 @@
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::global::{with_state, with_state_mut, A_REVERSE};
+use crate::global::{state, state_mut, with_state, with_state_mut, A_REVERSE};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use std::rc::Rc;
 
@@ -171,13 +171,13 @@ pub fn find_and_prime_applicable_syntax() {
     use crate::winio::statusline;
 
     // If the rcfiles were not read, or contained no syntaxes, get out.
-    let has_syntaxes = with_state(|s| s.syntaxes.is_some());
+    let has_syntaxes = state().syntaxes.is_some();
     if !has_syntaxes {
         return;
     }
 
-    let inhelp = with_state(|s| s.inhelp);
-    let syntaxstr = with_state(|s| s.syntaxstr.clone());
+    let inhelp = state().inhelp;
+    let syntaxstr = state().syntaxstr.clone();
 
     // We will walk the Box-linked list by raw pointer to avoid borrow issues
     // when we eventually need to assign the found syntax to openfile.syntax.
@@ -271,7 +271,7 @@ pub fn find_and_prime_applicable_syntax() {
     // Try libmagic detection if still no match.
     #[cfg(feature = "libmagic")]
     if found.is_null() && !inhelp {
-        let use_magic = with_state(|s| s.flag_isset(USE_MAGIC));
+        let use_magic = state().flag_isset(USE_MAGIC);
         if use_magic {
             let filename = with_state(|s| {
                 s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
@@ -404,7 +404,7 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
 
     let multidata_empty = line_ptr.borrow().multidata.is_empty();
     if multidata_empty {
-        with_state_mut(|s| s.refresh_needed = true);
+        state_mut().refresh_needed = true;
         return;
     }
 
@@ -504,7 +504,7 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
 pub fn precalc_multicolorinfo() {
     use crate::chars::step_right;
 
-    let no_syntax = with_state(|s| s.flag_isset(NO_SYNTAX));
+    let no_syntax = state().flag_isset(NO_SYNTAX);
     if no_syntax {
         return;
     }

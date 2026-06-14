@@ -646,7 +646,7 @@ pub fn show_help() {
     use help_state::*;
     use stubs::*;
     use crate::definitions::FuncPtr;
-    use crate::global::{
+    use crate::global::{state, state_mut, 
         flag_index, flag_mask,
         interpret,
         do_left, do_right, do_up, do_down,
@@ -719,7 +719,7 @@ pub fn show_help() {
 
     // Save the current editing buffer: wrap_help_text_into_buffer() calls
     // make_new_buffer() which replaces openfile. We restore it on exit.
-    let saved_openfile = crate::global::with_state_mut(|s| s.openfile.take());
+    let saved_openfile = crate::global::state_mut().openfile.take();
 
     // Compose the help text from all the relevant pieces.
     help_init();
@@ -867,7 +867,7 @@ pub fn show_help() {
     // standalone — not in the buffer ring; overwriting it drops it.  Don't
     // call close_buffer_impl() here: that would pop a user buffer off the
     // ring, which the restore below would then leak.)
-    crate::global::with_state_mut(|s| s.openfile = saved_openfile);
+    crate::global::state_mut().openfile = saved_openfile;
 
     // Restore the settings of all flags.
     STATE.with(|s| s.borrow_mut().flags = stash);

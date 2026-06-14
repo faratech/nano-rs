@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::process;
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{winio, files, search, history, rcfile, color, prompt};
 use crate::{ISSET, SET, UNSET, TOGGLE};
@@ -302,7 +302,7 @@ pub fn finish() {
     #[cfg(any(feature = "nanorc", feature = "histories"))]
     rcfile::display_rcfile_errors();
 
-    let status = with_state(|s| s.final_status);
+    let status = state().final_status;
     process::exit(status);
 }
 
@@ -442,7 +442,7 @@ fn save_all_modified_buffers() {
         #[cfg(feature = "multibuffer")]
         { with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some())) }
         #[cfg(not(feature = "multibuffer"))]
-        { usize::from(with_state(|s| s.openfile.is_some())) }
+        { usize::from(state().openfile.is_some()) }
     };
 
     for _ in 0..total {
@@ -909,7 +909,7 @@ pub fn suspend_nano(_signal: i32) {
     println!("Use \"fg\" to return to nano.");
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    with_state_mut(|s| s.lastmessage = MessageType::Hush);
+    state_mut().lastmessage = MessageType::Hush;
     #[cfg(unix)]
     unsafe {
         libc::kill(0, libc::SIGSTOP);
@@ -923,7 +923,7 @@ pub fn do_suspend() {
         return;
     }
     suspend_nano(0);
-    with_state_mut(|s| s.ran_a_tool = true);
+    state_mut().ran_a_tool = true;
 }
 
 /* C: void continue_nano(int signal) */
@@ -1125,7 +1125,7 @@ pub fn confirm_margin() {
         needed_margin
     };
 
-    let current_margin = with_state(|s| s.margin);
+    let current_margin = state().margin;
     if final_margin != current_margin {
         with_state_mut(|s| {
             let keep_focus = (s.margin > 0) && s.focusing;
@@ -1151,7 +1151,7 @@ pub fn unbound_key(code: i32) {
     }
     #[cfg(feature = "nanorc")]
     if code == NO_SUCH_FUNCTION as i32 {
-        let name = with_state(|s| s.commandname.clone().unwrap_or_default());
+        let name = state().commandname.clone().unwrap_or_default();
         winio::statusline(MessageType::Ahem, &format!("Unknown function: {}", name));
         winio::set_blankdelay_to_one();
         return;
@@ -1172,7 +1172,7 @@ pub fn unbound_key(code: i32) {
     if code > 0x7F {
         winio::statusline(MessageType::Ahem, "Unbound key");
     } else {
-        let meta = with_state(|s| s.meta_key);
+        let meta = state().meta_key;
         if meta {
             #[cfg(not(feature = "tiny"))]
             {
@@ -1185,7 +1185,7 @@ pub fn unbound_key(code: i32) {
             }
             #[cfg(feature = "nanorc")]
             {
-                let shifted = with_state(|s| s.shifted_metas);
+                let shifted = state().shifted_metas;
                 if shifted && code >= b'A' as i32 && code <= b'Z' as i32 {
                     winio::statusline(MessageType::Ahem,
                         &format!("Unbound key: Sh-M-{}", code as u8 as char));
@@ -1249,7 +1249,7 @@ pub fn process_click() -> i32 {
 
         let col = crate::utils::xplustabs();
         #[cfg(not(feature = "tiny"))]
-        let mut leftedge = if with_state(|s| s.flag_isset(SOFTWRAP)) {
+        let mut leftedge = if state().flag_isset(SOFTWRAP) {
             let b = line.borrow();
             winio::leftedge_for(col, &b.data)
         } else {
@@ -1295,7 +1295,7 @@ pub fn process_click() -> i32 {
             }
         } else {
             // The cursor moved; clean the cutbuffer on the next cut.
-            with_state_mut(|s| s.keep_cutbuffer = false);
+            state_mut().keep_cutbuffer = false;
         }
         #[cfg(feature = "tiny")]
         with_state_mut(|s| s.keep_cutbuffer = false);
@@ -1401,7 +1401,7 @@ pub fn suck_up_input_and_paste_it() {
     use std::rc::Rc;
     use std::cell::RefCell;
 
-    let was_cutbuffer = with_state(|s| s.cutbuffer.clone());
+    let was_cutbuffer = state().cutbuffer.clone();
 
     // Create a new line node as start of paste buffer.
     let head = Rc::new(RefCell::new(LineNode {
@@ -1415,7 +1415,7 @@ pub fn suck_up_input_and_paste_it() {
         has_anchor: false,
     }));
 
-    with_state_mut(|s| s.cutbuffer = Some(head.clone()));
+    state_mut().cutbuffer = Some(head.clone());
 
     let mut line = head.clone();
     let mut input;
@@ -1456,9 +1456,9 @@ pub fn suck_up_input_and_paste_it() {
     }
 
     // Free the temporary cutbuffer and restore the original.
-    let tmp = with_state(|s| s.cutbuffer.clone());
+    let tmp = state().cutbuffer.clone();
     free_lines(tmp);
-    with_state_mut(|s| s.cutbuffer = was_cutbuffer);
+    state_mut().cutbuffer = was_cutbuffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,7 +1553,7 @@ pub fn inject(burst: &[u8]) {
         });
         if needs_align {
             winio::ensure_firstcolumn_is_aligned();
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
     }
 
@@ -1628,7 +1628,7 @@ pub fn inject(burst: &[u8]) {
         }
     }
 
-    let refresh = with_state(|s| s.refresh_needed);
+    let refresh = state().refresh_needed;
     if !refresh {
         let (current, current_x) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
@@ -1663,7 +1663,7 @@ pub fn regenerate_screen() {
     terminal_init();
     window_init();
 
-    let running = with_state(|s| s.we_are_running);
+    let running = state().we_are_running;
     if running {
         #[cfg(not(feature = "tiny"))]
         winio::ensure_firstcolumn_is_aligned();
@@ -1679,7 +1679,7 @@ pub fn regenerate_screen() {
 pub fn toggle_this(flag: u32) {
     let enabled = !ISSET!(flag);
     TOGGLE!(flag);
-    with_state_mut(|s| s.focusing = false);
+    state_mut().focusing = false;
 
     match flag {
         f if f == ZERO => {
@@ -1723,16 +1723,16 @@ pub fn toggle_this(flag: u32) {
                     }
                 });
             }
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
         f if f == WHITESPACE_DISPLAY => {
             winio::titlebar(None);
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
         #[cfg(feature = "color")]
         f if f == NO_SYNTAX => {
             color::precalc_multicolorinfo();
-            with_state_mut(|s| s.refresh_needed = true);
+            state_mut().refresh_needed = true;
         }
         #[cfg(feature = "color")]
         f if f == TABS_TO_SPACES => {
@@ -1796,7 +1796,7 @@ pub fn process_a_keystroke() {
     // Read a keystroke.
     let input = winio::get_kbinput(VISIBLE);
 
-    with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+    state_mut().lastmessage = MessageType::Vacuum;
 
     #[cfg(not(feature = "tiny"))]
     if input == crate::definitions::THE_WINDOW_RESIZED as i32 {
@@ -1856,7 +1856,7 @@ pub fn process_a_keystroke() {
 
     // If not a command, handle as character or unknown.
     if function.is_none() {
-        let meta = with_state(|s| s.meta_key);
+        let meta = state().meta_key;
         if input < 0x20 || input > 0xFF || meta {
             unbound_key(input);
         } else if ISSET!(VIEW_MODE) {
@@ -1897,7 +1897,7 @@ pub fn process_a_keystroke() {
 
     #[cfg(not(feature = "tiny"))]
     if function != Some(crate::global::do_cycle as FuncPtr) {
-        with_state_mut(|s| s.cycling_aim = 0);
+        state_mut().cycling_aim = 0;
     }
 
     if function.is_none() {
@@ -1918,7 +1918,7 @@ pub fn process_a_keystroke() {
     // Give hint about help if at top of file.
     GIVE_A_HINT.with(|hint| {
         let give = *hint.borrow();
-        let meta = with_state(|s| s.meta_key);
+        let meta = state().meta_key;
         let at_top_empty = with_state(|s| {
             s.openfile.as_ref().map(|of| {
                 of.current_x == 0
@@ -1954,7 +1954,7 @@ pub fn process_a_keystroke() {
         if func == crate::global::do_toggle as FuncPtr {
             toggle_this(shortcut_toggle as u32);
             if shortcut_toggle as u32 == CUT_FROM_CURSOR {
-                with_state_mut(|s| s.keep_cutbuffer = false);
+                state_mut().keep_cutbuffer = false;
             }
             return;
         }
@@ -1970,7 +1970,7 @@ pub fn process_a_keystroke() {
                 && func != crate::global::record_macro as FuncPtr
                 && func != crate::global::run_macro as FuncPtr
             {
-                with_state_mut(|s| s.keep_cutbuffer = false);
+                state_mut().keep_cutbuffer = false;
             }
         }
         #[cfg(feature = "tiny")]
@@ -1979,7 +1979,7 @@ pub fn process_a_keystroke() {
 
     #[cfg(feature = "wordcomp")]
     if func != crate::global::complete_a_word as FuncPtr {
-        with_state_mut(|s| s.pletion_line = None);
+        state_mut().pletion_line = None;
     }
 
     // Save cursor position before executing.
@@ -1993,7 +1993,7 @@ pub fn process_a_keystroke() {
     // If Shift + movement, set the mark.
     #[cfg(not(feature = "tiny"))]
     {
-        let shift_held = with_state(|s| s.shift_held);
+        let shift_held = state().shift_held;
         let mark_is_none = with_state(|s| {
             s.openfile.as_ref().map(|of| of.mark.is_none()).unwrap_or(true)
         });
@@ -2035,7 +2035,7 @@ pub fn process_a_keystroke() {
                 s.refresh_needed = true;
             });
         } else if cur_lineno != was_current_lineno {
-            with_state_mut(|s| s.also_the_last = false);
+            state_mut().also_the_last = false;
         }
 
         // Update titlebar if mark state changed.
@@ -2105,7 +2105,7 @@ pub fn nano_main() {
                     if !codeset.is_null() {
                         let cs = std::ffi::CStr::from_ptr(codeset).to_string_lossy();
                         if cs == "UTF-8" {
-                            with_state_mut(|s| s.using_utf8 = true);
+                            state_mut().using_utf8 = true;
                             crate::chars::remember_utf8(true);
                         }
                     }
@@ -2120,7 +2120,7 @@ pub fn nano_main() {
     }
     #[cfg(not(unix))]
     {
-        with_state_mut(|s| s.using_utf8 = true);
+        state_mut().using_utf8 = true;
         crate::chars::remember_utf8(true);
     }
 
@@ -2177,7 +2177,7 @@ pub fn nano_main() {
                 "backupdir"      => {
                     #[cfg(not(feature="tiny"))] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.backup_dir = Some(v));
+                        state_mut().backup_dir = Some(v);
                     }
                 }
                 "boldtext"       => { SET!(BOLD_TEXT); }
@@ -2190,7 +2190,7 @@ pub fn nano_main() {
                     #[cfg(not(feature="tiny"))] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
-                            Some(n) if n > 0 => with_state_mut(|s| s.stripe_column = n),
+                            Some(n) if n > 0 => state_mut().stripe_column = n,
                             _ => {
                                 eprintln!("Guide column \"{}\" is invalid", v);
                                 process::exit(1);
@@ -2207,7 +2207,7 @@ pub fn nano_main() {
                 "quotestr"       => {
                     #[cfg(feature="justify")] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.quotestr = Some(v));
+                        state_mut().quotestr = Some(v);
                     }
                 }
                 "restricted"     => { SET!(RESTRICTED); }
@@ -2216,7 +2216,7 @@ pub fn nano_main() {
                     #[cfg(not(feature="tiny"))] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
-                            Some(n) if n > 0 => with_state_mut(|s| s.tabsize = n),
+                            Some(n) if n > 0 => state_mut().tabsize = n,
                             _ => {
                                 eprintln!("Requested tab size \"{}\" is invalid", v);
                                 process::exit(1);
@@ -2230,13 +2230,13 @@ pub fn nano_main() {
                 "wordchars"      => {
                     #[cfg(not(feature="tiny"))] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.word_chars = Some(v));
+                        state_mut().word_chars = Some(v);
                     }
                 }
                 "syntax"         => {
                     #[cfg(feature="color")] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.syntaxstr = Some(v));
+                        state_mut().syntaxstr = Some(v);
                     }
                 }
                 "zap"            => { #[cfg(not(feature="tiny"))] SET!(LET_THEM_ZAP); }
@@ -2248,7 +2248,7 @@ pub fn nano_main() {
                 "rcfile"         => {
                     #[cfg(feature="nanorc")] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.custom_nanorc = Some(v));
+                        state_mut().custom_nanorc = Some(v);
                     }
                 }
                 "showcursor"     => {
@@ -2264,7 +2264,7 @@ pub fn nano_main() {
                 "operatingdir"   => {
                     #[cfg(feature="operatingdir")] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.operating_dir = Some(v));
+                        state_mut().operating_dir = Some(v);
                     }
                 }
                 "preserve"       => { SET!(PRESERVE); }
@@ -2274,7 +2274,7 @@ pub fn nano_main() {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
                             Some(n) => {
-                                with_state_mut(|s| s.fill = n);
+                                state_mut().fill = n;
                                 #[cfg(feature="nanorc")] { fill_used = true; }
                             }
                             None => {
@@ -2287,7 +2287,7 @@ pub fn nano_main() {
                 "speller"        => {
                     #[cfg(feature="speller")] {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
-                        with_state_mut(|s| s.alt_speller = Some(v));
+                        state_mut().alt_speller = Some(v);
                     }
                 }
                 "saveonexit"     => { SET!(SAVE_ON_EXIT); }
@@ -2365,7 +2365,7 @@ pub fn nano_main() {
                 'C' => {
                     #[cfg(not(feature="tiny"))] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.backup_dir = Some(v));
+                        state_mut().backup_dir = Some(v);
                     }
                 }
                 'D' => { SET!(BOLD_TEXT); }
@@ -2378,7 +2378,7 @@ pub fn nano_main() {
                     #[cfg(not(feature="tiny"))] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
-                            Some(n) if n > 0 => with_state_mut(|s| s.stripe_column = n),
+                            Some(n) if n > 0 => state_mut().stripe_column = n,
                             _ => {
                                 eprintln!("Guide column \"{}\" is invalid", v);
                                 process::exit(1);
@@ -2395,7 +2395,7 @@ pub fn nano_main() {
                 'Q' => {
                     #[cfg(feature="justify")] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.quotestr = Some(v));
+                        state_mut().quotestr = Some(v);
                     }
                 }
                 'R' => { SET!(RESTRICTED); }
@@ -2404,7 +2404,7 @@ pub fn nano_main() {
                     #[cfg(not(feature="tiny"))] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
-                            Some(n) if n > 0 => with_state_mut(|s| s.tabsize = n),
+                            Some(n) if n > 0 => state_mut().tabsize = n,
                             _ => {
                                 eprintln!("Requested tab size \"{}\" is invalid", v);
                                 process::exit(1);
@@ -2418,13 +2418,13 @@ pub fn nano_main() {
                 'X' => {
                     #[cfg(not(feature="tiny"))] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.word_chars = Some(v));
+                        state_mut().word_chars = Some(v);
                     }
                 }
                 'Y' => {
                     #[cfg(feature="color")] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.syntaxstr = Some(v));
+                        state_mut().syntaxstr = Some(v);
                     }
                 }
                 'Z' => { #[cfg(not(feature="tiny"))] SET!(LET_THEM_ZAP); }
@@ -2436,7 +2436,7 @@ pub fn nano_main() {
                 'f' => {
                     #[cfg(feature="nanorc")] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.custom_nanorc = Some(v));
+                        state_mut().custom_nanorc = Some(v);
                     }
                 }
                 'g' => {
@@ -2452,7 +2452,7 @@ pub fn nano_main() {
                 'o' => {
                     #[cfg(feature="operatingdir")] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.operating_dir = Some(v));
+                        state_mut().operating_dir = Some(v);
                     }
                 }
                 'p' => { SET!(PRESERVE); }
@@ -2462,7 +2462,7 @@ pub fn nano_main() {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
                             Some(n) => {
-                                with_state_mut(|s| s.fill = n);
+                                state_mut().fill = n;
                                 #[cfg(feature="nanorc")] { fill_used = true; }
                             }
                             None => {
@@ -2475,7 +2475,7 @@ pub fn nano_main() {
                 's' => {
                     #[cfg(feature="speller")] {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
-                        with_state_mut(|s| s.alt_speller = Some(v));
+                        state_mut().alt_speller = Some(v);
                     }
                 }
                 't' => { SET!(SAVE_ON_EXIT); }
@@ -2537,22 +2537,22 @@ pub fn nano_main() {
     if !ignore_rcfiles {
         // Back up command-line options that were explicitly set.
         #[cfg(any(feature = "wrapping", feature = "justify"))]
-        let fill_cmdline = with_state(|s| s.fill);
+        let fill_cmdline = state().fill;
         #[cfg(not(feature = "tiny"))]
-        let backup_dir_cmdline = with_state(|s| s.backup_dir.clone());
+        let backup_dir_cmdline = state().backup_dir.clone();
         #[cfg(not(feature = "tiny"))]
-        let word_chars_cmdline = with_state(|s| s.word_chars.clone());
+        let word_chars_cmdline = state().word_chars.clone();
         #[cfg(not(feature = "tiny"))]
-        let stripeclm_cmdline = with_state(|s| s.stripe_column);
+        let stripeclm_cmdline = state().stripe_column;
         #[cfg(not(feature = "tiny"))]
-        let tabsize_cmdline = with_state(|s| s.tabsize);
+        let tabsize_cmdline = state().tabsize;
         #[cfg(feature = "operatingdir")]
-        let operating_dir_cmdline = with_state(|s| s.operating_dir.clone());
+        let operating_dir_cmdline = state().operating_dir.clone();
         #[cfg(feature = "justify")]
-        let quotestr_cmdline = with_state(|s| s.quotestr.clone());
+        let quotestr_cmdline = state().quotestr.clone();
         #[cfg(feature = "speller")]
-        let alt_speller_cmdline = with_state(|s| s.alt_speller.clone());
-        let flags_cmdline = with_state(|s| s.flags);
+        let alt_speller_cmdline = state().alt_speller.clone();
+        let flags_cmdline = state().flags;
 
         // Clear string options to avoid overwriting command-line ones.
         #[cfg(not(feature = "tiny"))]
@@ -2572,34 +2572,34 @@ pub fn nano_main() {
         // Restore command-line options if they were set.
         #[cfg(any(feature = "wrapping", feature = "justify"))]
         if fill_used {
-            with_state_mut(|s| s.fill = fill_cmdline);
+            state_mut().fill = fill_cmdline;
         }
         #[cfg(not(feature = "tiny"))]
         {
             if backup_dir_cmdline.is_some() {
-                with_state_mut(|s| s.backup_dir = backup_dir_cmdline);
+                state_mut().backup_dir = backup_dir_cmdline;
             }
             if word_chars_cmdline.is_some() {
-                with_state_mut(|s| s.word_chars = word_chars_cmdline);
+                state_mut().word_chars = word_chars_cmdline;
             }
             if stripeclm_cmdline > 0 {
-                with_state_mut(|s| s.stripe_column = stripeclm_cmdline);
+                state_mut().stripe_column = stripeclm_cmdline;
             }
             if tabsize_cmdline != -1 {
-                with_state_mut(|s| s.tabsize = tabsize_cmdline);
+                state_mut().tabsize = tabsize_cmdline;
             }
         }
         #[cfg(feature = "operatingdir")]
         if operating_dir_cmdline.is_some() || ISSET!(RESTRICTED) {
-            with_state_mut(|s| s.operating_dir = operating_dir_cmdline);
+            state_mut().operating_dir = operating_dir_cmdline;
         }
         #[cfg(feature = "justify")]
         if quotestr_cmdline.is_some() {
-            with_state_mut(|s| s.quotestr = quotestr_cmdline);
+            state_mut().quotestr = quotestr_cmdline;
         }
         #[cfg(feature = "speller")]
         if alt_speller_cmdline.is_some() {
-            with_state_mut(|s| s.alt_speller = alt_speller_cmdline);
+            state_mut().alt_speller = alt_speller_cmdline;
         }
 
         // If rcfile undid the default NO_WRAP, set BREAK_LONG_LINES.
@@ -2627,7 +2627,7 @@ pub fn nano_main() {
 
     // Bold instead of reverse video.
     if ISSET!(BOLD_TEXT) {
-        with_state_mut(|s| s.hilite_attribute = 0x0020_0000 /* A_BOLD */);
+        state_mut().hilite_attribute = 0x0020_0000 /* A_BOLD */;
     }
 
     // Restricted mode: disable backups and history files.
@@ -2678,7 +2678,7 @@ pub fn nano_main() {
     // Backup directory.
     #[cfg(not(feature = "tiny"))]
     {
-        let has_backup_dir = with_state(|s| s.backup_dir.is_some());
+        let has_backup_dir = state().backup_dir.is_some();
         if has_backup_dir && !ISSET!(RESTRICTED) {
             files::init_backup_dir();
         }
@@ -2687,7 +2687,7 @@ pub fn nano_main() {
     // Operating directory.
     #[cfg(feature = "operatingdir")]
     {
-        let has_opdir = with_state(|s| s.operating_dir.is_some());
+        let has_opdir = state().operating_dir.is_some();
         if has_opdir {
             files::init_operating_dir();
         }
@@ -2711,14 +2711,14 @@ pub fn nano_main() {
         });
 
         // Compile quoting regex.
-        let quotestr = with_state(|s| s.quotestr.clone().unwrap_or_default());
+        let quotestr = state().quotestr.clone().unwrap_or_default();
         match regex_lite::Regex::new(&quotestr) {
-            Ok(re) => with_state_mut(|s| s.quotereg = Some(re)),
+            Ok(re) => state_mut().quotereg = Some(re),
             Err(e) => {
                 die(&format!("Bad quoting regex \"{}\": {}", quotestr, e));
             }
         }
-        with_state_mut(|s| s.quotestr = None);
+        state_mut().quotestr = None;
     }
 
     // ----------------------------------------------------------------
@@ -2726,10 +2726,10 @@ pub fn nano_main() {
     // ----------------------------------------------------------------
     #[cfg(feature = "speller")]
     {
-        let has_speller = with_state(|s| s.alt_speller.is_some());
+        let has_speller = state().alt_speller.is_some();
         if !has_speller && !ISSET!(RESTRICTED) {
             if let Ok(spellenv) = std::env::var("SPELL") {
-                with_state_mut(|s| s.alt_speller = Some(spellenv));
+                state_mut().alt_speller = Some(spellenv);
             }
         }
         // Strip leading blanks from alt_speller.
@@ -2784,9 +2784,9 @@ pub fn nano_main() {
     UNSET!(BACKWARDS_SEARCH);
 
     // Default tabsize.
-    let tabsize = with_state(|s| s.tabsize);
+    let tabsize = state().tabsize;
     if tabsize == -1 {
-        with_state_mut(|s| s.tabsize = WIDTH_OF_TAB as isize);
+        state_mut().tabsize = WIDTH_OF_TAB as isize;
     }
 
     // ----------------------------------------------------------------
@@ -2813,10 +2813,10 @@ pub fn nano_main() {
             s.bardata.resize(needed, 0);
         });
     }
-    let sidebar = with_state(|s| s.sidebar);
-    let margin = with_state(|s| s.margin);
+    let sidebar = state().sidebar;
+    let margin = state().margin;
     let (_, cols) = winio::terminal_size();
-    with_state_mut(|s| s.editwincols = cols as i32 - margin - sidebar);
+    state_mut().editwincols = cols as i32 - margin - sidebar;
 
     // ----------------------------------------------------------------
     // Signal handlers
@@ -2879,7 +2879,7 @@ pub fn nano_main() {
 
     while file_idx < file_args_count {
         // Check we should keep reading.
-        let has_openfile = with_state(|s| s.openfile.is_some());
+        let has_openfile = state().openfile.is_some();
         if has_openfile && !read_them_all {
             break;
         }
@@ -3041,7 +3041,7 @@ pub fn nano_main() {
                         if found == 0 {
                             search::not_found_msg(&ss_clone);
                         } else {
-                            let lastmsg = with_state(|s| s.lastmessage);
+                            let lastmsg = state().lastmessage;
                             if lastmsg <= MessageType::Remark {
                                 winio::wipe_statusbar();
                             }
@@ -3055,7 +3055,7 @@ pub fn nano_main() {
                         search::tidy_up_after_search();
                     }
                     let ss_owned = ss_clone.clone();
-                    with_state_mut(|s| s.last_search = ss_owned);
+                    state_mut().last_search = ss_owned;
                 }
             }
         }
@@ -3071,7 +3071,7 @@ pub fn nano_main() {
     }
 
     // If no files were given, open a blank buffer.
-    let has_openfile = with_state(|s| s.openfile.is_some());
+    let has_openfile = state().openfile.is_some();
     if !has_openfile {
         files::open_buffer_impl("", true);
         UNSET!(VIEW_MODE);
@@ -3088,7 +3088,7 @@ pub fn nano_main() {
                     }
                 }
             });
-            let more_than_one = with_state(|s| s.more_than_one);
+            let more_than_one = state().more_than_one;
             if more_than_one {
                 files::mention_name_and_linecount();
             }
@@ -3103,7 +3103,7 @@ pub fn nano_main() {
     // Display any startup problem.
     #[cfg(any(feature = "nanorc", feature = "histories"))]
     {
-        let prob = with_state(|s| s.startup_problem.clone());
+        let prob = state().startup_problem.clone();
         if let Some(ref msg) = prob {
             let m = msg.clone();
             winio::statusline(MessageType::Alert, &m);
@@ -3136,7 +3136,7 @@ pub fn nano_main() {
     #[cfg(feature = "linenumbers")]
     with_state_mut(|s| s.margin = 12345);
 
-    with_state_mut(|s| s.we_are_running = true);
+    state_mut().we_are_running = true;
 
     // Kick off a background check for a newer release (set NANO_NO_UPDATE_CHECK
     // to disable). Best-effort and silent on failure; never blocks startup.
@@ -3162,14 +3162,14 @@ pub fn nano_main() {
         // On a VT, mute modifiers when no keys are waiting.
         #[cfg(target_os = "linux")]
         {
-            let on_vt = with_state(|s| s.on_a_vt);
+            let on_vt = state().on_a_vt;
             if on_vt && winio::waiting_keycodes() == 0 {
-                with_state_mut(|s| s.mute_modifiers = false);
+                state_mut().mute_modifiers = false;
             }
         }
 
         // Show the bottom bars when not in MMAIN.
-        let currmenu = with_state(|s| s.currmenu);
+        let currmenu = state().currmenu;
         if currmenu != MMAIN {
             winio::bottombars(MMAIN);
         }
@@ -3181,7 +3181,7 @@ pub fn nano_main() {
                 (s.flag_isset(SOFTWRAP), s.flag_isset(SOLO_SIDESCROLL), s.editwincols)
             });
             let want_united = !solo_sidescroll && !softwrap && editwincols > (2 * CUSHION + 2) as i32;
-            let united = with_state(|s| s.united_sidescroll);
+            let united = state().united_sidescroll;
             if united != want_united {
                 with_state_mut(|s| {
                     s.united_sidescroll = want_united;
@@ -3224,12 +3224,12 @@ pub fn nano_main() {
             }
         }
 
-        with_state_mut(|s| s.as_an_at = true);
+        state_mut().as_an_at = true;
 
         // BOM detection.
         #[cfg(all(feature = "utf8", not(feature = "tiny")))]
         {
-            let using_utf8 = with_state(|s| s.using_utf8);
+            let using_utf8 = state().using_utf8;
             let at_bom = with_state(|s| {
                 s.openfile.as_ref()
                     .and_then(|of| of.current.as_ref())

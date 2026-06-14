@@ -5,7 +5,7 @@
 
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::global::{with_state, with_state_mut, KEY_ENTER};
+use crate::global::{state, state_mut, with_state, with_state_mut, KEY_ENTER};
 
 
 // ---------------------------------------------------------------------------
@@ -45,9 +45,9 @@ macro_rules! bl_set {
 pub fn read_the_list(_path: &str, entries: Vec<String>) {
     use crate::utils::breadth;
 
-    let cols = with_state(|s| s.midwin.cols as i32);
-    let editwinrows = with_state(|s| s.editwinrows);
-    let zero = with_state(|s| s.flag_isset(ZERO));
+    let cols = state().midwin.cols as i32;
+    let editwinrows = state().editwinrows;
+    let zero = state().flag_isset(ZERO);
     let lines = with_state(|s| (s.midwin.rows + s.topwin.rows + s.footwin.rows) as i32);
 
     // Find the width of the widest filename in the current folder.
@@ -117,7 +117,7 @@ pub fn browser_refresh() {
     use crossterm::{queue, cursor::MoveTo, style::Print};
     use std::io::Write;
 
-    let present_path = with_state(|s| s.present_path.clone());
+    let present_path = state().present_path.clone();
     titlebar(present_path.as_deref());
     blank_edit();
 
@@ -126,10 +126,10 @@ pub fn browser_refresh() {
     let usable_rows = bl_get!(USABLE_ROWS);
     let piles = bl_get!(PILES) as usize;
     let gauge = bl_get!(GAUGE) as usize;
-    let show_cursor = with_state(|s| s.flag_isset(SHOW_CURSOR));
-    let cols = with_state(|s| s.midwin.cols as usize);
+    let show_cursor = state().flag_isset(SHOW_CURSOR);
+    let cols = state().midwin.cols as usize;
     let (midwin_y, midwin_x) = with_state(|s| (s.midwin.y, s.midwin.x));
-    let selected_pair = with_state(|s| s.interface_color_pair[SELECTED_TEXT]);
+    let selected_pair = state().interface_color_pair[SELECTED_TEXT];
 
     let mut row: usize = 0;
     let mut col: usize = 0;
@@ -333,8 +333,8 @@ pub fn search_filename(forwards: bool) {
     use crate::utils::breadth;
     use crate::winio::display_string;
 
-    let last_search = with_state(|s| s.last_search.clone());
-    let cols = with_state(|s| s.midwin.cols as usize);
+    let last_search = state().last_search.clone();
+    let cols = state().midwin.cols as usize;
 
     // If something was searched for before, show it between square brackets.
     let thedefault: String = if !last_search.is_empty() {
@@ -363,9 +363,9 @@ pub fn search_filename(forwards: bool) {
     }
 
     // If the user typed an answer, remember it.
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     if !answer.is_empty() {
-        with_state_mut(|s| s.last_search = answer.clone());
+        state_mut().last_search = answer.clone();
         #[cfg(feature = "histories")]
         {
             use crate::history::{update_history};
@@ -374,7 +374,7 @@ pub fn search_filename(forwards: bool) {
     }
 
     if response == 0 || response == -2 {
-        let last = with_state(|s| s.last_search.clone());
+        let last = state().last_search.clone();
         findfile(&last, forwards);
     }
 }
@@ -389,19 +389,19 @@ pub fn research_filename(forwards: bool) {
 
     #[cfg(feature = "histories")]
     {
-        let last_search = with_state(|s| s.last_search.clone());
+        let last_search = state().last_search.clone();
         if last_search.is_empty() {
             // Take the last item from history.
             let hist_last = with_state(|s| {
                 s.search_history_items.last().cloned()
             });
             if let Some(item) = hist_last {
-                with_state_mut(|s| s.last_search = item);
+                state_mut().last_search = item;
             }
         }
     }
 
-    let last_search = with_state(|s| s.last_search.clone());
+    let last_search = state().last_search.clone();
     if last_search.is_empty() {
         statusbar("No current search pattern");
     } else {
@@ -509,13 +509,13 @@ pub fn browse(initial_path: String) -> Option<String> {
                 statusline(MessageType::Alert, &msg);
                 // If we don't have a file list, there is nothing to show.
                 if bl_get!(LIST_LENGTH) == 0 {
-                    with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+                    state_mut().lastmessage = MessageType::Vacuum;
                     drop(present_name);
                     napms(1200);
                     return None;
                 }
                 // Fall back to current path.
-                let prev_path = with_state(|s| s.present_path.clone())
+                let prev_path = state().present_path.clone()
                     .unwrap_or_else(|| ".".to_string());
                 let fallback = FILELIST.with(|fl| {
                     let sel = bl_get!(SELECTED);
@@ -546,7 +546,7 @@ pub fn browse(initial_path: String) -> Option<String> {
 
         let mut old_selected: usize = usize::MAX;
 
-        with_state_mut(|s| s.present_path = Some(path.clone()));
+        state_mut().present_path = Some(path.clone());
         titlebar(Some(&path));
 
         let list_length = bl_get!(LIST_LENGTH);
@@ -559,12 +559,12 @@ pub fn browse(initial_path: String) -> Option<String> {
 
         // Inner loop: handle keystrokes until a file is selected or user exits.
         loop {
-            with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+            state_mut().lastmessage = MessageType::Vacuum;
 
             bottombars(MBROWSER);
 
             let selected = bl_get!(SELECTED);
-            let show_cursor = with_state(|s| s.flag_isset(SHOW_CURSOR));
+            let show_cursor = state().flag_isset(SHOW_CURSOR);
 
             if old_selected != selected || show_cursor {
                 browser_refresh();
@@ -623,7 +623,7 @@ pub fn browse(initial_path: String) -> Option<String> {
             let usable_rows = bl_get!(USABLE_ROWS);
             let piles = bl_get!(PILES) as usize;
             let _gauge_val = bl_get!(GAUGE) as usize;
-            let _cols = with_state(|s| s.midwin.cols as usize);
+            let _cols = state().midwin.cols as usize;
 
             if function == Some(do_help as crate::definitions::FuncPtr) {
                 do_help();
@@ -737,28 +737,28 @@ pub fn browse(initial_path: String) -> Option<String> {
                     statusbar("Cancelled");
                     // Fall through to testresize check.
                 } else {
-                    let answer = with_state(|s| s.answer.clone());
+                    let answer = state().answer.clone();
                     let mut new_path = expand_leading_tilde(&answer);
 
                     // If the given path is relative, join it with the current path.
                     if !new_path.starts_with('/') {
-                        let cur_path = with_state(|s| s.present_path.clone())
+                        let cur_path = state().present_path.clone()
                             .unwrap_or_default();
                         new_path = format!("{}{}", cur_path, answer);
                     }
 
                     #[cfg(feature = "operatingdir")]
                     {
-                        if let Some(ref opdir) = with_state(|s| s.operating_dir.clone()) {
+                        if let Some(ref opdir) = state().operating_dir.clone() {
                             if outside_of_confinement(&new_path, false) {
                                 let msg = format!("Can't go outside of {}", opdir);
                                 statusline(MessageType::Alert, &msg);
-                                path = with_state(|s| s.present_path.clone())
+                                path = state().present_path.clone()
                                     .unwrap_or_else(|| ".".to_string());
                                 // goto testresize — fall through
                                 #[cfg(not(feature = "tiny"))]
                                 {
-                                    let resized = with_state(|s| s.resized_for_browser);
+                                    let resized = state().resized_for_browser;
                                     if kbinput == THE_WINDOW_RESIZED as i32 || resized {
                                         present_name = FILELIST.with(|fl| {
                                             fl.borrow().get(bl_get!(SELECTED)).cloned()
@@ -800,7 +800,7 @@ pub fn browse(initial_path: String) -> Option<String> {
 
                 #[cfg(feature = "operatingdir")]
                 {
-                    if let Some(ref opdir) = with_state(|s| s.operating_dir.clone()) {
+                    if let Some(ref opdir) = state().operating_dir.clone() {
                         if outside_of_confinement(&selected_file, false) {
                             let msg = format!("Can't go outside of {}", opdir);
                             statusline(MessageType::Alert, &msg);
@@ -879,7 +879,7 @@ pub fn browse(initial_path: String) -> Option<String> {
             // testresize: handle terminal resize.
             #[cfg(not(feature = "tiny"))]
             {
-                let resized = with_state(|s| s.resized_for_browser);
+                let resized = state().resized_for_browser;
                 if kbinput == THE_WINDOW_RESIZED as i32 || resized {
                     present_name = FILELIST.with(|fl| {
                         fl.borrow().get(bl_get!(SELECTED)).cloned()
@@ -941,7 +941,7 @@ pub fn browse_in(inpath: &str) -> Option<String> {
 
     #[cfg(feature = "operatingdir")]
     {
-        if let Some(ref opdir) = with_state(|s| s.operating_dir.clone()) {
+        if let Some(ref opdir) = state().operating_dir.clone() {
             if outside_of_confinement(&path, false) {
                 path = opdir.clone();
             }

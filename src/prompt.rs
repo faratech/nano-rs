@@ -9,7 +9,7 @@
 // (at your option) any later version.
 
 use crate::definitions::*;
-use crate::global::{with_state, with_state_mut};
+use crate::global::{state, state_mut, with_state, with_state_mut};
 
 // Bring the exported macros into scope.
 use crate::{ISSET, TOGGLE};
@@ -68,7 +68,7 @@ pub fn do_statusbar_home() {
 /* C: void do_statusbar_end(void) */
 /// Move to the end of the answer.
 pub fn do_statusbar_end() {
-    let len = with_state(|s| s.answer.len());
+    let len = state().answer.len();
     set_typing_x(len);
 }
 
@@ -76,7 +76,7 @@ pub fn do_statusbar_end() {
 /// Move to the previous word in the answer.
 #[cfg(not(feature = "tiny"))]
 pub fn do_statusbar_prev_word() {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let mut typing_x = get_typing_x();
     let mut seen_a_word = false;
     let mut step_forward = false;
@@ -108,7 +108,7 @@ pub fn do_statusbar_prev_word() {
 /// Move to the next word in the answer.
 #[cfg(not(feature = "tiny"))]
 pub fn do_statusbar_next_word() {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let mut typing_x = get_typing_x();
 
     let seen_space_init = !is_word_char(&answer[typing_x..], false);
@@ -150,7 +150,7 @@ pub fn do_statusbar_next_word() {
 /* C: void do_statusbar_left(void) */
 /// Move left one character in the answer.
 pub fn do_statusbar_left() {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let mut typing_x = get_typing_x();
 
     if typing_x > 0 {
@@ -167,7 +167,7 @@ pub fn do_statusbar_left() {
 /* C: void do_statusbar_right(void) */
 /// Move right one character in the answer.
 pub fn do_statusbar_right() {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let mut typing_x = get_typing_x();
 
     if typing_x < answer.len() {
@@ -191,7 +191,7 @@ pub fn do_statusbar_backspace() {
     let mut typing_x = get_typing_x();
     if typing_x > 0 {
         let was_x = typing_x;
-        let answer = with_state(|s| s.answer.clone());
+        let answer = state().answer.clone();
         typing_x = step_left(&answer, typing_x);
         with_state_mut(|s| {
             s.answer.drain(typing_x..was_x);
@@ -204,7 +204,7 @@ pub fn do_statusbar_backspace() {
 /// Delete one character in the answer.
 pub fn do_statusbar_delete() {
     let typing_x = get_typing_x();
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
 
     if typing_x < answer.len() {
         let charlen = char_length(&answer[typing_x..]);
@@ -213,7 +213,7 @@ pub fn do_statusbar_delete() {
         });
         #[cfg(feature = "utf8")]
         {
-            let answer2 = with_state(|s| s.answer.clone());
+            let answer2 = state().answer.clone();
             if typing_x < answer2.len() && is_zerowidth(&answer2[typing_x..]) {
                 do_statusbar_delete();
             }
@@ -246,7 +246,7 @@ pub fn lop_the_answer() {
 /// Copy the current answer (if any) into the cutbuffer.
 #[cfg(not(feature = "tiny"))]
 pub fn copy_the_answer() {
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     if !answer.is_empty() {
         // free_lines(cutbuffer)  →  drop old cutbuffer
         // cutbuffer = make_new_node(NULL);  cutbuffer->data = copy_of(answer)
@@ -315,7 +315,7 @@ pub fn process_prompt_click() -> i32 {
         if rel_row == 0 && rel_col >= 0 {
             let prompt_str = get_prompt();
             let start_col = breadth(&prompt_str) + 2;
-            let answer = with_state(|s| s.answer.clone());
+            let answer = state().answer.clone();
             let typing_x = get_typing_x();
 
             if rel_col >= start_col as i32 {
@@ -384,8 +384,8 @@ pub fn do_statusbar_verbatim_input() {
 /// Add the given input to the input buffer when it's a normal byte,
 /// and inject the gathered bytes into the answer when ready.
 pub fn absorb_character(input: i32, function: Option<FuncPtr>) {
-    let meta_key = with_state(|s| s.meta_key);
-    let currmenu = with_state(|s| s.currmenu);
+    let meta_key = state().meta_key;
+    let currmenu = state().currmenu;
     let openfile_filename_empty = with_state(|s| {
         s.openfile.as_ref().map(|f| f.filename.is_empty()).unwrap_or(true)
     });
@@ -449,7 +449,7 @@ pub fn handle_editing(function: FuncPtr) -> bool {
         /* When in restricted mode at the "Write File" prompt and the
          * filename isn't blank, disallow any input and deletion. */
         let restricted = ISSET!(RESTRICTED);
-        let at_writefile = with_state(|s| s.currmenu) == MWRITEFILE;
+        let at_writefile = state().currmenu == MWRITEFILE;
         let filename_nonempty = with_state(|s| {
             s.openfile.as_ref().map(|f| !f.filename.is_empty()).unwrap_or(false)
         });
@@ -485,7 +485,7 @@ pub fn handle_editing(function: FuncPtr) -> bool {
     } {
         #[cfg(not(feature = "tiny"))]
         {
-            let has_cutbuffer = with_state(|s| s.cutbuffer.is_some());
+            let has_cutbuffer = state().cutbuffer.is_some();
             if has_cutbuffer {
                 paste_into_answer();
             }
@@ -536,7 +536,7 @@ pub fn put_cursor_at_end_of_answer() {
 /// Redraw the prompt bar and place the cursor at the right spot.
 pub fn draw_the_promptbar() {
     let prompt_str = get_prompt();
-    let answer = with_state(|s| s.answer.clone());
+    let answer = state().answer.clone();
     let typing_x = get_typing_x();
 
     let base = breadth(&prompt_str) + 2;
@@ -551,7 +551,7 @@ pub fn draw_the_promptbar() {
     let cols = crate::winio::get_cols();
 
     // Color the prompt bar over its full width.
-    let prompt_bar_pair = with_state(|s| s.interface_color_pair[PROMPT_BAR]);
+    let prompt_bar_pair = state().interface_color_pair[PROMPT_BAR];
     crate::winio::footwin_wattron(prompt_bar_pair);
     // mvwprintw(footwin, 0, 0, "%*s", COLS, " ") — fill with spaces
     crate::winio::footwin_mvwprintw_spaces(0, 0, cols);
@@ -627,7 +627,7 @@ fn acquire_an_answer(
 
     // Make sure typing_x is within bounds.
     {
-        let answer_len = with_state(|s| s.answer.len());
+        let answer_len = state().answer.len();
         if get_typing_x() > answer_len {
             set_typing_x(answer_len);
         }
@@ -715,17 +715,17 @@ fn acquire_an_answer(
                 {
                     if let Some(kind) = history_kind {
                         if !previous_was_tab {
-                            fragment_length = with_state(|s| s.answer.len());
+                            fragment_length = state().answer.len();
                         }
 
                         if fragment_length > 0 {
                             let new_answer = crate::history::get_history_completion(
                                 kind,
-                                &with_state(|s| s.answer.clone()),
+                                &state().answer.clone(),
                                 fragment_length,
                             );
                             let new_len = new_answer.len();
-                            with_state_mut(|s| s.answer = new_answer);
+                            state_mut().answer = new_answer;
                             set_typing_x(new_len);
                         }
                     } else {
@@ -763,13 +763,13 @@ fn acquire_an_answer(
                 /* When moving up from the bottom, remember the current answer. */
                 let at_bottom = is_history_at_bottom(kind);
                 if at_bottom {
-                    stored_string = Some(with_state(|s| s.answer.clone()));
+                    stored_string = Some(state().answer.clone());
                 }
 
                 /* If there is an older item, move to it and copy its string. */
                 if let Some(older) = get_older_history_item(kind) {
                     let len = older.len();
-                    with_state_mut(|s| s.answer = older);
+                    state_mut().answer = older;
                     set_typing_x(len);
                 }
             } else if is_newer && history_kind.is_some() {
@@ -778,17 +778,17 @@ fn acquire_an_answer(
                 /* If there is a newer item, move to it and copy its string. */
                 if let Some(newer) = get_newer_history_item(kind) {
                     let len = newer.len();
-                    with_state_mut(|s| s.answer = newer);
+                    state_mut().answer = newer;
                     set_typing_x(len);
                 }
 
                 /* When at the bottom of the history list, restore the old answer. */
                 if is_history_at_bottom(kind) {
                     if let Some(ref stored) = stored_string {
-                        if with_state(|s| s.answer.is_empty()) {
+                        if state().answer.is_empty() {
                             let s2 = stored.clone();
                             let len = s2.len();
-                            with_state_mut(|s| s.answer = s2);
+                            state_mut().answer = s2;
                             set_typing_x(len);
                         }
                     }
@@ -813,7 +813,7 @@ fn acquire_an_answer(
     #[cfg(not(feature = "tiny"))]
     {
         /* When an external command was run, clear a possibly stashed answer. */
-        let at_execute = with_state(|s| s.currmenu) == MEXECUTE;
+        let at_execute = state().currmenu == MEXECUTE;
         let is_enter = function.map_or(false, |f| f == crate::global::do_enter as FuncPtr);
         if at_execute && is_enter {
             // *foretext = '\0'
@@ -870,11 +870,11 @@ fn history_handle_other(function: Option<FuncPtr>, refresh_func: Option<fn()>) {
             if toggle_is_no_help {
                 TOGGLE!(NO_HELP);
                 crate::nano::window_init();
-                with_state_mut(|s| s.focusing = false);
+                state_mut().focusing = false;
                 if let Some(rf) = refresh_func {
                     rf();
                 }
-                crate::winio::bottombars(with_state(|s| s.currmenu));
+                crate::winio::bottombars(state().currmenu);
                 return;
             }
         }
@@ -901,9 +901,9 @@ fn history_handle_other(function: Option<FuncPtr>, refresh_func: Option<fn()>) {
                 #[cfg(not(feature = "tiny"))]
                 {
                     /* When invoking a tool at the Execute prompt, stash an "answer". */
-                    let at_execute = with_state(|s| s.currmenu) == MEXECUTE;
+                    let at_execute = state().currmenu == MEXECUTE;
                     if at_execute {
-                        let ans = with_state(|s| s.answer.clone());
+                        let ans = state().answer.clone();
                         with_state_mut(|s| {
                             s.foretext = Some(ans);
                         });
@@ -997,16 +997,16 @@ fn get_newer_history_item(kind: crate::history::HistoryKind) -> Option<String> {
 /// C: answer = input_tab(answer, &typing_x, refresh_func, listed)
 #[cfg(feature = "tabcomp")]
 fn do_tab_complete(refresh_func: Option<fn()>, listed: &mut bool) {
-    let currmenu = with_state(|s| s.currmenu);
+    let currmenu = state().currmenu;
     let restricted = ISSET!(RESTRICTED);
 
     /* Allow tab completion of filenames, but not in restricted mode. */
     if (currmenu & (MINSERTFILE | MWRITEFILE | MGOTODIR)) != 0 && !restricted {
-        let answer = with_state(|s| s.answer.clone());
+        let answer = state().answer.clone();
         let mut tx = get_typing_x();
         let new_answer = crate::files::input_tab(&answer, &mut tx, refresh_func.unwrap_or(|| {}), listed);
         let _new_len = new_answer.len();
-        with_state_mut(|s| s.answer = new_answer);
+        state_mut().answer = new_answer;
         set_typing_x(tx);
     }
 }
@@ -1049,9 +1049,9 @@ pub fn do_prompt(
     /* Set the answer to the provided default, if any. */
     {
         let provided_str = provided.unwrap_or("");
-        let cur_answer = with_state(|s| s.answer.clone());
+        let cur_answer = state().answer.clone();
         if cur_answer != provided_str {
-            with_state_mut(|s| s.answer = provided_str.to_string());
+            state_mut().answer = provided_str.to_string();
         }
     }
 
@@ -1069,7 +1069,7 @@ pub fn do_prompt(
         prompt_buf.truncate(trunc_x);
         set_prompt(prompt_buf);
 
-        with_state_mut(|s| s.lastmessage = MessageType::Vacuum);
+        state_mut().lastmessage = MessageType::Vacuum;
 
         let (function, retval_raw) = acquire_an_answer(history_kind, refresh_func, &mut listed);
 
@@ -1108,12 +1108,12 @@ pub fn do_prompt(
         let retval = if function.map_or(false, |f| f == crate::global::do_cancel as FuncPtr) {
             -1
         } else if function.map_or(false, |f| f == crate::global::do_enter as FuncPtr) {
-            if with_state(|s| s.answer.is_empty()) { -2 } else { 0 }
+            if state().answer.is_empty() { -2 } else { 0 }
         } else {
             retval_raw
         };
 
-        let last_vacuum = with_state(|s| s.lastmessage == MessageType::Vacuum);
+        let last_vacuum = state().lastmessage == MessageType::Vacuum;
         if last_vacuum {
             crate::winio::wipe_statusbar();
         }
@@ -1196,7 +1196,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
         }
 
         /* Color the prompt bar over its full width and display the question. */
-        let prompt_bar_pair = with_state(|s| s.interface_color_pair[PROMPT_BAR]);
+        let prompt_bar_pair = state().interface_color_pair[PROMPT_BAR];
         let cols = crate::winio::get_cols();
         crate::winio::footwin_wattron(prompt_bar_pair);
         crate::winio::footwin_mvwprintw_spaces(0, 0, cols);
@@ -1205,7 +1205,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
         crate::winio::footwin_wattroff(prompt_bar_pair);
         crate::winio::footwin_wnoutrefresh();
 
-        with_state_mut(|s| s.currmenu = MYESNO);
+        state_mut().currmenu = MYESNO;
 
         /* When not replacing, show the cursor while waiting for a key. */
         kbinput = crate::winio::get_kbinput(!withall);
@@ -1269,9 +1269,9 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
                     TOGGLE!(NO_HELP);
                     crate::nano::window_init();
                     crate::winio::titlebar(None);
-                    with_state_mut(|s| s.focusing = false);
+                    state_mut().focusing = false;
                     crate::winio::edit_refresh();
-                    with_state_mut(|s| s.focusing = true);
+                    state_mut().focusing = true;
                 }
             }
         }
@@ -1283,7 +1283,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
             choice = NO;
             if kbinput != b'\x0E' as i32 {
                 // ^X^Q makes nano exit with an error.
-                with_state_mut(|s| s.final_status = 2);
+                state_mut().final_status = 2;
             }
         }
         /* Also, interpret ^Y as "Yes", and ^A as "All". */
