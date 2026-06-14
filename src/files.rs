@@ -1075,7 +1075,16 @@ pub fn close_buffer_impl() {
 // C: char *encode_data(char *text, size_t length)
 // ---------------------------------------------------------------------------
 pub fn encode_data(buf: &[u8]) -> String {
-    // Replace NUL bytes with LF (0x0A) as in the C version's recode_NUL_to_LF
+    // Fast path: the overwhelmingly common case is a line with no NUL bytes, so
+    // skip the recode allocation entirely and validate the slice in place.
+    if !buf.contains(&0) {
+        return match std::str::from_utf8(buf) {
+            Ok(s) => s.to_owned(),
+            Err(_) => String::from_utf8_lossy(buf).into_owned(),
+        };
+    }
+    // NUL present: replace NUL bytes with LF (0x0A) as in C's recode_NUL_to_LF,
+    // then decode (lossily, matching the previous behaviour exactly).
     let recoded: Vec<u8> = buf.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
     String::from_utf8_lossy(&recoded).into_owned()
 }
@@ -1176,48 +1185,57 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         true
     };
 
-    // Parse the content into lines
-    let mut line_buf: Vec<u8> = Vec::with_capacity(LUMPSIZE);
+    // Parse the content into lines. Walk newline-to-newline over slices of the
+    // already-read buffer instead of copying byte-by-byte into a scratch Vec; the
+    // newline search auto-vectorizes and each line is sliced, not re-copied.
     #[cfg(not(feature = "tiny"))]
     let mut format = FormatType::NixFile;
 
-    for &byte in &content {
+    // Pre-size the line arena from the file length so the slab Vec doesn't have to
+    // grow-and-memcpy repeatedly while reading (avg line ~48 bytes incl. newline).
+    state_mut().lines.reserve(content.len() / 48 + 8);
+
+    let mut start = 0usize;
+    while start < content.len() {
+        let nl = match content[start..].iter().position(|&b| b == b'\n') {
+            Some(rel) => start + rel,
+            None => break, // no further newline; trailing bytes handled below
+        };
         if state().control_C_was_pressed {
             break;
         }
 
-        if byte == b'\n' {
-            #[cfg(not(feature = "tiny"))]
-            {
-                // Strip CR before LF when not in NO_CONVERT mode
-                if !line_buf.is_empty() && *line_buf.last().unwrap() == b'\r' && !ISSET!(NO_CONVERT) {
-                    if num_lines == 0 {
-                        format = FormatType::DosFile;
-                    }
-                    line_buf.pop();
+        let mut line: &[u8] = &content[start..nl];
+        #[cfg(not(feature = "tiny"))]
+        {
+            // Strip a CR immediately before the LF (DOS line ending).
+            if line.last() == Some(&b'\r') && !ISSET!(NO_CONVERT) {
+                if num_lines == 0 {
+                    format = FormatType::DosFile;
                 }
+                line = &line[..line.len() - 1];
             }
-            // Store the line
-            let linedata = encode_data(&line_buf);
-            bottomline.borrow_mut().data = linedata;
-
-            // Make a new node for next line
-            let newline = make_new_node(Some(bottomline.clone()));
-            newline.borrow_mut().lineno = (num_lines + 2) as isize;
-            bottomline.borrow_mut().next = Some(newline.clone());
-            bottomline = newline;
-            num_lines += 1;
-            line_buf.clear();
-        } else {
-            line_buf.push(byte);
         }
+        bottomline.borrow_mut().data = encode_data(line);
+
+        // Make a new node for the next line.
+        let newline = make_new_node(Some(bottomline.clone()));
+        newline.borrow_mut().lineno = (num_lines + 2) as isize;
+        bottomline.borrow_mut().next = Some(newline.clone());
+        bottomline = newline;
+        num_lines += 1;
+        start = nl + 1;
     }
 
-    // Handle last line (which may or may not end with newline)
-    if line_buf.is_empty() {
+    // Handle the final segment after the last newline (may be empty when the file
+    // ends in '\n'). If the read was interrupted by ^C (the flag may already be set
+    // on entry, before any newline is seen), finalize with an empty line — matching
+    // the old byte-loop, which broke immediately and never emitted the remainder.
+    let tail: &[u8] = if state().control_C_was_pressed { &[] } else { &content[start..] };
+    if tail.is_empty() {
         bottomline.borrow_mut().data = String::new();
     } else {
-        bottomline.borrow_mut().data = encode_data(&line_buf);
+        bottomline.borrow_mut().data = encode_data(tail);
         num_lines += 1;
     }
 

@@ -422,14 +422,22 @@ pub fn char_length(s: &str) -> usize {
 /* C: size_t mbstrlen(const char *pointer)
  * Return the number of (multibyte) characters in the given string. */
 pub fn mbstrlen(s: &str) -> usize {
-    let mut count = 0;
-    let mut pos = 0;
     let bytes = s.as_bytes();
-    while pos < bytes.len() && bytes[pos] != 0 {
-        pos += char_length(&s[pos..]);
-        count += 1;
+    // nano treats an embedded NUL as the end of the string (C string semantics).
+    let end = match bytes.iter().position(|&b| b == 0) {
+        Some(p) => p,
+        None => bytes.len(),
+    };
+    if !using_utf8() {
+        // Single-byte locale: exactly one character per byte.
+        return end;
     }
-    count
+    // UTF-8: the character count is the number of bytes that are NOT continuation
+    // bytes (0x80..=0xBF). Because a Rust &str is always well-formed UTF-8, this is
+    // identical to walking char_length() per character, but in one branch-light,
+    // auto-vectorizable pass instead of a function call per character — this is the
+    // dominant cost in count_chars_in_chain / totsize on large files.
+    bytes[..end].iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
 /* C: int collect_char(const char *string, char *thechar)

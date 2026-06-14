@@ -600,23 +600,29 @@ pub fn findnextstr(
             }
         };
 
-        let line_data = current_line.borrow().data.clone();
         let backwards = ISSET!(BACKWARDS_SEARCH);
 
-        let found_offset: Option<usize> = if skipone {
-            skipone = false;
-            if backwards && from_offset != 0 {
-                let new_from = step_left(&line_data, from_offset);
-                strstrwrapper(&line_data, needle, new_from)
-                    .filter(|&pos| if backwards { pos <= new_from } else { pos >= new_from })
-            } else if !backwards && from_offset < line_data.len() {
-                let new_from = from_offset + char_length(&line_data[from_offset..]);
-                strstrwrapper(&line_data, needle, new_from)
+        // Scan this line for the needle against a borrow of its data. The common
+        // case is "no match", so borrowing avoids cloning the whole line String on
+        // every line walked (the dominant per-line cost of a full-buffer search).
+        let found_offset: Option<usize> = {
+            let guard = current_line.borrow();
+            let ld: &str = &guard.data;
+            if skipone {
+                skipone = false;
+                if backwards && from_offset != 0 {
+                    let new_from = step_left(ld, from_offset);
+                    strstrwrapper(ld, needle, new_from)
+                        .filter(|&pos| if backwards { pos <= new_from } else { pos >= new_from })
+                } else if !backwards && from_offset < ld.len() {
+                    let new_from = from_offset + char_length(&ld[from_offset..]);
+                    strstrwrapper(ld, needle, new_from)
+                } else {
+                    None
+                }
             } else {
-                None
+                strstrwrapper(ld, needle, from_offset)
             }
-        } else {
-            strstrwrapper(&line_data, needle, from_offset)
         };
 
         // Filter for backwards: strstrwrapper with backwards returns last match
@@ -627,6 +633,10 @@ pub fn findnextstr(
         });
 
         if let Some(found_x) = found_offset {
+            // A match was found (rare relative to lines scanned) — now materialize
+            // the line data so the found-handling below is unchanged.
+            let line_data = current_line.borrow().data.clone();
+
             // When doing regex search, compute the length of the match.
             if ISSET!(USE_REGEXP) {
                 let (rm_so, rm_eo) = state().regmatches[0];

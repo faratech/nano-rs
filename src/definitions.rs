@@ -610,6 +610,13 @@ impl LineArena {
         self.slots[idx as usize].node.as_mut().expect("live line node")
     }
 
+    /// Pre-grow the slab so a bulk insert (e.g. a file read) doesn't repeatedly
+    /// reallocate and memcpy the backing Vec. Approximate; the arena still grows
+    /// on demand if the estimate is low.
+    pub fn reserve(&mut self, additional: usize) {
+        self.slots.reserve(additional);
+    }
+
     /// Count of live nodes — for debug invariants.
     pub fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.strong > 0).count()
