@@ -687,8 +687,18 @@ pub fn findnextstr(
     // Record the begin line number for full-circle detection.
     let begin_lineno: isize = begin.map(|b| b.borrow().lineno).unwrap_or(-1);
 
-    // Record the time for "Searching..." feedback.
+    // Record the time for "Searching..." feedback. The monotonic clock is
+    // sampled only once every CLOCK_CHECK_INTERVAL scanned lines: Instant::now()
+    // is a clock_gettime, which on some platforms (notably WSL2/ARM64) traps to a
+    // real syscall instead of the vDSO and — when called once per line — utterly
+    // dominated full-buffer search CPU (~89% of samples in a profile; the actual
+    // matching was ~6%). The check only drives the cosmetic "Searching..." status
+    // and a (stubbed) cancel poll, so coarser sampling is behavior-equivalent for
+    // search results. C affords a per-line time(NULL) because that hits the cheap
+    // vDSO path.
     let mut lastkbcheck = std::time::Instant::now();
+    let mut lines_since_clock: u32 = 0;
+    const CLOCK_CHECK_INTERVAL: u32 = 1024;
 
     // Read the loop-invariant search flags once (they can't change mid-search),
     // so the per-line loop and strstrwrapper never re-enter the thread-local
@@ -905,15 +915,20 @@ pub fn findnextstr(
             0
         };
 
-        // Periodically check for cancel keystroke.
-        if lastkbcheck.elapsed().as_secs() > 0 {
-            lastkbcheck = std::time::Instant::now();
+        // Periodically check for cancel keystroke / show "Searching...". Sample
+        // the (syscall-expensive) monotonic clock only every Nth scanned line.
+        lines_since_clock += 1;
+        if lines_since_clock >= CLOCK_CHECK_INTERVAL {
+            lines_since_clock = 0;
+            if lastkbcheck.elapsed().as_secs() > 0 {
+                lastkbcheck = std::time::Instant::now();
 
-            // In the real implementation we'd call wgetch and check for cancel.
-            // For now, just update the feedback counter.
-            feedback += 1;
-            if feedback > 0 {
-                statusbar("Searching...");
+                // In the real implementation we'd call wgetch and check for cancel.
+                // For now, just update the feedback counter.
+                feedback += 1;
+                if feedback > 0 {
+                    statusbar("Searching...");
+                }
             }
         }
     }
