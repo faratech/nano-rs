@@ -257,7 +257,6 @@ pub fn copy_the_answer() {
             prev: None,
             #[cfg(feature = "color")]
             multidata: Vec::new(),
-            #[cfg(not(feature = "tiny"))]
             has_anchor: false,
         });
         with_state_mut(|s| {
@@ -793,13 +792,13 @@ fn acquire_an_answer(
                 }
             } else {
                 // fall through to other checks
-                history_handle_other(function, refresh_func);
+                history_handle_other(function, input, refresh_func);
             }
         }
 
         #[cfg(not(feature = "histories"))]
         {
-            history_handle_other(function, refresh_func);
+            history_handle_other(function, input, refresh_func);
         }
 
         #[cfg(all(feature = "histories", feature = "tabcomp"))]
@@ -839,7 +838,7 @@ fn acquire_an_answer(
 /// Handle do_help / full_refresh / do_toggle / do_nothing / implant and
 /// non-editing shortcuts.  Factored out so it can be called from both the
 /// histories branch and the no-histories branch.
-fn history_handle_other(function: Option<FuncPtr>, refresh_func: Option<fn()>) {
+fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Option<fn()>) {
     let is_help      = function.map_or(false, |f| f == crate::global::do_help         as FuncPtr);
     let is_refresh   = function.map_or(false, |f| f == crate::global::full_refresh     as FuncPtr);
 
@@ -885,9 +884,25 @@ fn history_handle_other(function: Option<FuncPtr>, refresh_func: Option<fn()>) {
 
     #[cfg(feature = "nanorc")]
     {
-        // implant check: if function == implant, call implant(shortcut->expansion)
-        // We skip this for now since implant has a special C signature.
-        // TODO: wire up implant properly when rcfile.rs is ported.
+        if function.map_or(false, |f| f == crate::rcfile::implant_sentinel as FuncPtr) {
+            let expansion = with_state(|s| {
+                let currmenu = s.currmenu;
+                s.sclist.iter()
+                    .find(|sc| {
+                        sc.keycode == input
+                            && sc.func == function
+                            && (sc.menus as u32 & currmenu) != 0
+                    })
+                    .and_then(|sc| sc.expansion.clone())
+            });
+
+            if let Some(expansion) = expansion {
+                crate::winio::implant(&expansion);
+            } else {
+                crate::winio::beep();
+            }
+            return;
+        }
     }
 
     // Generic shortcut: run it if not view-mode or if it doesn't change content.

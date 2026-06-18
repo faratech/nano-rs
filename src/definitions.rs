@@ -187,7 +187,6 @@ pub const NO_SUCH_FUNCTION:  u32 = 0x4EF;
 pub const KEY_CENTER: u32 = 0x4F0;
 
 /// Synthetic keycode sent when a SIGWINCH (window resize) is received.
-#[cfg(not(feature = "tiny"))]
 pub const THE_WINDOW_RESIZED: u32 = 0x4F7;
 
 /// An unknown / unrecognised escape sequence was received.
@@ -828,7 +827,6 @@ pub struct LineNode {
     #[cfg(feature = "color")]
     pub multidata: Vec<i16>,
     /// Whether the user has placed an anchor on this line.
-    #[cfg(not(feature = "tiny"))]
     pub has_anchor: bool,
 }
 
@@ -841,7 +839,6 @@ impl Default for LineNode {
             prev: None,
             #[cfg(feature = "color")]
             multidata: Vec::new(),
-            #[cfg(not(feature = "tiny"))]
             has_anchor: false,
         }
     }
@@ -851,7 +848,6 @@ impl Default for LineNode {
 
 /// A group of lines that were indented/unindented together.
 /// C: typedef struct groupstruct { … } groupstruct;
-#[cfg(not(feature = "tiny"))]
 #[derive(Debug)]
 pub struct GroupStruct {
     /// The 1-based line number of the first line in the group.
@@ -864,7 +860,6 @@ pub struct GroupStruct {
     pub next: Option<Box<GroupStruct>>,
 }
 
-#[cfg(not(feature = "tiny"))]
 impl Default for GroupStruct {
     fn default() -> Self {
         GroupStruct {
@@ -878,7 +873,6 @@ impl Default for GroupStruct {
 
 /// One item in the undo/redo history stack.
 /// C: typedef struct undostruct { … } undostruct;
-#[cfg(not(feature = "tiny"))]
 #[derive(Debug)]
 pub struct UndoStruct {
     /// The type of operation this record covers.
@@ -907,7 +901,6 @@ pub struct UndoStruct {
     pub next: Option<Box<UndoStruct>>,
 }
 
-#[cfg(not(feature = "tiny"))]
 impl Default for UndoStruct {
     fn default() -> Self {
         UndoStruct {
@@ -1024,34 +1017,27 @@ pub struct OpenFileStruct {
     #[cfg(feature = "wrapping")]
     pub spillage_line: Option<LinePtr>,
     /// The line where the mark anchor is set; `None` if no mark.
-    #[cfg(not(feature = "tiny"))]
     pub mark: Option<LinePtr>,
     /// The byte offset of the mark within `mark`.
-    #[cfg(not(feature = "tiny"))]
     pub mark_x: usize,
     /// Whether the marked region was created by holding Shift.
-    #[cfg(not(feature = "tiny"))]
     pub softmark: bool,
     /// The line-ending format of this file.
-    #[cfg(not(feature = "tiny"))]
     pub fmt: FormatType,
     /// Path of the lockfile we created for this buffer (if any).
-    #[cfg(not(feature = "tiny"))]
     pub lock_filename: Option<String>,
     /// The top of the undo list for this buffer.
-    #[cfg(not(feature = "tiny"))]
     pub undotop: Option<Box<UndoStruct>>,
     /// The current (next available) undo level.
-    #[cfg(not(feature = "tiny"))]
     pub current_undo: *mut UndoStruct,
     /// The undo item at which the buffer was last saved.
-    #[cfg(not(feature = "tiny"))]
     pub last_saved: *mut UndoStruct,
     /// The type of the last action performed by the user.
-    #[cfg(not(feature = "tiny"))]
     pub last_action: UndoType,
     /// Whether this buffer has unsaved changes.
     pub modified: bool,
+    /// Whether reading this buffer encountered bytes that were not valid UTF-8.
+    pub had_invalid_utf8: bool,
     /// The syntax definition that applies to this file (if any).
     #[cfg(feature = "color")]
     pub syntax: Option<*mut SyntaxType>,
@@ -1082,25 +1068,17 @@ impl Default for OpenFileStruct {
             statinfo: None,
             #[cfg(feature = "wrapping")]
             spillage_line: None,
-            #[cfg(not(feature = "tiny"))]
             mark: None,
-            #[cfg(not(feature = "tiny"))]
             mark_x: 0,
-            #[cfg(not(feature = "tiny"))]
             softmark: false,
-            #[cfg(not(feature = "tiny"))]
             fmt: FormatType::Unspecified,
-            #[cfg(not(feature = "tiny"))]
             lock_filename: None,
-            #[cfg(not(feature = "tiny"))]
             undotop: None,
-            #[cfg(not(feature = "tiny"))]
             current_undo: std::ptr::null_mut(),
-            #[cfg(not(feature = "tiny"))]
             last_saved: std::ptr::null_mut(),
-            #[cfg(not(feature = "tiny"))]
             last_action: UndoType::Other,
             modified: false,
+            had_invalid_utf8: false,
             #[cfg(feature = "color")]
             syntax: None,
             #[cfg(feature = "multibuffer")]

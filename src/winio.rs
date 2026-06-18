@@ -25,6 +25,7 @@ use crossterm::{
     },
 };
 use std::io::{self, Write, stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::cell::RefCell;
 use crate::definitions::*;
@@ -158,9 +159,7 @@ thread_local! {
     static STATUSLINE_START_COL: RefCell<usize> = RefCell::new(0);
 
     // get_softwrap_breakpoint static state (byte offset + column)
-    #[cfg(not(feature = "tiny"))]
     static SWB_TEXT_OFFSET: RefCell<usize> = RefCell::new(0);
-    #[cfg(not(feature = "tiny"))]
     static SWB_COLUMN: RefCell<usize> = RefCell::new(0);
 }
 
@@ -183,22 +182,49 @@ const ERR_CODE: i32 = -1;
 const PROCEED: i64 = -44;
 const INVALID_DIGIT: i64 = -77;
 
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Terminal initialisation / teardown
 // ---------------------------------------------------------------------------
 
 /* C: (new in Rust port) terminal_init: replaces initscr() + refresh() */
 pub fn terminal_init() -> io::Result<()> {
+    if TERMINAL_ACTIVE.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     terminal::enable_raw_mode()?;
-    execute!(out(), EnterAlternateScreen, Hide)?;
+    if let Err(e) = execute!(out(), EnterAlternateScreen, Hide) {
+        let _ = terminal::disable_raw_mode();
+        return Err(e);
+    }
+    TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
 /* C: (new in Rust port) terminal_exit: replaces endwin() */
 pub fn terminal_exit() -> io::Result<()> {
-    terminal::disable_raw_mode()?;
-    execute!(out(), Show, LeaveAlternateScreen)?;
-    Ok(())
+    if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let mut first_error: Option<io::Error> = None;
+
+    if let Err(e) = execute!(out(), Show, LeaveAlternateScreen) {
+        first_error = Some(e);
+    }
+
+    if let Err(e) = terminal::disable_raw_mode() {
+        if first_error.is_none() {
+            first_error = Some(e);
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /* C: (new in Rust port) terminal_size() -> (cols, rows) */
@@ -575,13 +601,15 @@ fn translate_event(ev: Event) {
         Event::Mouse(me) => {
             translate_mouse_event(me);
         }
+        Event::Paste(text) => {
+            push_keycode(START_OF_PASTE as i32);
+            for byte in text.bytes() {
+                push_keycode(byte as i32);
+            }
+            push_keycode(END_OF_PASTE as i32);
+        }
         Event::Resize(_w, _h) => {
-            // Signal a resize
-            #[cfg(not(feature = "tiny"))]
-            with_state_mut(|s| {
-                s.the_window_resized = true;
-            });
-            #[cfg(not(feature = "tiny"))]
+            crate::nano::THE_WINDOW_RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
             push_keycode(THE_WINDOW_RESIZED as i32);
             #[cfg(feature = "tiny")]
             push_keycode(KEY_FRESH as i32);
@@ -3185,7 +3213,6 @@ pub fn place_the_cursor() {
 
 /* C: size_t get_softwrap_breakpoint(const char *linedata, size_t leftedge,
                                       bool *kickoff, bool *end_of_line) */
-#[cfg(not(feature = "tiny"))]
 pub fn get_softwrap_breakpoint(
     linedata: &str,
     leftedge: usize,
@@ -3265,7 +3292,6 @@ pub fn get_softwrap_breakpoint(
 }
 
 /* C: size_t get_chunk_and_edge(size_t column, linestruct *line, size_t *leftedge) */
-#[cfg(not(feature = "tiny"))]
 pub fn get_chunk_and_edge_for(linedata: &str, column: usize) -> (usize, usize) {
     let mut current_chunk = 0usize;
     let mut end_of_line = false;
@@ -3283,25 +3309,21 @@ pub fn get_chunk_and_edge_for(linedata: &str, column: usize) -> (usize, usize) {
 }
 
 /* C: size_t extra_chunks_in(linestruct *line) */
-#[cfg(not(feature = "tiny"))]
 pub fn extra_chunks_in(linedata: &str) -> usize {
     get_chunk_and_edge_for(linedata, usize::MAX).0
 }
 
 /* C: size_t chunk_for(size_t column, linestruct *line) */
-#[cfg(not(feature = "tiny"))]
 pub fn chunk_for(column: usize, linedata: &str) -> usize {
     get_chunk_and_edge_for(linedata, column).0
 }
 
 /* C: size_t leftedge_for(size_t column, linestruct *line) */
-#[cfg(not(feature = "tiny"))]
 pub fn leftedge_for(column: usize, linedata: &str) -> usize {
     get_chunk_and_edge_for(linedata, column).1
 }
 
 /* C: void ensure_firstcolumn_is_aligned(void) */
-#[cfg(not(feature = "tiny"))]
 pub fn ensure_firstcolumn_is_aligned() {
     let softwrap = state().flag_isset(SOFTWRAP);
     if softwrap {

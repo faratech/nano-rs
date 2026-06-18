@@ -22,7 +22,6 @@ pub static CONTROL_C_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 
 /// Whether SIGWINCH has fired.
 /// C: bool the_window_resized
-#[cfg(not(feature = "tiny"))]
 pub static THE_WINDOW_RESIZED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
@@ -40,7 +39,6 @@ pub fn make_new_node(prev: Option<&LinePtr>) -> LinePtr {
         prev: prev_link,
         #[cfg(feature = "color")]
         multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
         has_anchor: false,
     })
 }
@@ -170,7 +168,6 @@ pub fn copy_node(src: &LinePtr) -> LinePtr {
             prev: None,
             #[cfg(feature = "color")]
             multidata: Vec::new(),
-            #[cfg(not(feature = "tiny"))]
             has_anchor: src_b.has_anchor,
         }
     };
@@ -276,7 +273,6 @@ pub fn suggest_ctrlT_ctrlZ() {
 // ---------------------------------------------------------------------------
 /* C: void restore_terminal(void) */
 pub fn restore_terminal() {
-    let _ = winio::terminal_exit();
     #[cfg(not(feature = "tiny"))]
     {
         // Disable bracketed-paste mode (through the shared buffer, so it is
@@ -285,6 +281,7 @@ pub fn restore_terminal() {
         let _ = write!(crate::winio::out(), "\x1B[?2004l");
         crate::winio::flush_out();
     }
+    let _ = winio::terminal_exit();
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +829,9 @@ pub fn reconnect_and_store_state() {
     }
 }
 
+#[cfg(feature = "tiny")]
+pub fn reconnect_and_store_state() {}
+
 pub fn scoop_stdin() -> bool {
     restore_terminal();
 
@@ -954,6 +954,9 @@ pub fn block_sigwinch(blockit: bool) {
         );
     }
 }
+
+#[cfg(all(feature = "tiny", not(any(feature = "speller", feature = "color"))))]
+pub fn block_sigwinch(_blockit: bool) {}
 
 /* C: void handle_sigwinch(int signal) */
 #[cfg(all(unix, not(feature = "tiny")))]
@@ -1396,6 +1399,7 @@ pub fn changes_something(f: FuncPtr) -> bool {
 #[cfg(not(feature = "tiny"))]
 pub fn suck_up_input_and_paste_it() {
     let was_cutbuffer = state().cutbuffer.clone();
+    let was_cutbottom = state().cutbottom.clone();
 
     // Create a new line node as start of paste buffer.
     let head = state_mut().lines.alloc(LineNode {
@@ -1405,23 +1409,34 @@ pub fn suck_up_input_and_paste_it() {
         prev: None,
         #[cfg(feature = "color")]
         multidata: Vec::new(),
-        #[cfg(not(feature = "tiny"))]
         has_anchor: false,
     });
 
-    state_mut().cutbuffer = Some(head.clone());
+    with_state_mut(|s| {
+        s.cutbuffer = Some(head.clone());
+        s.cutbottom = Some(head.clone());
+    });
 
     let mut line = head.clone();
-    let mut input;
+    let mut pending = Vec::new();
 
-    loop {
-        input = winio::get_kbinput(BLIND);
+    fn flush_paste_bytes(line: &LinePtr, pending: &mut Vec<u8>) {
+        if pending.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(pending).into_owned();
+        line.borrow_mut().data.push_str(&text);
+        pending.clear();
+    }
+
+    let input = loop {
+        let input = winio::get_kbinput(BLIND);
 
         let ch = input as u32;
         if (0x20 <= ch && ch <= 0xFF && ch != DEL_CODE) || ch == b'\t' as u32 {
-            let c = input as u8 as char;
-            line.borrow_mut().data.push(c);
+            pending.push(input as u8);
         } else if input == b'\r' as i32 || input == b'\n' as i32 {
+            flush_paste_bytes(&line, &mut pending);
             let lineno = line.borrow().lineno + 1;
             let prev_link = Some(LinePtr::downgrade(&line));
             let new_line = state_mut().lines.alloc(LineNode {
@@ -1431,15 +1446,16 @@ pub fn suck_up_input_and_paste_it() {
                 prev: prev_link,
                 #[cfg(feature = "color")]
                 multidata: Vec::new(),
-                #[cfg(not(feature = "tiny"))]
                 has_anchor: false,
             });
             line.borrow_mut().next = Some(new_line.clone());
             line = new_line;
+            state_mut().cutbottom = Some(line.clone());
         } else {
-            break;
+            break input;
         }
-    }
+    };
+    flush_paste_bytes(&line, &mut pending);
 
     if ISSET!(VIEW_MODE) {
         print_view_warning();
@@ -1454,7 +1470,10 @@ pub fn suck_up_input_and_paste_it() {
     // Free the temporary cutbuffer and restore the original.
     let tmp = state().cutbuffer.clone();
     free_lines(tmp);
-    state_mut().cutbuffer = was_cutbuffer;
+    with_state_mut(|s| {
+        s.cutbuffer = was_cutbuffer;
+        s.cutbottom = was_cutbottom;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1663,6 +1682,17 @@ pub fn regenerate_screen() {
     if running {
         #[cfg(not(feature = "tiny"))]
         winio::ensure_firstcolumn_is_aligned();
+        winio::draw_all_subwindows();
+    }
+}
+
+#[cfg(feature = "tiny")]
+pub fn regenerate_screen() {
+    THE_WINDOW_RESIZED.store(false, Ordering::SeqCst);
+    winio::recalculate_screensize();
+    terminal_init();
+    window_init();
+    if state().we_are_running {
         winio::draw_all_subwindows();
     }
 }

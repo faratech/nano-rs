@@ -1273,7 +1273,6 @@ pub fn do_down() {
 
 /* C: void do_scroll_up(void) — #if !defined(NANO_TINY) || defined(ENABLE_HELP)
  * Scroll up one line or chunk without moving the cursor textwise. */
-#[cfg(any(not(feature = "tiny"), feature = "help"))]
 pub fn do_scroll_up() {
     // When the top of the file is onscreen, we can't scroll.
     let (edittop_has_no_prev, firstcolumn_zero) = with_state(|s| {
@@ -1302,7 +1301,6 @@ pub fn do_scroll_up() {
 
 /* C: void do_scroll_down(void) — #if !defined(NANO_TINY) || defined(ENABLE_HELP)
  * Scroll down one line or chunk without moving the cursor textwise. */
-#[cfg(any(not(feature = "tiny"), feature = "help"))]
 pub fn do_scroll_down() {
     let cursor_row = with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
     if cursor_row == 0 {

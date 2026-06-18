@@ -358,10 +358,10 @@ fn parse_next_word(s: &str) -> (&str, &str) {
 /* C: char *parse_argument(char *ptr)
  * Parse an argument, optionally enclosed in double quotes.
  * Returns None on unterminated quote error, else Some((arg, rest)). */
-fn parse_argument<'a>(ptr: &'a str) -> Option<(&'a str, &'a str)> {
+fn parse_argument_with_quote<'a>(ptr: &'a str) -> Option<(&'a str, &'a str, bool)> {
     if !ptr.starts_with('"') {
         let (token, rest) = parse_next_word(ptr);
-        return Some((token, rest));
+        return Some((token, rest, false));
     }
 
     // Find the last '"' in the string
@@ -374,9 +374,13 @@ fn parse_argument<'a>(ptr: &'a str) -> Option<(&'a str, &'a str)> {
         Some(pos) => {
             let arg = &ptr[1..pos];
             let rest = ptr[pos + 1..].trim_start_matches(|c: char| c == ' ' || c == '\t');
-            Some((arg, rest))
+            Some((arg, rest, true))
         }
     }
+}
+
+fn parse_argument<'a>(ptr: &'a str) -> Option<(&'a str, &'a str)> {
+    parse_argument_with_quote(ptr).map(|(arg, rest, _)| (arg, rest))
 }
 
 #[cfg(feature = "color")]
@@ -1477,18 +1481,18 @@ pub fn parse_binding(ptr: &str, dobind: bool) {
         return;
     }
 
-    let (funcptr_str, after_func) = if dobind {
-        let (f, a) = match parse_argument(after_key) {
+    let (funcptr_str, after_func, funcptr_was_quoted) = if dobind {
+        let (f, a, was_quoted) = match parse_argument_with_quote(after_key) {
             None => return,
-            Some((f, a)) => (f, a),
+            Some((f, a, q)) => (f, a, q),
         };
         if f.is_empty() {
             jot_error("Must specify a function to bind the key to");
             return;
         }
-        (f, a)
+        (f, a, was_quoted)
     } else {
-        ("", after_key)
+        ("", after_key, false)
     };
 
     let (menuptr, _rest) = parse_next_word(after_func);
@@ -1507,11 +1511,11 @@ pub fn parse_binding(ptr: &str, dobind: bool) {
     // Build the new shortcut for dobind
     let mut newsc: Option<KeyStruct> = None;
     if dobind {
-        if funcptr_str.starts_with('"') {
+        if funcptr_was_quoted {
             // String bind
             let mut sc = KeyStruct::default();
             sc.func = Some(implant_sentinel as FuncPtr);
-            sc.expansion = Some(funcptr_str[1..].to_string());
+            sc.expansion = Some(funcptr_str.to_string());
             newsc = Some(sc);
         } else {
             newsc = strtosc(funcptr_str);

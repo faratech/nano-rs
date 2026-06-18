@@ -179,6 +179,32 @@ fn free_lines(head: LinePtr) {
     crate::nano::free_lines(Some(head));
 }
 
+fn line_chain_tail(head: &LinePtr) -> LinePtr {
+    let mut tail = head.clone();
+    loop {
+        let next = tail.borrow().next.clone();
+        match next {
+            Some(node) => tail = node,
+            None => return tail,
+        }
+    }
+}
+
+fn clear_cutbuffer_state() {
+    with_state_mut(|s| {
+        s.cutbuffer = None;
+        s.cutbottom = None;
+    });
+}
+
+fn set_cutbuffer_state(head: Option<LinePtr>) {
+    let bottom = head.as_ref().map(line_chain_tail);
+    with_state_mut(|s| {
+        s.cutbuffer = head;
+        s.cutbottom = bottom;
+    });
+}
+
 /// Unlink `node` from the doubly-linked list and drop it.
 /// C: unlink_node(node) — nano.c; also fixes up filebot/edittop.
 #[inline]
@@ -671,7 +697,8 @@ fn chop_word(forward: bool) {
 
     // Save and blank the cutbuffer.
     let is_cutbuffer = state().cutbuffer.clone();
-    state_mut().cutbuffer = None;
+    let is_cutbottom = state().cutbottom.clone();
+    clear_cutbuffer_state();
 
     if !forward {
         do_prev_word();
@@ -765,7 +792,10 @@ fn chop_word(forward: bool) {
     if let Some(cb) = new_cutbuffer {
         free_lines(cb);
     }
-    state_mut().cutbuffer = is_cutbuffer;
+    with_state_mut(|s| {
+        s.cutbuffer = is_cutbuffer;
+        s.cutbottom = is_cutbottom;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1409,7 +1439,7 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
         if let Some(cb) = old_cb {
             free_lines(cb);
         }
-        state_mut().cutbuffer = None;
+        clear_cutbuffer_state();
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -1621,6 +1651,7 @@ pub fn cut_till_eof() {
 #[cfg(not(feature = "tiny"))]
 pub fn zap_text() {
     let was_cutbuffer = state().cutbuffer.clone();
+    let was_cutbottom = state().cutbottom.clone();
 
     let test_cliff = with_state(|s| {
         s.flag_isset(CUT_FROM_CURSOR)
@@ -1646,7 +1677,7 @@ pub fn zap_text() {
         }
         unsafe { (*of.current_undo).cutbuffer.clone() }
     });
-    state_mut().cutbuffer = undo_cutbuffer;
+    set_cutbuffer_state(undo_cutbuffer);
 
     let has_mark = with_state(|s| {
         s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
@@ -1656,7 +1687,10 @@ pub fn zap_text() {
     update_undo(UndoType::Zap);
     wipe_statusbar();
 
-    state_mut().cutbuffer = was_cutbuffer;
+    with_state_mut(|s| {
+        s.cutbuffer = was_cutbuffer;
+        s.cutbottom = was_cutbottom;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,7 +1752,7 @@ fn copy_marked_region() {
 
     // Deep-copy the (temporarily modified) chain.
     let cutbuf = copy_buffer(&topline);
-    state_mut().cutbuffer = Some(cutbuf);
+    set_cutbuffer_state(Some(cutbuf));
 
     // Restore both boundary nodes to their exact original state.
     topline.borrow_mut().data = saved_top_data;
@@ -1763,7 +1797,7 @@ pub fn copy_text() {
         if let Some(cb) = old_cb {
             free_lines(cb);
         }
-        state_mut().cutbuffer = None;
+        clear_cutbuffer_state();
     }
 
     wipe_statusbar();
@@ -1834,6 +1868,8 @@ pub fn copy_text() {
                     if let Some(prev) = pw.upgrade() {
                         prev.borrow_mut().next = Some(addition.clone());
                     }
+                } else {
+                    s.cutbuffer = Some(addition.clone());
                 }
                 delete_node(cb.clone());
             }
@@ -1858,6 +1894,8 @@ pub fn copy_text() {
                     if let Some(prev) = pw.upgrade() {
                         prev.borrow_mut().next = Some(addition.clone());
                     }
+                } else {
+                    s.cutbuffer = Some(addition.clone());
                 }
                 addition.borrow_mut().next = Some(cb.clone());
                 cb.borrow_mut().prev = Some(LinePtr::downgrade(&addition));

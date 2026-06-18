@@ -538,6 +538,59 @@ pub fn restore_anchors(string: &str) {
     }
 }
 
+fn position_path_start(buf: &[u8]) -> Option<usize> {
+    for i in 0..buf.len() {
+        if buf[i] == b'/' {
+            return Some(i);
+        }
+
+        if i + 1 < buf.len() && buf[i] == b'\\' && buf[i + 1] == b'\\' {
+            return Some(i);
+        }
+
+        if i + 2 < buf.len()
+            && buf[i].is_ascii_alphabetic()
+            && buf[i + 1] == b':'
+            && (buf[i + 2] == b'\\' || buf[i + 2] == b'/')
+        {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+fn parse_position_record(buf: &[u8]) -> Option<PositionRecord> {
+    let path_start = position_path_start(buf)?;
+
+    let anchors_bytes = if path_start > 0 {
+        Some(buf[..path_start].to_vec())
+    } else {
+        None
+    };
+
+    let mut path_and_place = buf[path_start..].to_vec();
+    recode_nul_to_lf(&mut path_and_place);
+
+    let pap_str = String::from_utf8_lossy(&path_and_place).into_owned();
+
+    // The format is: "<filename> <lineno> <colno>".
+    let col_space = pap_str.rfind(' ')?;
+    let line_space = pap_str[..col_space].rfind(' ')?;
+
+    let filename = pap_str[..line_space].to_string();
+    if filename.is_empty() {
+        return None;
+    }
+
+    let linenumber: isize = pap_str[line_space + 1..col_space].trim().parse().ok()?;
+    let columnnumber: isize = pap_str[col_space + 1..].trim().parse().ok()?;
+
+    let anchors = anchors_bytes.map(|ab| String::from_utf8_lossy(&ab).into_owned());
+
+    Some(PositionRecord { filename, linenumber, columnnumber, anchors })
+}
+
 // ---------------------------------------------------------------------------
 // load_positions_register
 // ---------------------------------------------------------------------------
@@ -584,48 +637,9 @@ pub fn load_positions_register() {
             buf.pop();
         }
 
-        // Find the start of the path (first '/').
-        let slash_pos = match buf.iter().position(|&b| b == b'/') {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let anchors_bytes = if slash_pos > 0 {
-            Some(buf[..slash_pos].to_vec())
-        } else {
-            None
-        };
-
-        // The path-and-place portion starts at slash_pos.
-        let mut path_and_place = buf[slash_pos..].to_vec();
-
-        // Decode NULs as embedded newlines.
-        recode_nul_to_lf(&mut path_and_place);
-
-        let pap_str = String::from_utf8_lossy(&path_and_place).into_owned();
-
-        // The format is: "<filename> <lineno> <colno>"
-        // Find the LAST space (column number) and the second-to-last (line number).
-        let col_space = match pap_str.rfind(' ') {
-            Some(p) => p,
-            None => continue,
-        };
-        let line_space = match pap_str[..col_space].rfind(' ') {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let filename = pap_str[..line_space].to_string();
-        let linenumber: isize = pap_str[line_space + 1..col_space]
-            .trim().parse().unwrap_or(0);
-        let columnnumber: isize = pap_str[col_space + 1..]
-            .trim().parse().unwrap_or(0);
-
-        let anchors = anchors_bytes.map(|ab| {
-            String::from_utf8_lossy(&ab).into_owned()
-        });
-
-        records.push(PositionRecord { filename, linenumber, columnnumber, anchors });
+        if let Some(record) = parse_position_record(&buf) {
+            records.push(record);
+        }
     }
 
     POSITIONS_REGISTER.with(|pr| *pr.borrow_mut() = records);
@@ -839,6 +853,49 @@ pub fn restore_cursor_position_if_any() {
             restore_anchors(anchors);
         }
         crate::search::goto_line_and_column(record.linenumber, record.columnnumber, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_unix_position_record_with_anchors() {
+        let record = parse_position_record(b"12 34 /tmp/file name.txt 9 17")
+            .expect("position record");
+
+        assert_eq!(record.anchors.as_deref(), Some("12 34 "));
+        assert_eq!(record.filename, "/tmp/file name.txt");
+        assert_eq!(record.linenumber, 9);
+        assert_eq!(record.columnnumber, 17);
+    }
+
+    #[test]
+    fn parses_windows_drive_position_record() {
+        let record = parse_position_record(br"7 C:\Users\me\file name.txt 23 5")
+            .expect("position record");
+
+        assert_eq!(record.anchors.as_deref(), Some("7 "));
+        assert_eq!(record.filename, r"C:\Users\me\file name.txt");
+        assert_eq!(record.linenumber, 23);
+        assert_eq!(record.columnnumber, 5);
+    }
+
+    #[test]
+    fn parses_windows_unc_position_record() {
+        let record = parse_position_record(br"\\server\share\file.txt 3 4")
+            .expect("position record");
+
+        assert_eq!(record.anchors, None);
+        assert_eq!(record.filename, r"\\server\share\file.txt");
+        assert_eq!(record.linenumber, 3);
+        assert_eq!(record.columnnumber, 4);
+    }
+
+    #[test]
+    fn rejects_malformed_position_record_numbers() {
+        assert!(parse_position_record(b"/tmp/file nope 4").is_none());
     }
 }
 

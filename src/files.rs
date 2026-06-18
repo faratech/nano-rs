@@ -67,6 +67,24 @@ fn is_fifo_file(meta: &std::fs::Metadata) -> bool {
     }
 }
 
+fn usable_parent(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+fn last_path_separator(text: &str) -> Option<usize> {
+    text.char_indices()
+        .rev()
+        .find(|(_, ch)| *ch == '/' || *ch == '\\')
+        .map(|(idx, _)| idx)
+}
+
+fn path_join_display(base: &str, child: &str) -> String {
+    Path::new(base).join(child).to_string_lossy().into_owned()
+}
+
 /// C: make_new_node(prev) — nano.c.
 #[inline]
 fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
@@ -175,12 +193,12 @@ fn do_credits() {
 fn do_prompt(
     menu: u32,
     given: &str,
-    _history: Option<&mut Option<LinePtr>>,
+    history_kind: Option<crate::history::HistoryKind>,
     refresh: fn(),
     msg: &str,
     _extra: &str,
 ) -> i32 {
-    crate::prompt::do_prompt(menu, Some(given), None, Some(refresh), msg)
+    crate::prompt::do_prompt(menu, Some(given), history_kind, Some(refresh), msg)
 }
 #[inline] fn edit_refresh() { crate::winio::edit_refresh(); }
 
@@ -257,6 +275,11 @@ pub fn delete_lockfile(lockfilename: &str) -> bool {
             false
         }
     }
+}
+
+#[cfg(feature = "tiny")]
+pub fn delete_lockfile(_lockfilename: &str) -> bool {
+    true
 }
 
 /* C: bool write_lockfile(const char *lockfilename, const char *filename, bool modified)
@@ -396,14 +419,15 @@ pub const SKIPTHISFILE: i32 = -2;
 pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>, ()> {
     // Build lock filename: <dir>/.<basename>.swp
     let path = Path::new(filename);
-    let dirname = path.parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".".to_string());
+    let dirname = usable_parent(path);
     let basename = path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let lockfilename = format!("{}/{}{}{}", dirname, LOCKING_PREFIX, basename, LOCKING_SUFFIX);
+    let lockfilename = dirname
+        .join(format!("{}{}{}", LOCKING_PREFIX, basename, LOCKING_SUFFIX))
+        .to_string_lossy()
+        .into_owned();
 
     let lock_exists = Path::new(&lockfilename).exists();
 
@@ -547,7 +571,7 @@ pub fn stat_with_alloc(filename: &str) -> Option<FileStat> {
 // ---------------------------------------------------------------------------
 pub fn has_valid_path(filename: &str) -> bool {
     let path = Path::new(filename);
-    let parentdir = path.parent().unwrap_or(Path::new("."));
+    let parentdir = usable_parent(path);
     let parentdir_str = parentdir.to_string_lossy();
 
     // Check if it's the current directory
@@ -811,6 +835,16 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                 }
             }
         }
+    } else if descriptor < 0 {
+        #[cfg(feature = "multibuffer")]
+        if new_one {
+            close_buffer_impl();
+        }
+        #[cfg(not(feature = "multibuffer"))]
+        if new_one {
+            state_mut().openfile = None;
+        }
+        return false;
     }
 
     // For a new buffer, store filename and put cursor at start of buffer.
@@ -1074,19 +1108,25 @@ pub fn close_buffer_impl() {
 // encode_data — encode NUL bytes in a buffer as LF bytes
 // C: char *encode_data(char *text, size_t length)
 // ---------------------------------------------------------------------------
-pub fn encode_data(buf: &[u8]) -> String {
+pub fn encode_data(buf: &[u8]) -> (String, bool) {
     // Fast path: the overwhelmingly common case is a line with no NUL bytes, so
     // skip the recode allocation entirely and validate the slice in place.
     if !buf.contains(&0) {
         return match std::str::from_utf8(buf) {
-            Ok(s) => s.to_owned(),
-            Err(_) => String::from_utf8_lossy(buf).into_owned(),
+            Ok(s) => (s.to_owned(), false),
+            Err(_) => (String::from_utf8_lossy(buf).into_owned(), true),
         };
     }
     // NUL present: replace NUL bytes with LF (0x0A) as in C's recode_NUL_to_LF,
     // then decode (lossily, matching the previous behaviour exactly).
     let recoded: Vec<u8> = buf.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
-    String::from_utf8_lossy(&recoded).into_owned()
+    match String::from_utf8(recoded) {
+        Ok(s) => (s, false),
+        Err(e) => {
+            let bytes = e.into_bytes();
+            (String::from_utf8_lossy(&bytes).into_owned(), true)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,6 +1177,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
 
     // Read the entire file contents
     let mut content = Vec::new();
+    let mut had_invalid_utf8 = false;
     match f.read_to_end(&mut content) {
         Ok(_) => {}
         Err(e) => {
@@ -1216,7 +1257,9 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
                 line = &line[..line.len() - 1];
             }
         }
-        bottomline.borrow_mut().data = encode_data(line);
+        let (data, invalid_utf8) = encode_data(line);
+        had_invalid_utf8 |= invalid_utf8;
+        bottomline.borrow_mut().data = data;
 
         // Make a new node for the next line.
         let newline = make_new_node(Some(bottomline.clone()));
@@ -1235,7 +1278,9 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     if tail.is_empty() {
         bottomline.borrow_mut().data = String::new();
     } else {
-        bottomline.borrow_mut().data = encode_data(tail);
+        let (data, invalid_utf8) = encode_data(tail);
+        had_invalid_utf8 |= invalid_utf8;
+        bottomline.borrow_mut().data = data;
         num_lines += 1;
     }
 
@@ -1247,6 +1292,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             of.placewewant = xpt;
+            of.had_invalid_utf8 |= had_invalid_utf8;
         }
     });
 
@@ -1288,6 +1334,12 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     }
 
     state_mut().report_size = true;
+    if had_invalid_utf8 {
+        statusline(
+            MessageType::Alert,
+            "File contains invalid UTF-8; normal save is disabled",
+        );
+    }
 
     // If we inserted less than a screenful, don't center the cursor.
     if undoable && less_than_a_screenful(was_lineno, was_leftedge) {
@@ -1784,12 +1836,10 @@ pub fn insert_a_file_or(execute: bool) {
         });
 
         let prompt_default = operating_dir_str.as_deref().unwrap_or("./");
-        let mut exec_hist = state().execute_history.clone();
-
         response = do_prompt(
             menu,
             &given,
-            if execute { Some(&mut exec_hist) } else { None },
+            if execute { Some(crate::history::HistoryKind::Execute) } else { None },
             edit_refresh,
             msg,
             prompt_default,
@@ -1982,7 +2032,7 @@ pub fn get_full_path(origpath: &str) -> Option<String> {
         }
         Err(_) => {
             // Try without the last component (file may not exist yet)
-            let parent = path.parent()?;
+            let parent = usable_parent(path);
             let filename = path.file_name()?;
 
             if filename.is_empty() {
@@ -2114,10 +2164,17 @@ pub fn outside_of_confinement(somepath: &str, tabbing: bool) -> bool {
 
     let operating_dir = state().operating_dir.clone().unwrap_or_default();
 
-    let is_inside = fullpath.starts_with(&operating_dir);
-    let begins_to_be = tabbing && operating_dir.starts_with(&fullpath);
+    let fullpath_path = Path::new(&fullpath);
+    let operating_dir_path = Path::new(&operating_dir);
+    let is_inside = fullpath_path.strip_prefix(operating_dir_path).is_ok();
+    let begins_to_be = tabbing && operating_dir_path.strip_prefix(fullpath_path).is_ok();
 
     !is_inside && !begins_to_be
+}
+
+#[cfg(not(feature = "operatingdir"))]
+pub fn outside_of_confinement(_somepath: &str, _tabbing: bool) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -2328,6 +2385,22 @@ pub fn write_file(
         if confined {
             let od = state().operating_dir.clone().unwrap_or_default();
             statusline(MessageType::Alert, &format!("Can't write outside of {}", od));
+            return false;
+        }
+    }
+
+    if normal {
+        let has_lossy_data = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|of| of.had_invalid_utf8)
+                .unwrap_or(false)
+        });
+        if has_lossy_data {
+            statusline(
+                MessageType::Alert,
+                "Cannot safely save: buffer contains invalid UTF-8 bytes",
+            );
             return false;
         }
     }
@@ -3374,14 +3447,14 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
     let present_path = with_state(|s| s.present_path.clone().unwrap_or_else(|| "./".to_string()));
 
     // Split morsel into dirname and filename parts
-    let (dirname, filename) = if let Some(slash_pos) = morsel.rfind('/') {
+    let (dirname, filename) = if let Some(slash_pos) = last_path_separator(morsel) {
         let dir_part = &morsel[..=slash_pos];
         let file_part = &morsel[slash_pos + 1..];
         let expanded = expand_leading_tilde(dir_part);
-        let full_dir = if expanded.starts_with('/') {
+        let full_dir = if Path::new(&expanded).is_absolute() {
             expanded
         } else {
-            format!("{}{}", present_path, dir_part)
+            path_join_display(&present_path, dir_part)
         };
         (full_dir, file_part.to_string())
     } else {
@@ -3407,7 +3480,7 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
         }
 
         if entry_name.starts_with(&filename) {
-            let fullname = format!("{}{}", dirname, entry_name);
+            let fullname = path_join_display(&dirname, &entry_name);
 
             #[cfg(feature = "operatingdir")]
             {
@@ -3450,7 +3523,7 @@ pub fn input_tab(
     let mut matches: Vec<String>;
 
     // Try username completion if starts with ~ and no slash
-    if morsel.starts_with('~') && !morsel.contains('/') {
+    if morsel.starts_with('~') && last_path_separator(morsel).is_none() {
         matches = username_completion(morsel, *place);
     } else {
         matches = Vec::new();
@@ -3473,7 +3546,7 @@ pub fn input_tab(
     }
 
     // Find last slash in morsel
-    let length_of_path = morsel.rfind('/').map(|p| p + 1).unwrap_or(0);
+    let length_of_path = last_path_separator(morsel).map(|p| p + 1).unwrap_or(0);
 
     // Determine common prefix length
     let mut common_len = 0;
@@ -3512,11 +3585,11 @@ pub fn input_tab(
 
     // Append slash if single match that is a directory
     let present_path = with_state(|s| s.present_path.clone().unwrap_or_else(|| "./".to_string()));
-    let glued = format!("{}{}", present_path, shared);
+    let glued = path_join_display(&present_path, &shared);
 
     let is_single_dir = matches.len() == 1 && (is_dir(&shared) || is_dir(&glued));
     if is_single_dir {
-        shared.push('/');
+        shared.push(std::path::MAIN_SEPARATOR);
     }
 
     // Update morsel if common part is longer than current position
@@ -3559,4 +3632,27 @@ pub fn input_tab(
     }
 
     new_morsel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_data, usable_parent};
+    use std::path::Path;
+
+    #[test]
+    fn encode_data_reports_invalid_utf8() {
+        let (valid, valid_lossy) = encode_data(b"hello");
+        assert_eq!(valid, "hello");
+        assert!(!valid_lossy);
+
+        let (invalid, invalid_lossy) = encode_data(&[b'a', 0xff, b'b']);
+        assert_eq!(invalid, "a\u{fffd}b");
+        assert!(invalid_lossy);
+    }
+
+    #[test]
+    fn bare_filename_parent_is_current_directory() {
+        assert_eq!(usable_parent(Path::new("nano.txt")), Path::new("."));
+        assert_eq!(usable_parent(Path::new("./nano.txt")), Path::new("."));
+    }
 }

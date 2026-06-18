@@ -807,7 +807,6 @@ pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Opt
 /* C: const char *mbstrchr(const char *string, const char *chr)
  * Find the first occurrence of the multibyte character `chr` in `string`.
  * Returns the byte offset of the match, or None. */
-#[cfg(any(not(feature = "tiny"), feature = "justify"))]
 pub fn mbstrchr(string: &str, chr: &str) -> Option<usize> {
     let using_utf8 = using_utf8();
 

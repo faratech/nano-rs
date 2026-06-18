@@ -1,151 +1,133 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
-## What this is
+## What This Is
 
-GNU nano — a small terminal text editor. Two independent implementations live here:
+This repository is `nano-rs`, a Rust port of GNU nano. The Rust implementation is the canonical code in this checkout.
 
-- **`src/`** — the canonical C99 / GNU Autotools codebase (upstream: Savannah git)
-- **`rust/`** — a 1:1 Rust transliteration on branch `rust-port` (see below)
+- `src/` contains the editor implementation.
+- `Cargo.toml` defines the build, feature flags, and crate version.
+- `media/nano.rc` provides Windows executable version metadata.
+- `docs/` contains release and updater documentation.
+- `scripts/` contains local build and benchmark helpers.
 
-Contributions to the C codebase are submitted as patches to `nano-devel@gnu.org` (see `README.hacking`), not via GitHub PRs.
+There is no checked-in C source tree, `rust/` subdirectory, Autotools build, gettext catalog, or `doc/` manual tree in this repository.
 
----
-
-## C build
-
-From-git checkout — no generated `configure` yet:
-
-```sh
-./autogen.sh      # needs autoconf/automake/autopoint/gettext
-./configure       # add --sysconfdir=/etc to use /etc/nanorc
-make              # produces src/nano
-```
-
-Requires `libncurses-dev`. The bundled gnulib tree in `lib/` compiles into `libgnu.a`.
-
-### C feature flags
-
-nano is heavily `#ifdef`-gated. Key `./configure` switches:
-
-| Flag | Effect |
-|---|---|
-| `--enable-tiny` | defines `NANO_TINY`, strips most optional code |
-| `--disable-color` / `--disable-nanorc` / etc. | disables individual features |
-| `--enable-debug` | debug build |
-
-Code guarded by `#ifndef NANO_TINY` and `ENABLE_*` macros must compile cleanly when that feature is disabled.
-
-### C testing
-
-No unit-test suite. The regression check is a **build matrix**:
+## Build And Test
 
 ```sh
-./nano-regress   # configures + make clean all across all flag combos
+cargo build
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-Run after touching any `#ifdef`/`#ifndef` block. Behavioral testing is manual: `src/nano scratchfile`.
-
----
-
-## Rust build (`rust/`)
+Feature-gate hygiene matters. Run the matrix relevant to your change:
 
 ```sh
-cd rust
-cargo build                          # debug binary → rust/target/debug/nano
-cargo build --release                # release binary → rust/target/release/nano
-cargo build --no-default-features    # bare build (verify feature-flag hygiene)
-cargo check                          # fast type-check without linking
+cargo check
+cargo check --no-default-features
+cargo check --no-default-features --features tiny
+cargo check --no-default-features --features browser
+cargo check --features libmagic
+cargo check --all-features
 ```
 
-The current binary is already compiled at `rust/target/debug/nano`.
+The debug binary is `target/debug/nano`; release output is `target/release/nano`.
 
-### Rust feature flags
+## Feature Flags
 
-Cargo features mirror the C `./configure` switches exactly:
+Cargo features mirror GNU nano's optional build areas:
 
-| Cargo feature | C equivalent |
+| Cargo feature | Purpose |
 |---|---|
-| `tiny` | `--enable-tiny` / `NANO_TINY` |
-| `color` | `ENABLE_COLOR` |
-| `nanorc` | `ENABLE_NANORC` |
-| `utf8` | `ENABLE_UTF8` |
-| `multibuffer`, `wrapping`, `justify`, `browser`, `help`, `histories`, `mouse`, `linenumbers`, `linter`, `formatter`, `speller`, `tabcomp`, `wordcomp`, `comment`, `libmagic`, `operatingdir` | corresponding `ENABLE_*` |
+| `tiny` | Strips most optional behavior for a minimal editor |
+| `color` | Syntax coloring |
+| `nanorc` | Runtime nanorc parsing and key rebinding |
+| `utf8` | UTF-8 aware behavior |
+| `browser` | File browser |
+| `help` | Help viewer |
+| `histories` | Search, replace, execute, and position histories |
+| `justify`, `wrapping`, `multibuffer` | Editing features |
+| `mouse`, `linenumbers`, `linter`, `formatter`, `speller` | Optional UI/tools |
+| `tabcomp`, `wordcomp`, `comment`, `operatingdir`, `extra` | Additional interactive features |
+| `libmagic` | Optional magic-byte syntax fallback via `infer` |
 
-`#ifdef ENABLE_X` → `#[cfg(feature = "x")]`; `#ifndef NANO_TINY` → `#[cfg(not(feature = "tiny"))]`.
+When porting or changing feature-gated code, map C-style conditions this way:
 
----
+- `#ifdef ENABLE_X` becomes `#[cfg(feature = "x")]`.
+- `#ifndef NANO_TINY` becomes `#[cfg(not(feature = "tiny"))]`.
+- Shared structs and keycodes often need to remain available even when a feature is off, because additive feature combinations such as `tiny + all-features` must compile.
 
-## C source architecture (`src/`)
+## Source Architecture
 
-No central event dispatcher; all modules share global state declared in `prototypes.h` and defined in `global.c`. Read `definitions.h` first — it holds every struct, enum, and feature `#ifdef` (`linestruct`, `openfilestruct`, `keystruct`/`funcstruct`, `colortype`/`syntaxtype`).
+The implementation is a direct module-by-module Rust transliteration of GNU nano:
 
-Key files and their roles:
-
-- **`nano.c`** — `main()`, option parsing, main input loop, signal handling, terminal setup/teardown.
-- **`global.c`** — keybinding system. `shortcut_init()` builds `allfuncs` / `sclist` linked lists via `add_to_funcs` / `add_to_sclist`. To add a new command: wire it here, implement in the relevant file.
-- **`winio.c`** — all terminal I/O: keystroke decoding (escape sequences, mouse, UTF-8), screen painting (edit window, title bar, status bar, prompt bar). Largest file.
-- **`rcfile.c`** — parses nanorc: `bind`/`set`/`color`/`syntax` directives. Must stay in sync with `global.c` and `doc/`.
-- **`text.c`** — text modification: insert/delete, undo/redo (`undostruct`), wrapping, justify, spell/lint/formatter invocation, indent, comment toggle.
-- **`files.c`** — file open/read/write/lock, buffer list management, backups.
-- **`search.c`** — search, replace, regex, go-to-line, bracket matching.
-- **`move.c`** — cursor movement and scrolling.
-- **`cut.c`** — cut/copy/paste (cutbuffer), zap.
-- **`prompt.c`** — statusbar prompt / answer-line editing (used by all interactive prompts).
-
-A typical change spans several files: new option → `rcfile.c` (parse) + `nano.c` (flag) + `global.c`/`definitions.h` (bit or binding) + implementing file + `doc/`.
-
----
-
-## Rust source architecture (`rust/nano/src/`)
-
-A direct module-by-module transliteration of the C source. The mapping is 1:1:
-
-| C file | Rust module |
+| Original area | Rust module |
 |---|---|
-| `definitions.h` | `definitions.rs` — all types, enums, consts (`LinePtr`, `OpenFileStruct`, `UndoStruct`, flag consts) |
-| `global.c` + `prototypes.h` | `global.rs` — `AppState` struct, `STATE` thread-local, `with_state` / `with_state_mut`, `shortcut_init`, flag macros |
-| `nano.c` | `nano.rs` + `main.rs` — `nano_main()`, main event loop, `process_a_keystroke`, `inject` |
-| `winio.c` | `winio.rs` — crossterm replaces ncurses; `NanoWindow` replaces `WINDOW*` |
-| `move.c` | `move_.rs` — renamed (Rust keyword) |
-| all others | same name, `.rs` extension |
+| shared definitions | `definitions.rs` |
+| global state and key bindings | `global.rs` |
+| main loop, setup, signals | `nano.rs` and `main.rs` |
+| terminal I/O and drawing | `winio.rs` |
+| files, buffers, writes | `files.rs` |
+| movement and scrolling | `move_.rs` |
+| search and replace | `search.rs` |
+| cut/copy/paste | `cut.rs` |
+| prompt/statusbar editing | `prompt.rs` |
+| nanorc parsing | `rcfile.rs` |
+| history files and position log | `history.rs` |
+| self-install and updater | `installer.rs` |
 
-### Key Rust-specific design decisions
+## Rust Design Notes
 
-**Global state**: `NanoCell(UnsafeCell<AppState>)` in `global.rs` — allows re-entrant access matching C global semantics. `RefCell` was replaced because C functions freely call each other while holding "borrows" (e.g. `with_state_mut` closure calling `ensure_firstcolumn_is_aligned` which also reads state).
+Global state lives in `global.rs` as `STATE`, with helpers:
 
 ```rust
-// Read state
 with_state(|s| s.field)
-// Mutate state
-with_state_mut(|s| { s.field = val; })
-// Also usable directly:
-STATE.with(|s| s.borrow().field)
-STATE.with(|s| { s.borrow_mut().field = val; })
+with_state_mut(|s| {
+    s.field = value;
+})
 ```
 
-**Linked lists**: `pub type LinePtr = Rc<RefCell<LineNode>>` with `Weak` back-pointers. The `LineNode` RefCells are standard (not `NanoCell`) since list nodes are never accessed re-entrantly.
+This intentionally matches nano's C-style global state and re-entrant call graph.
 
-**Flag macros**: defined in `global.rs` with `#[macro_export]`, usable anywhere as `ISSET!(FLAG)`, `SET!(FLAG)`, `UNSET!(FLAG)`, `TOGGLE!(FLAG)`.
+Text buffers use linked lists:
 
-**gettext**: `tr!("string")` macro (defined in `main.rs`) is a pass-through; `tr!("fmt", args...)` expands to `format!(...)`.
+```rust
+pub type LinePtr = Rc<RefCell<LineNode>>;
+```
 
-**ncurses → crossterm**: `NanoWindow { rows, cols, y, x }` replaces `WINDOW*`. Drawing uses `queue!(stdout(), MoveTo(...), Print(...))` etc. Key events come from `crossterm::event::read()` and are translated to nano integer keycodes in `winio::translate_key_event`.
+Back-pointers are `Weak` references. Keep head/tail invariants in sync when editing buffer or cutbuffer chains.
 
-**Local stubs in modules**: each `.rs` file may have a small block of private delegation functions at the top (e.g. `fn statusbar(msg: &str) { crate::winio::statusbar(msg) }`) to avoid fully-qualified paths throughout. These are not no-ops — they forward to the real implementation in the appropriate module.
+Feature flags use exported macros from `global.rs`:
 
----
+```rust
+ISSET!(FLAG)
+SET!(FLAG)
+UNSET!(FLAG)
+TOGGLE!(FLAG)
+```
 
-## Other directories
+Terminal rendering uses crossterm. `NanoWindow` replaces ncurses `WINDOW*`, and `winio::translate_key_event` maps crossterm key events to nano integer keycodes.
 
-- **`syntax/`** — `*.nanorc` syntax-highlighting definitions.
-- **`doc/`** — `nano.1`, `nanorc.5`, `nano.texi`. Update when changing user-visible behavior.
-- **`po/`** — gettext catalogs. User-visible strings use `_(...)` in C, `tr!(...)` in Rust.
+Translations currently use the `tr!` macro from `main.rs`; it is a pass-through for plain strings and delegates formatting to `format!`.
 
-## C conventions
+## Update And Release Notes
 
-- GNU style, tabs at 4 columns. View diffs with: `git config --local core.pager "less -x1,5"`
-- Booleans: `TRUE`/`FALSE` from `definitions.h`.
-- User-facing changes: record in `NEWS`, `ChangeLog`, `IMPROVEMENTS`.
-- Commits: signed off (`git commit -as`); message body explains rationale.
+The built-in updater tracks the crate version from `Cargo.toml` (`CARGO_PKG_VERSION`). Keep these in sync when bumping versions:
+
+- `Cargo.toml`
+- `Cargo.lock`
+- `media/nano.rc`
+- GitHub release tag and asset names described in `docs/RELEASING.md`
+
+Release assets are expected to match `installer.rs::target_asset_name()`.
+
+## Conventions
+
+- Prefer local module helpers and existing patterns over introducing new abstractions.
+- Keep feature-gated code compiling under `--no-default-features`, `tiny`, and `--all-features`.
+- Use `rg` for code search.
+- Add focused unit tests for parser, path, history, and byte-offset bugs.
+- Do not leave partial file writes in updater/install paths; use atomic sibling-temp-file replacement.

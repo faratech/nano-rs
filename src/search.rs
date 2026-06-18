@@ -128,11 +128,11 @@ fn print_view_warning() {
 fn do_prompt(
     menu: u32,
     initial: &str,
-    _history: Option<&LinePtr>,  // unused: search.rs passes LinePtr but prompt uses HistoryKind
+    history_kind: Option<crate::history::HistoryKind>,
     refresh_fn: fn(),
     prompt: &str,
 ) -> i32 {
-    crate::prompt::do_prompt(menu, Some(initial), None, Some(refresh_fn), prompt)
+    crate::prompt::do_prompt(menu, Some(initial), history_kind, Some(refresh_fn), prompt)
 }
 
 fn ask_user(yesorallorno: bool, question: &str) -> i32 {
@@ -305,6 +305,56 @@ impl SearchFlags {
     }
 }
 
+fn unicode_ci_match_end_at(haystack: &str, start: usize, folded_needle: &str) -> Option<usize> {
+    if folded_needle.is_empty() {
+        return Some(start);
+    }
+
+    let mut folded = String::new();
+    for (relative, ch) in haystack[start..].char_indices() {
+        folded.extend(ch.to_lowercase());
+        if folded.len() >= folded_needle.len() {
+            return (folded == folded_needle).then_some(start + relative + ch.len_utf8());
+        }
+        if !folded_needle.starts_with(&folded) {
+            return None;
+        }
+    }
+
+    None
+}
+
+fn unicode_ci_find(haystack: &str, needle: &str) -> Option<usize> {
+    let folded_needle = needle.to_lowercase();
+    if folded_needle.is_empty() {
+        return Some(0);
+    }
+
+    for (start, _) in haystack.char_indices() {
+        if unicode_ci_match_end_at(haystack, start, &folded_needle).is_some() {
+            return Some(start);
+        }
+    }
+
+    None
+}
+
+fn unicode_ci_rfind(haystack: &str, needle: &str) -> Option<usize> {
+    let folded_needle = needle.to_lowercase();
+    if folded_needle.is_empty() {
+        return None;
+    }
+
+    let mut last_match = None;
+    for (start, _) in haystack.char_indices() {
+        if unicode_ci_match_end_at(haystack, start, &folded_needle).is_some() {
+            last_match = Some(start);
+        }
+    }
+
+    last_match
+}
+
 // ---------------------------------------------------------------------------
 // strstrwrapper — search for needle in haystack starting from pos
 // ---------------------------------------------------------------------------
@@ -360,20 +410,18 @@ fn strstrwrapper(
         // against a read borrow of the compiled regex, then store them in one
         // assignment — avoids cloning the whole compiled regex (which the old code
         // did on every match just to dodge the &mut-while-reading borrow).
-        if result.is_some() {
+        if let Some(match_start) = result {
             let new_matches: Option<[(usize, usize); 10]> = with_state(|s| {
                 let re = s.search_regexp.as_ref()?;
-                let search_slice = if backwards {
-                    &data[..from_offset]
-                } else {
-                    &data[from_offset..]
-                };
-                let base = if backwards { 0 } else { from_offset };
+                let search_slice = &data[match_start..];
                 let caps = re.captures(search_slice)?;
+                if caps.get(0)?.start() != 0 {
+                    return None;
+                }
                 let mut rm = [(0usize, 0usize); 10];
                 for i in 0..10 {
                     if let Some(m) = caps.get(i) {
-                        rm[i] = (base + m.start(), base + m.end());
+                        rm[i] = (match_start + m.start(), match_start + m.end());
                     }
                 }
                 Some(rm)
@@ -413,29 +461,7 @@ fn strstrwrapper(
                 // yields the exact same last-match offset as the to_lowercase() path.
                 ascii_ci_rfind(search_slice.as_bytes(), needle.as_bytes())
             } else {
-                // Non-ASCII fallback: preserve the existing whole-string lowercasing
-                // behavior exactly (Unicode folding can differ from per-char folding).
-                let lower_needle_buf;
-                let lower_needle: &str = match lowered_needle {
-                    Some(s) => s,
-                    None => {
-                        lower_needle_buf = needle.to_lowercase();
-                        lower_needle_buf.as_str()
-                    }
-                };
-                let lower_data = search_slice.to_lowercase();
-                let mut last_match: Option<usize> = None;
-                let mut start = 0;
-                while let Some(pos) = lower_data[start..].find(lower_needle) {
-                    let match_pos = start + pos;
-                    last_match = Some(match_pos);
-                    let step = lower_data[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
-                    start = match_pos + step;
-                    if start >= lower_data.len() {
-                        break;
-                    }
-                }
-                last_match
+                unicode_ci_rfind(search_slice, lowered_needle.unwrap_or(needle))
             }
         } else {
             // Find first occurrence at or after from_offset.
@@ -446,17 +472,7 @@ fn strstrwrapper(
                 // Common case: ASCII, case-insensitive — zero-alloc in-place scan.
                 ascii_ci_find(search_slice.as_bytes(), needle.as_bytes())
             } else {
-                // Non-ASCII fallback: exact existing whole-string lowercasing behavior.
-                let lower_needle_buf;
-                let lower_needle: &str = match lowered_needle {
-                    Some(s) => s,
-                    None => {
-                        lower_needle_buf = needle.to_lowercase();
-                        lower_needle_buf.as_str()
-                    }
-                };
-                let lower_data = search_slice.to_lowercase();
-                lower_data.find(lower_needle)
+                unicode_ci_find(search_slice, lowered_needle.unwrap_or(needle))
             };
             found.map(|pos| from_offset + pos)
         }
@@ -574,9 +590,8 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
             String::new()
         };
 
-        let _search_hist = state().search_history.clone();
         let response = do_prompt(menu, &initial,
-            None, crate::winio::edit_refresh, &prompt);
+            Some(crate::history::HistoryKind::Search), crate::winio::edit_refresh, &prompt);
 
         let last_search_empty = state().last_search.is_empty();
 
@@ -1535,7 +1550,7 @@ pub fn ask_for_and_do_replacements() {
 
     // Prompt for replacement string.
     let response = do_prompt(MREPLACEWITH, "",
-        None, crate::winio::edit_refresh,
+        Some(crate::history::HistoryKind::Replace), crate::winio::edit_refresh,
         "Replace with");
 
     // Restore the search string (it may have changed at the prompt).
@@ -1643,6 +1658,9 @@ pub fn goto_line_posx(linenumber: isize, pos_x: usize) {
         s.refresh_needed = true;
     });
 }
+
+#[cfg(all(feature = "tiny", not(any(feature = "speller", feature = "linter", feature = "formatter"))))]
+pub fn goto_line_posx(_linenumber: isize, _pos_x: usize) {}
 
 // ---------------------------------------------------------------------------
 // do_gotolinecolumn — implement Go To Line menu
@@ -2294,7 +2312,8 @@ pub fn to_next_anchor() {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod ci_scan_tests {
-    use super::{ascii_ci_find, ascii_ci_rfind};
+    use super::{ascii_ci_find, ascii_ci_rfind, regexp_init, strstrwrapper, unicode_ci_find, unicode_ci_rfind, SearchFlags};
+    use crate::global::{state, state_mut};
 
     /// Reference forward search: first match of the lowercased needle.
     fn ref_find(hay: &str, ndl: &str) -> Option<usize> {
@@ -2329,6 +2348,33 @@ mod ci_scan_tests {
         // Overlap: last match must be the largest start offset.
         assert_eq!(ascii_ci_find(b"aAaA", b"aa"), Some(0));
         assert_eq!(ascii_ci_rfind(b"aAaA", b"aa"), Some(2));
+    }
+
+    #[test]
+    fn unicode_case_insensitive_offsets_are_original_byte_offsets() {
+        assert_eq!(unicode_ci_find("İx", "x"), Some(2));
+        assert_eq!(unicode_ci_rfind("İx", "x"), Some(2));
+        assert_eq!(unicode_ci_find("preİpost", "post"), Some(5));
+        assert_eq!(unicode_ci_find("İ", "i\u{307}"), Some(0));
+    }
+
+    #[test]
+    fn backward_regex_captures_selected_match() {
+        assert!(regexp_init("([a-z])([0-9])"));
+        let flags = SearchFlags {
+            use_regexp: true,
+            backwards: true,
+            case_sensitive: true,
+        };
+
+        let data = "a1 b2";
+        assert_eq!(strstrwrapper(data, "unused", data.len(), None, flags), Some(3));
+        let matches = state().regmatches;
+        assert_eq!(matches[0], (3, 5));
+        assert_eq!(matches[1], (3, 4));
+        assert_eq!(matches[2], (4, 5));
+
+        state_mut().search_regexp = None;
     }
 
     #[test]

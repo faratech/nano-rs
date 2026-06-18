@@ -516,7 +516,6 @@ pub fn new_magicline() {
 /* C: void remove_magicline(void)
  * Remove the magic line from the end of the buffer if there is one and
  * it is not the only line. */
-#[cfg(any(not(feature = "tiny"), feature = "help"))]
 pub fn remove_magicline() {
     STATE.with(|s| {
         let st = s.borrow_mut();
@@ -526,7 +525,6 @@ pub fn remove_magicline() {
 
 /* C: bool mark_is_before_cursor(void)
  * Return TRUE when the mark is before or at the cursor. */
-#[cfg(not(feature = "tiny"))]
 pub fn mark_is_before_cursor() -> bool {
     STATE.with(|s| {
         let st = s.borrow();
@@ -537,7 +535,6 @@ pub fn mark_is_before_cursor() -> bool {
 /* C: void get_region(linestruct **top, ..., linestruct **bot, ...)
  * Return the start and end coordinates of the marked region as byte offsets
  * and line references (encoded as line numbers here for portability). */
-#[cfg(not(feature = "tiny"))]
 pub fn get_region() -> (usize, usize, usize, usize) {
     // Returns (top_lineno, top_x, bot_lineno, bot_x)
     STATE.with(|s| {
@@ -550,7 +547,6 @@ pub fn get_region() -> (usize, usize, usize, usize) {
  * Get the set of lines to work on — either just the current line or the
  * first-to-last lines of the marked region (excluding the last line if the
  * cursor is at its start). */
-#[cfg(not(feature = "tiny"))]
 pub fn get_range() -> (usize, usize) {
     // Returns (top_lineno, bot_lineno)
     STATE.with(|s| {

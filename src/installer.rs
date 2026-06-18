@@ -10,6 +10,7 @@
 //! nano-linux-<arch> on Linux/Unix (arch is amd64 or arm64).
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
@@ -138,6 +139,83 @@ fn backup_path_for(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+fn temp_sibling_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let parent = path.parent().ok_or("target path has no parent directory")?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("nano");
+    Ok(parent.join(format!(".{}.tmp-{}", name, std::process::id())))
+}
+
+fn replace_with_prepared_file(prepared: &Path, target: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if target.exists() {
+        let backup_path = backup_path_for(target);
+        let _ = fs::remove_file(&backup_path);
+
+        fs::rename(target, &backup_path)?;
+
+        if let Err(e) = fs::rename(prepared, target) {
+            let _ = fs::rename(&backup_path, target);
+            let _ = fs::remove_file(prepared);
+            return Err(e.into());
+        }
+
+        let _ = fs::remove_file(&backup_path);
+    } else {
+        fs::rename(prepared, target)?;
+    }
+
+    Ok(())
+}
+
+fn write_bytes_atomic(path: &Path, body: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let temp_path = temp_sibling_path(path)?;
+    let _ = fs::remove_file(&temp_path);
+
+    let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    replace_with_prepared_file(&temp_path, path)
+}
+
+fn copy_file_atomic(source: &Path, target: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let temp_path = temp_sibling_path(target)?;
+    let _ = fs::remove_file(&temp_path);
+
+    if let Err(e) = fs::copy(source, &temp_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e.into());
+    }
+
+    set_executable(&temp_path);
+
+    if let Err(e) = replace_with_prepared_file(&temp_path, target) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
+    Ok(())
+}
+
 /// Mark a file executable on Unix (no-op on Windows).
 fn set_executable(path: &Path) {
     #[cfg(unix)]
@@ -257,9 +335,7 @@ pub fn install_to_path(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("Installing nano {} to PATH...", current_version);
     }
 
-    // Copy the binary
-    fs::copy(&current_exe, &target_path)?;
-    set_executable(&target_path);
+    copy_file_atomic(&current_exe, &target_path)?;
 
     println!("Successfully installed nano {}!", current_version);
     println!("Location: {}", target_path.display());
@@ -609,7 +685,7 @@ pub fn update_from_github(force: bool) -> Result<(), Box<dyn std::error::Error>>
     if body.is_empty() {
         return Err("Downloaded update file is empty".into());
     }
-    fs::write(&temp_file, body)?;
+    write_bytes_atomic(&temp_file, &body)?;
 
     println!("Download complete. Installing...");
 
@@ -626,30 +702,7 @@ pub fn do_install_update(update_file: &std::path::Path) -> Result<(), Box<dyn st
         fs::create_dir_all(parent)?;
     }
 
-    // If target exists, use the rename trick (both Windows and Unix allow
-    // renaming/replacing a file that is currently being executed).
-    if target_path.exists() {
-        let backup_path = backup_path_for(&target_path);
-        let _ = fs::remove_file(&backup_path); // Remove old backup if exists
-
-        // Rename current binary to .old
-        fs::rename(&target_path, &backup_path)?;
-
-        // Copy new version
-        if let Err(e) = fs::copy(update_file, &target_path) {
-            // Failed - restore backup
-            let _ = fs::rename(&backup_path, &target_path);
-            return Err(e.into());
-        }
-
-        // Clean up backup - ignore errors as running process might lock it
-        let _ = fs::remove_file(&backup_path);
-    } else {
-        // No existing file, just copy
-        fs::copy(update_file, &target_path)?;
-    }
-
-    set_executable(&target_path);
+    copy_file_atomic(update_file, &target_path)?;
 
     // Clean up temp file
     let _ = fs::remove_file(update_file);
@@ -752,7 +805,7 @@ pub fn check_and_download_update() -> UpdateStatus {
 
     match native_http_get(&download_url) {
         Ok(body) if !body.is_empty() => {
-            if fs::write(&temp_file, body).is_ok() {
+            if write_bytes_atomic(&temp_file, &body).is_ok() {
                 UpdateStatus::Downloaded {
                     version: latest_version,
                     path: temp_file,
@@ -836,8 +889,7 @@ pub fn apply_pending_update() -> bool {
 
     // If install path doesn't exist, just copy directly
     if !install_path.exists() {
-        if fs::copy(&update_file, &install_path).is_ok() {
-            set_executable(&install_path);
+        if copy_file_atomic(&update_file, &install_path).is_ok() {
             let _ = fs::remove_file(&update_file);
             eprintln!("Update installed successfully!");
             return true;
@@ -845,34 +897,13 @@ pub fn apply_pending_update() -> bool {
         return false;
     }
 
-    // Rename current binary to .old (allowed while running on both platforms).
-    let backup_path = backup_path_for(&install_path);
-    let _ = fs::remove_file(&backup_path); // Remove old backup if exists
-
-    if let Err(e) = fs::rename(&install_path, &backup_path) {
-        // Can't rename - keep update file for retry on next restart
-        eprintln!("Update pending (cannot rename running executable: {})", e);
+    if let Err(e) = copy_file_atomic(&update_file, &install_path) {
+        eprintln!("Update pending (cannot replace running executable: {})", e);
         return true; // Return true to skip re-download
     }
-
-    // Copy new version to install location
-    if let Err(e) = fs::copy(&update_file, &install_path) {
-        // Failed to copy, restore backup
-        eprintln!("Update failed (copy error: {}), restoring backup", e);
-        if let Err(e2) = fs::rename(&backup_path, &install_path) {
-            eprintln!("CRITICAL: Failed to restore backup: {}. Working executable is at: {:?}", e2, backup_path);
-        }
-        // Keep update file for retry
-        return true; // Return true to skip re-download
-    }
-
-    set_executable(&install_path);
 
     // Clean up update file ONLY on success
     let _ = fs::remove_file(&update_file);
-
-    // Try to remove backup, but ignore error if locked (it's the running executable)
-    let _ = fs::remove_file(&backup_path);
 
     eprintln!("Update applied successfully!");
     true

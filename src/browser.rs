@@ -437,13 +437,32 @@ pub fn to_last_file() {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn strip_last_component(path: &str) -> String {
-    // C truncates at the last '/': for a root-level path like "/foo" this yields
-    // "" (not "/"), so browse_in falls back to the cwd as intended.
-    if let Some(pos) = path.rfind('/') {
-        path[..pos].to_string()
-    } else {
-        path.to_string()
+    let trimmed = path.trim_end_matches(|c| c == '/' || c == '\\');
+    if trimmed.is_empty() {
+        return String::new();
     }
+    std::path::Path::new(trimmed)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+#[cfg(feature = "browser")]
+fn path_join_display(base: &str, child: &str) -> String {
+    std::path::Path::new(base)
+        .join(child)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(feature = "browser")]
+fn has_trailing_separator(path: &str) -> bool {
+    path.ends_with('/') || path.ends_with('\\')
+}
+
+#[cfg(feature = "browser")]
+fn is_root_path(path: &str) -> bool {
+    std::path::Path::new(path).parent().is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +494,7 @@ pub fn browse(initial_path: String) -> Option<String> {
     use crate::winio::{statusline, statusbar, bottombars, titlebar, edit_refresh, get_kbinput};
     use crate::files::{get_full_path, outside_of_confinement, expand_leading_tilde};
     use crate::utils::tail;
-    use std::fs;
+    use std::{fs, path::Path};
 
     let mut path = initial_path;
     let mut present_name: Option<String> = None;
@@ -491,14 +510,14 @@ pub fn browse(initial_path: String) -> Option<String> {
 
         let dir_entries: Result<Vec<String>, std::io::Error> = (|| {
             let mut v: Vec<String> = Vec::new();
+            v.push(path_join_display(&path, ".."));
             let rd = fs::read_dir(&path)?;
             for entry in rd {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 // Skip the useless "." item.
                 if name == "." { continue; }
-                let full = format!("{}{}", path, name);
-                v.push(full);
+                v.push(path_join_display(&path, &name));
             }
             Ok(v)
         })();
@@ -741,10 +760,10 @@ pub fn browse(initial_path: String) -> Option<String> {
                     let mut new_path = expand_leading_tilde(&answer);
 
                     // If the given path is relative, join it with the current path.
-                    if !new_path.starts_with('/') {
+                    if !Path::new(&new_path).is_absolute() {
                         let cur_path = state().present_path.clone()
                             .unwrap_or_default();
-                        new_path = format!("{}{}", cur_path, answer);
+                        new_path = path_join_display(&cur_path, &answer);
                     }
 
                     #[cfg(feature = "operatingdir")]
@@ -772,7 +791,7 @@ pub fn browse(initial_path: String) -> Option<String> {
                     }
 
                     // Snip any trailing slashes.
-                    while new_path.len() > 1 && new_path.ends_with('/') {
+                    while has_trailing_separator(&new_path) && !is_root_path(&new_path) {
                         new_path.pop();
                     }
 
@@ -793,7 +812,7 @@ pub fn browse(initial_path: String) -> Option<String> {
                 }).unwrap_or_default();
 
                 // Can't move up from root.
-                if selected_file == "/.." {
+                if tail(&selected_file) == ".." && is_root_path(&path) {
                     statusline(MessageType::Alert, "Can't move up a directory");
                     continue;
                 }

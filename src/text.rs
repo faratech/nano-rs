@@ -288,8 +288,23 @@ fn get_cutbuffer() -> Option<LinePtr> {
     state().cutbuffer.clone()
 }
 
+fn line_chain_tail(head: &LinePtr) -> LinePtr {
+    let mut tail = head.clone();
+    loop {
+        let next = tail.borrow().next.clone();
+        match next {
+            Some(node) => tail = node,
+            None => return tail,
+        }
+    }
+}
+
 fn set_cutbuffer(buf: Option<LinePtr>) {
-    state_mut().cutbuffer = buf;
+    let bottom = buf.as_ref().map(line_chain_tail);
+    with_state_mut(|s| {
+        s.cutbuffer = buf;
+        s.cutbottom = bottom;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +552,6 @@ pub fn length_of_white(text: &str) -> usize {
 }
 
 /* C: void compensate_leftward(linestruct *line, size_t leftshift) */
-#[cfg(not(feature = "tiny"))]
 pub fn compensate_leftward(line: &LinePtr, leftshift: usize) {
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
@@ -1281,6 +1295,9 @@ pub fn do_undo() {
     }
 }
 
+#[cfg(feature = "tiny")]
+pub fn do_undo() {}
+
 /// Advance openfile.current_undo to the next (older) item in the stack.
 #[cfg(not(feature = "tiny"))]
 fn advance_current_undo() {
@@ -1565,6 +1582,9 @@ pub fn do_redo() {
     }
 }
 
+#[cfg(feature = "tiny")]
+pub fn do_redo() {}
+
 /// Set openfile.current_undo to the given raw pointer.
 #[cfg(not(feature = "tiny"))]
 fn set_current_undo_to(ptr: *mut UndoStruct) {
@@ -1766,7 +1786,8 @@ pub fn do_enter() {
 
 /* C: void inject(char *buf, size_t buf_len) */
 pub fn inject(buf: &str, buf_len: usize) {
-    let insertion = if buf_len <= buf.len() { &buf[..buf_len] } else { buf };
+    let insertion_end = safe_char_boundary(buf, buf_len.min(buf.len()));
+    let insertion = &buf[..insertion_end];
 
     let (current_line, current_x) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
@@ -1794,11 +1815,13 @@ pub fn inject(buf: &str, buf_len: usize) {
         node.data = data;
     }
 
-    let new_x = current_x + buf_len;
+    let insertion_len = insertion.len();
+    let insertion_chars = insertion.chars().count();
+    let new_x = current_x + insertion_len;
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             f.current_x = new_x;
-            f.totsize += buf_len;
+            f.totsize += insertion_chars;
         }
     });
 
@@ -1809,7 +1832,7 @@ pub fn inject(buf: &str, buf_len: usize) {
             let f = s.openfile.as_ref()?;
             let mark = f.mark.as_ref()?;
             if mark.as_ptr() == current_line.as_ptr() && f.mark_x >= current_x {
-                Some(f.mark_x + buf_len)
+                Some(f.mark_x + insertion_len)
             } else {
                 None
             }
@@ -1917,6 +1940,9 @@ pub fn discard_until(thisitem: *const UndoStruct) {
     });
 }
 
+#[cfg(feature = "tiny")]
+pub fn discard_until(_thisitem: *const UndoStruct) {}
+
 /* C: void add_undo(undo_type action, const char *message) */
 #[cfg(not(feature = "tiny"))]
 pub fn add_undo(action: UndoType, message: Option<&str>) {
@@ -1980,6 +2006,9 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
     // Fill in action-specific fields.
     fill_undo_fields(action, &thisline, current_x, message);
 }
+
+#[cfg(feature = "tiny")]
+pub fn add_undo(_action: UndoType, _message: Option<&str>) {}
 
 /// Fill in action-specific fields of the freshly prepended undo record.
 #[cfg(not(feature = "tiny"))]
@@ -2189,6 +2218,9 @@ pub fn update_multiline_undo(lineno: isize, indentation: &str) {
     });
 }
 
+#[cfg(feature = "tiny")]
+pub fn update_multiline_undo(_lineno: isize, _indentation: &str) {}
+
 /* C: void update_undo(undo_type action) */
 #[cfg(not(feature = "tiny"))]
 pub fn update_undo(action: UndoType) {
@@ -2331,6 +2363,9 @@ pub fn update_undo(action: UndoType) {
         }
     }
 }
+
+#[cfg(feature = "tiny")]
+pub fn update_undo(_action: UndoType) {}
 
 // ---------------------------------------------------------------------------
 // Section 9: Wrapping (ENABLE_WRAPPING)
@@ -3163,7 +3198,6 @@ pub fn justify_text(whole_buffer: bool) {
                         prev: None,
                         #[cfg(feature = "color")]
                         multidata: Vec::new(),
-                        #[cfg(not(feature = "tiny"))]
                         has_anchor: false,
                     });
                     // Link empty before cutbuffer.
@@ -3182,7 +3216,6 @@ pub fn justify_text(whole_buffer: bool) {
                         prev: None,
                         #[cfg(feature = "color")]
                         multidata: Vec::new(),
-                        #[cfg(not(feature = "tiny"))]
                         has_anchor: false,
                     });
                     // Append trail after jusline.

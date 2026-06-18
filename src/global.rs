@@ -815,7 +815,6 @@ impl AppState {
             prev: None,
             #[cfg(feature = "color")]
             multidata: Vec::new(),
-            #[cfg(not(feature = "tiny"))]
             has_anchor: false,
         });
         if let Some(ref mut of) = self.openfile {
@@ -832,7 +831,6 @@ impl AppState {
     /// Remove the magic line at the end of the buffer if it is empty
     /// and is not the only line.
     /// C: remove_magicline()
-    #[cfg(any(not(feature = "tiny"), feature = "help"))]
     pub fn remove_magicline_if_empty(&mut self) {
         if let Some(ref mut of) = self.openfile {
             // If filebot is empty and there is a previous line, unlink it.
@@ -854,7 +852,6 @@ impl AppState {
 
     /// Return true when the mark is before or at the cursor position.
     /// C: mark_is_before_cursor()
-    #[cfg(not(feature = "tiny"))]
     pub fn mark_is_before_cursor(&self) -> bool {
         if let Some(ref of) = self.openfile {
             if let Some(ref mark) = of.mark {
@@ -877,7 +874,6 @@ impl AppState {
     /// Return the start and end coordinates of the marked region as
     /// (top_lineno, top_x, bot_lineno, bot_x).
     /// C: get_region()
-    #[cfg(not(feature = "tiny"))]
     pub fn get_region_coords(&self) -> (usize, usize, usize, usize) {
         if let Some(ref of) = self.openfile {
             if let (Some(mark), Some(current)) = (&of.mark, &of.current) {
@@ -897,7 +893,6 @@ impl AppState {
 
     /// Return the line numbers of the top and bottom of the range to operate on.
     /// C: get_range()
-    #[cfg(not(feature = "tiny"))]
     pub fn get_range_linenos(&mut self) -> (usize, usize) {
         if let Some(ref of) = self.openfile {
             if of.mark.is_some() {
@@ -1034,13 +1029,9 @@ pub fn do_home()       { crate::move_::do_home() }
 pub fn do_end()        { crate::move_::do_end() }
 pub fn to_prev_word()  { crate::move_::to_prev_word() }
 pub fn to_next_word()  { crate::move_::to_next_word() }
-#[cfg(not(feature = "tiny"))]
 pub fn to_prev_block() { crate::move_::to_prev_block() }
-#[cfg(not(feature = "tiny"))]
 pub fn to_next_block() { crate::move_::to_next_block() }
-#[cfg(not(feature = "tiny"))]
 pub fn do_scroll_up()    { crate::move_::do_scroll_up() }
-#[cfg(not(feature = "tiny"))]
 pub fn do_scroll_down()  { crate::move_::do_scroll_down() }
 #[cfg(not(feature = "tiny"))]
 pub fn do_scroll_left()  { crate::move_::do_scroll_left() }
