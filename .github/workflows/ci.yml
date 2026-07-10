@@ -60,7 +60,12 @@ jobs:
         run: |
           printf 'smoke line one\nsmoke line two\n' > /tmp/smoke.txt
           for flags in "" "-l"; do
-            script -qec "timeout -k 4 2 ./target/release/nano $flags /tmp/smoke.txt" /dev/null \
+            # Headless `script` allocates a 0x0 pty, so set a real size first.
+            # `sleep 3 |` keeps script's stdin open: at stdin EOF script sends
+            # the tty EOF byte (^D), which raw-mode nano correctly treats as
+            # delete-character and would mutate the buffer.  -I keeps the run
+            # hermetic against whatever nanorc the runner image ships.
+            sleep 3 | script -qec "stty rows 30 cols 100 && timeout -k 4 2 ./target/release/nano -I $flags /tmp/smoke.txt" /dev/null \
               > /tmp/smoke.out 2>&1 || true
             if grep -a "panicked" /tmp/smoke.out; then
               echo "nano $flags panicked during interactive startup" >&2
@@ -70,6 +75,10 @@ jobs:
               echo "nano $flags did not render the buffer" >&2
               exit 1
             }
+            if ls /tmp/smoke.txt.save* 2>/dev/null; then
+              echo "nano $flags spuriously modified and emergency-saved the buffer" >&2
+              exit 1
+            fi
             rm -f /tmp/.smoke.txt.swp
           done
 
