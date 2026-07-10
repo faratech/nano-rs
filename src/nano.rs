@@ -1238,12 +1238,16 @@ pub fn confirm_margin() {
 
     let current_margin = state().margin;
     if final_margin != current_margin {
-        with_state_mut(|s| {
+        let keep_focus = with_state_mut(|s| {
             let keep_focus = (s.margin > 0) && s.focusing;
             s.margin = final_margin;
             s.editwincols = cols - s.margin - s.sidebar;
-            #[cfg(not(feature = "tiny"))]
-            winio::ensure_firstcolumn_is_aligned();
+            keep_focus
+        });
+        // Uses its own state borrows, so it must run outside the closure.
+        #[cfg(not(feature = "tiny"))]
+        winio::ensure_firstcolumn_is_aligned();
+        with_state_mut(|s| {
             s.focusing = keep_focus;
             s.refresh_needed = true;
         });
@@ -3700,5 +3704,27 @@ mod cli_tests {
         assert_eq!(long_option_is_available("multibuffer"), cfg!(feature = "multibuffer"));
         assert_eq!(short_option_is_available('s'), cfg!(feature = "speller"));
         assert_eq!(long_option_is_available("magic"), cfg!(feature = "libmagic"));
+    }
+}
+
+#[cfg(all(test, feature = "linenumbers"))]
+mod margin_tests {
+    use crate::global::state;
+
+    // Regression: confirm_margin used to call ensure_firstcolumn_is_aligned
+    // inside its with_state_mut closure, so any margin change (turning line
+    // numbers on or off) panicked with "RefCell already mutably borrowed".
+    #[test]
+    fn margin_changes_do_not_reborrow_state() {
+        crate::global::state_mut().flags = [0; 4];
+        crate::files::make_new_buffer();
+
+        crate::SET!(crate::definitions::LINE_NUMBERS);
+        super::confirm_margin();
+        assert!(state().margin > 0);
+
+        crate::UNSET!(crate::definitions::LINE_NUMBERS);
+        super::confirm_margin();
+        assert_eq!(state().margin, 0);
     }
 }
