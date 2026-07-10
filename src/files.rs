@@ -235,28 +235,24 @@ fn rename_path(from: &Path, to: &Path, source: &File) -> io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Atomically install an already-open staging file on Windows without
-/// converting either directory capability back into an ambient path.
+/// Atomically install an already-open staging file on Windows.
 ///
-/// `std::fs::rename` cannot replace an existing file on Windows.  The native
-/// handle API can, and its `RootDirectory` field anchors a simple destination
-/// name to an already-open parent directory.  Both the source and destination
-/// parent therefore remain capability-confined throughout the operation.
+/// `SetFileInformationByHandle(FileRenameInfo)` rejects a non-NULL
+/// `RootDirectory` with ERROR_INVALID_PARAMETER (that field is honored only
+/// by `NtSetInformationFile`), so a handle-relative rename is not available
+/// through the Win32 API.  Instead, both the source and the destination
+/// parent are resolved to their final pathnames *from already-open
+/// capability-confined handles*, and the rename uses those resolved names
+/// (`std::fs::rename` replaces existing files on Windows via
+/// MOVEFILE_REPLACE_EXISTING).  A directory swapped after resolution can at
+/// worst fail the rename; the names cannot come from re-walking an ambient,
+/// attacker-substitutable path.
 #[cfg(all(windows, feature = "operatingdir"))]
 fn replace_capability_file_on_windows(
     root: &OperatingRoot,
     source: &File,
     destination: &Path,
 ) -> io::Result<()> {
-    use std::mem::size_of;
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
-        FILE_RENAME_INFO_0,
-    };
-
     let basename = destination.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -267,48 +263,37 @@ fn replace_capability_file_on_windows(
         .unwrap_or_else(|| Path::new("."));
     let parent = root.dir.open_dir(parent)?;
 
-    let mut name: Vec<u16> = basename.encode_wide().collect();
-    if name.is_empty() || name.iter().any(|unit| *unit == 0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "replacement destination has an invalid file name",
-        ));
-    }
-    let name_bytes = name.len().checked_mul(size_of::<u16>()).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
-    })?;
-    let buffer_bytes = size_of::<FILE_RENAME_INFO>()
-        .checked_add(name_bytes)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
-        })?;
-    let buffer_units = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>());
-    let mut buffer = vec![FILE_RENAME_INFO::default(); buffer_units];
-    let info = buffer.as_mut_ptr();
+    let source_path = final_path_from_handle(source)?;
+    let parent_path = final_path_from_handle(&parent.into_std_file())?;
+    std::fs::rename(source_path, parent_path.join(basename))
+}
 
-    unsafe {
-        (*info).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: true,
-        };
-        (*info).RootDirectory = HANDLE(parent.as_raw_handle());
-        (*info).FileNameLength = name_bytes.try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
-        })?;
-        std::ptr::copy_nonoverlapping(
-            name.as_mut_ptr(),
-            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-            name.len(),
-        );
+/// Resolve an open handle to its final `\\?\`-prefixed pathname.
+#[cfg(all(windows, feature = "operatingdir"))]
+fn final_path_from_handle(file: &File) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
+    };
 
-        SetFileInformationByHandle(
-            HANDLE(source.as_raw_handle()),
-            FileRenameInfo,
-            info.cast(),
-            buffer_bytes.try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
-            })?,
-        )
-        .map_err(|_| io::Error::last_os_error())
+    let mut buffer = vec![0u16; 512];
+    loop {
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                HANDLE(file.as_raw_handle()),
+                &mut buffer,
+                FILE_NAME_NORMALIZED,
+            )
+        } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length <= buffer.len() {
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])));
+        }
+        buffer.resize(length, 0);
     }
 }
 
