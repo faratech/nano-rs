@@ -2115,3 +2115,244 @@ pub fn copy_buffer(src: &LinePtr) -> LinePtr {
 }
 
 // tr! is defined in main.rs and re-exported via #[macro_use]; use crate::tr! here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::global::{flag_index, flag_mask};
+
+    // These tests drive the real cut/paste machinery through global state and
+    // are run under Miri in CI; they must stay hermetic: no filesystem access,
+    // no environment variables, no clocks, no subprocesses, no threads, and no
+    // raw terminal mode (status-bar output goes to the buffered writer only).
+
+    /// Link `lines` into a fresh prev/next chain and return every node.
+    fn build_chain(lines: &[&str]) -> Vec<LinePtr> {
+        let mut nodes: Vec<LinePtr> = Vec::new();
+        for text in lines {
+            let node = make_new_node();
+            node.borrow_mut().data = (*text).to_owned();
+            if let Some(prev) = nodes.last() {
+                node.borrow_mut().lineno = prev.borrow().lineno + 1;
+                node.borrow_mut().prev = Some(LinePtr::downgrade(prev));
+                prev.borrow_mut().next = Some(node.clone());
+            }
+            nodes.push(node);
+        }
+        nodes
+    }
+
+    /// Install a buffer made of `lines` as the open file, with the cursor at
+    /// the start of the first line and a clean cutbuffer.
+    fn install_buffer(lines: &[&str]) -> Vec<LinePtr> {
+        let nodes = build_chain(lines);
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filetop = nodes.first().cloned();
+        buffer.filebot = nodes.last().cloned();
+        buffer.edittop = nodes.first().cloned();
+        buffer.current = nodes.first().cloned();
+        buffer.current_x = 0;
+        buffer.totsize = lines.iter().map(|l| l.chars().count()).sum::<usize>()
+            + lines.len().saturating_sub(1);
+        // Avoid terminal title updates in unit tests.
+        buffer.modified = true;
+
+        with_state_mut(|s| {
+            s.openfile = Some(buffer);
+            s.cutbuffer = None;
+            s.cutbottom = None;
+            s.keep_cutbuffer = false;
+            s.flags[flag_index(NO_NEWLINES)] |= flag_mask(NO_NEWLINES);
+            s.flags[flag_index(ZERO)] |= flag_mask(ZERO);
+            s.flags[flag_index(CUT_FROM_CURSOR)] &= !flag_mask(CUT_FROM_CURSOR);
+            s.editwincols = 80;
+            s.editwinrows = 24;
+        });
+        nodes
+    }
+
+    /// Walk `head`..`tail` asserting that every forward link has a matching,
+    /// still-alive weak back-link and that the chain carries `expected` data.
+    fn assert_chain_invariants(head: &LinePtr, tail: &LinePtr, expected: &[&str]) {
+        let mut collected: Vec<String> = Vec::new();
+        let mut current = head.clone();
+        loop {
+            collected.push(current.borrow().data.clone());
+            let next = current.borrow().next.clone();
+            match next {
+                Some(next_node) => {
+                    let back = next_node.borrow().prev.clone()
+                        .expect("every non-head node must keep a prev link")
+                        .upgrade()
+                        .expect("a prev link must stay alive while the chain does");
+                    assert!(LinePtr::ptr_eq(&back, &current),
+                        "a node's prev must point back at its predecessor");
+                    current = next_node;
+                }
+                None => break,
+            }
+        }
+        assert!(LinePtr::ptr_eq(&current, tail),
+            "the declared tail must terminate the chain");
+        assert_eq!(collected, expected);
+    }
+
+    /// Assert the cutbuffer holds exactly `expected` with intact head/tail links.
+    fn assert_cutbuffer_is(expected: &[&str]) {
+        let head = state().cutbuffer.clone().expect("a non-empty cutbuffer");
+        let tail = state().cutbottom.clone().expect("a cutbottom for the cutbuffer");
+        assert_chain_invariants(&head, &tail, expected);
+    }
+
+    /// Assert the open buffer holds exactly `expected`, with intact links and
+    /// consecutive line numbers.
+    fn assert_buffer_is(expected: &[&str]) {
+        let (head, tail) = with_state(|s| {
+            let of = s.openfile.as_ref().expect("an open buffer");
+            (of.filetop.clone().expect("a filetop"), of.filebot.clone().expect("a filebot"))
+        });
+        assert_chain_invariants(&head, &tail, expected);
+
+        let mut line = Some(head);
+        let mut lineno: isize = 1;
+        while let Some(node) = line {
+            assert_eq!(node.borrow().lineno, lineno, "line numbers must be consecutive");
+            lineno += 1;
+            line = node.borrow().next.clone();
+        }
+    }
+
+    #[test]
+    fn cutting_a_line_moves_it_into_the_cutbuffer() {
+        install_buffer(&["alpha", "beta", "gamma"]);
+
+        cut_text();
+
+        assert_buffer_is(&["beta", "gamma"]);
+        assert_cutbuffer_is(&["alpha", ""]);
+
+        let state_guard = state();
+        let of = state_guard.openfile.as_ref().unwrap();
+        assert_eq!(of.current_x, 0);
+        assert!(LinePtr::ptr_eq(of.current.as_ref().unwrap(), of.filetop.as_ref().unwrap()));
+        assert_eq!(of.totsize, "beta\ngamma".chars().count());
+        drop(state_guard);
+        assert!(state().keep_cutbuffer, "line cuts must stay cumulative");
+    }
+
+    #[test]
+    fn consecutive_line_cuts_accumulate_in_the_cutbuffer() {
+        install_buffer(&["alpha", "beta", "gamma"]);
+
+        cut_text();
+        cut_text();
+
+        assert_buffer_is(&["gamma"]);
+        assert_cutbuffer_is(&["alpha", "beta", ""]);
+        assert_eq!(state().openfile.as_ref().unwrap().totsize, "gamma".len());
+    }
+
+    #[test]
+    fn replacing_the_cutbuffer_frees_the_previous_lines() {
+        install_buffer(&["alpha", "beta", "gamma"]);
+        cut_text();
+
+        let weak_head = LinePtr::downgrade(state().cutbuffer.as_ref().unwrap());
+        assert!(weak_head.upgrade().is_some());
+
+        // Break the cut continuity, so the next cut replaces the cutbuffer.
+        with_state_mut(|s| {
+            s.keep_cutbuffer = false;
+            if let Some(ref mut of) = s.openfile {
+                of.last_action = UndoType::Other;
+            }
+        });
+        cut_text();
+
+        assert!(weak_head.upgrade().is_none(),
+            "replaced cutbuffer lines must be freed");
+        assert_buffer_is(&["gamma"]);
+        assert_cutbuffer_is(&["beta", ""]);
+    }
+
+    #[test]
+    fn paste_after_line_cut_restores_the_buffer() {
+        install_buffer(&["alpha", "beta"]);
+
+        cut_text();
+        assert_buffer_is(&["beta"]);
+
+        paste_text();
+        assert_buffer_is(&["alpha", "beta"]);
+        // Pasting grafts a copy; the cutbuffer itself must stay intact.
+        assert_cutbuffer_is(&["alpha", ""]);
+        assert_eq!(state().openfile.as_ref().unwrap().totsize, "alpha\nbeta".chars().count());
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn cut_till_eof_takes_the_tail_and_survives_undo_redo() {
+        let nodes = install_buffer(&["alpha", "beta", "gamma"]);
+        with_state_mut(|s| {
+            let of = s.openfile.as_mut().unwrap();
+            of.current = Some(nodes[1].clone());
+            of.current_x = 2;
+        });
+
+        cut_till_eof();
+
+        assert_buffer_is(&["alpha", "be"]);
+        assert_cutbuffer_is(&["ta", "gamma"]);
+        let state_guard = state();
+        let of = state_guard.openfile.as_ref().unwrap();
+        assert!(LinePtr::ptr_eq(of.current.as_ref().unwrap(), &nodes[1]));
+        assert!(LinePtr::ptr_eq(of.filebot.as_ref().unwrap(), &nodes[1]));
+        assert_eq!(of.current_x, 2);
+        drop(state_guard);
+
+        crate::text::do_undo();
+        assert_buffer_is(&["alpha", "beta", "gamma"]);
+
+        crate::text::do_redo();
+        assert_buffer_is(&["alpha", "be"]);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn marked_region_cut_paste_undo_redo_round_trip() {
+        let nodes = install_buffer(&["alpha", "beta", "gamma"]);
+        with_state_mut(|s| {
+            let of = s.openfile.as_mut().unwrap();
+            of.mark = Some(nodes[0].clone());
+            of.mark_x = 2;
+            of.current = Some(nodes[2].clone());
+            of.current_x = 3;
+        });
+
+        cut_text();
+
+        assert_buffer_is(&["alma"]);
+        assert_cutbuffer_is(&["pha", "beta", "gam"]);
+        let state_guard = state();
+        let of = state_guard.openfile.as_ref().unwrap();
+        assert!(of.mark.is_none(), "cutting must consume the mark");
+        assert_eq!(of.current_x, 2);
+        assert!(LinePtr::ptr_eq(of.current.as_ref().unwrap(), of.filetop.as_ref().unwrap()));
+        drop(state_guard);
+
+        paste_text();
+        assert_buffer_is(&["alpha", "beta", "gamma"]);
+        assert_cutbuffer_is(&["pha", "beta", "gam"]);
+
+        crate::text::do_undo();
+        assert_buffer_is(&["alma"]);
+        crate::text::do_undo();
+        assert_buffer_is(&["alpha", "beta", "gamma"]);
+
+        crate::text::do_redo();
+        assert_buffer_is(&["alma"]);
+        crate::text::do_redo();
+        assert_buffer_is(&["alpha", "beta", "gamma"]);
+    }
+}

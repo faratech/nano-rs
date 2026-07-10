@@ -131,7 +131,7 @@ jobs:
         run: cargo check --all-targets --target x86_64-pc-windows-msvc --no-default-features --verbose
 
   miri:
-    name: Miri state, text, rendering, and input soundness
+    name: Miri state, text, cut, multibuffer, rendering, and input soundness
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -163,3 +163,9 @@ jobs:
       # source; the equivalent in-memory undo/redo test remains in this suite.
       - name: Run text and undo regression tests under Miri
         run: cargo miri test text::tests -- --test-threads=1
+
+      - name: Run cut, paste, and cutbuffer tests under Miri
+        run: cargo miri test cut::tests -- --test-threads=1
+
+      - name: Check multibuffer ring traversal under Miri
+        run: cargo miri test global::multibuffer_ring_tests -- --test-threads=1

@@ -1054,6 +1054,133 @@ mod appstate_access_tests {
     }
 }
 
+#[cfg(all(test, feature = "multibuffer"))]
+mod multibuffer_ring_tests {
+    use super::{with_state, with_state_mut};
+    use crate::definitions::{LinePtr, LineWeak, OpenFileStruct};
+
+    // These tests drive the real open-buffer ring (AppState.openfile plus
+    // AppState.buffer_ring) and are run under Miri in CI; they must stay
+    // hermetic: no filesystem access, no environment variables, no clocks,
+    // no subprocesses, no threads, and no raw terminal mode.
+
+    /// Build a one-line buffer with the given name; returns the buffer plus a
+    /// weak handle to its line so tests can observe when the line is freed.
+    fn named_buffer(name: &str) -> (Box<OpenFileStruct>, LineWeak) {
+        let line = crate::nano::make_new_node(None);
+        line.borrow_mut().data = format!("{name} line");
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filename = name.to_owned();
+        buffer.filetop = Some(line.clone());
+        buffer.filebot = Some(line.clone());
+        buffer.edittop = Some(line.clone());
+        buffer.current = Some(line.clone());
+        // Avoid terminal title updates in unit tests.
+        buffer.modified = true;
+        (buffer, LinePtr::downgrade(&line))
+    }
+
+    /// Install `names[0]` as the current buffer and the rest into the ring
+    /// (the same shape open_buffer leaves behind), returning a weak line
+    /// handle per buffer, in `names` order.
+    fn install_ring(names: &[&str]) -> Vec<LineWeak> {
+        let mut weak_lines = Vec::new();
+        let mut buffers = Vec::new();
+        for name in names {
+            let (buffer, weak) = named_buffer(name);
+            weak_lines.push(weak);
+            buffers.push(buffer);
+        }
+        let current = buffers.remove(0);
+        with_state_mut(|s| {
+            s.openfile = Some(current);
+            s.buffer_ring.clear();
+            s.buffer_ring.extend(buffers);
+            // No shortcut list is initialized in unit tests, so closing the
+            // next-to-last buffer must not index into allfuncs.
+            s.exitfunc = None;
+        });
+        weak_lines
+    }
+
+    fn current_name() -> String {
+        with_state(|s| s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default())
+    }
+
+    fn ring_names() -> Vec<String> {
+        with_state(|s| s.buffer_ring.iter().map(|b| b.filename.clone()).collect())
+    }
+
+    #[test]
+    fn switching_buffers_walks_the_ring_in_stable_order() {
+        install_ring(&["one", "two", "three"]);
+        assert_eq!(current_name(), "one");
+
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "two");
+        assert_eq!(ring_names(), ["three", "one"]);
+
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "three");
+        assert_eq!(ring_names(), ["one", "two"]);
+
+        // A third forward step completes the cycle.
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "one");
+        assert_eq!(ring_names(), ["two", "three"]);
+
+        // Backward steps retrace the same order.
+        crate::files::switch_to_prev_buffer();
+        assert_eq!(current_name(), "three");
+        crate::files::switch_to_prev_buffer();
+        assert_eq!(current_name(), "two");
+        assert_eq!(ring_names(), ["three", "one"]);
+    }
+
+    #[test]
+    fn closing_a_buffer_keeps_the_ring_consistent_and_frees_its_lines() {
+        let weak_lines = install_ring(&["one", "two", "three"]);
+
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "two");
+        assert!(weak_lines[1].upgrade().is_some());
+
+        crate::files::close_buffer_impl();
+
+        // The preceding buffer becomes current; only "three" stays ringed.
+        assert_eq!(current_name(), "one");
+        assert_eq!(ring_names(), ["three"]);
+        assert!(weak_lines[1].upgrade().is_none(),
+            "the closed buffer's lines must be freed");
+        assert!(weak_lines[0].upgrade().is_some());
+        assert!(weak_lines[2].upgrade().is_some());
+
+        // The two survivors still cycle cleanly.
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "three");
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "one");
+        assert_eq!(ring_names(), ["three"]);
+    }
+
+    #[test]
+    fn closing_down_to_one_buffer_empties_the_ring() {
+        let weak_lines = install_ring(&["solo", "extra"]);
+
+        crate::files::switch_to_next_buffer();
+        assert_eq!(current_name(), "extra");
+
+        crate::files::close_buffer_impl();
+
+        assert_eq!(current_name(), "solo");
+        assert!(with_state(|s| s.buffer_ring.is_empty()));
+        assert!(weak_lines[1].upgrade().is_none(),
+            "the closed buffer's lines must be freed");
+        assert!(weak_lines[0].upgrade().is_some());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Empty stub functions from global.c (toggles and cancels, no body in C)
 // These are the ACTUAL functions defined in global.c lines 308-335.
