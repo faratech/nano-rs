@@ -2192,7 +2192,9 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
 /// Handle all non-color set options.
 fn handle_non_color_option(option: &str, argument: &str) {
     use crate::utils::parse_num;
-    use crate::chars::{has_blank_char, mbstrlen, char_length};
+    use crate::chars::has_blank_char;
+    #[cfg(not(feature = "tiny"))]
+    use crate::chars::{char_length, mbstrlen};
 
     #[cfg(feature = "operatingdir")]
     if option == "operatingdir" {

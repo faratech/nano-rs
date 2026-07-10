@@ -12,7 +12,9 @@ use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
 
 // Bring the exported macros into scope.
-use crate::{ISSET, TOGGLE};
+use crate::ISSET;
+#[cfg(not(feature = "tiny"))]
+use crate::TOGGLE;
 
 // The tr! translation macro is defined once in main.rs (#[macro_export]).
 use crate::tr;

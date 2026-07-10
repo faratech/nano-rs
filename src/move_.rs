@@ -167,7 +167,9 @@ fn inpar(line: &LinePtr) -> bool {
 
 // ── Helpers from utils.rs / chars.rs ─────────────────────────────────────────
 
-use crate::utils::{actual_x, wideness, breadth, xplustabs};
+use crate::utils::{actual_x, xplustabs};
+#[cfg(not(feature = "tiny"))]
+use crate::utils::{breadth, wideness};
 use crate::chars::{white_string, is_word_char, step_left, step_right};
 #[cfg(feature = "utf8")]
 use crate::chars::is_zerowidth;

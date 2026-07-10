@@ -1381,6 +1381,7 @@ pub fn keycode_from_string(keystring: &str) -> i32 {
 // ---------------------------------------------------------------------------
 /* C: void add_to_sclist(int menus, const char *scstring, const int keycode,
                           void (*function)(void), int toggle) */
+#[cfg_attr(feature = "tiny", allow(unused_variables))]
 pub fn add_to_sclist(
     menus: u32,
     scstring: &'static str,

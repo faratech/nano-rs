@@ -8,7 +8,9 @@ use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET, TOGGLE};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
+#[cfg(not(feature = "tiny"))]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "operatingdir")]
 use std::cell::RefCell;
@@ -1187,7 +1189,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
         return Ok(None);
     } else if lock_exists {
         // Read and parse the lock file
-        match open_existing_lockfile(&lockfilename) {
+        match open_existing_lockfile(Path::new(&lockfilename)) {
             Err(e) => {
                 statusline(MessageType::Alert,
                     &format!("Error opening lock file {}: {}", lockfilename, e));
@@ -1268,7 +1270,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
                 // Override the stale lock through the exact descriptor that we
                 // inspected.  A swapped directory entry is neither unlinked nor
                 // overwritten and causes the identity checks to fail closed.
-                if write_lockfile(&mut f, &lockfilename, filename, false) {
+                if write_lockfile(&mut f, Path::new(&lockfilename), Path::new(filename), false) {
                     return Ok(Some((lockfilename, f)));
                 }
                 return Ok(None);
@@ -1276,7 +1278,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
         }
     }
 
-    Ok(create_lockfile(&lockfilename, filename, false)
+    Ok(create_lockfile(Path::new(&lockfilename), Path::new(filename), false)
         .map(|lockfile| (lockfilename, lockfile)))
 }
 
@@ -1727,7 +1729,9 @@ pub fn set_modified() {
             }
         });
         let keep_lock = match (lock_file.as_mut(), lock_fname.as_deref()) {
-            (Some(file), Some(path)) => write_lockfile(file, path, &buf_filename, true),
+            (Some(file), Some(path)) => {
+                write_lockfile(file, Path::new(path), Path::new(&buf_filename), true)
+            }
             (None, None) => true,
             _ => false,
         };
@@ -5294,9 +5298,7 @@ mod tests {
             mode: 0o666,
             ..PathOpenOptions::default()
         }).is_err());
-        assert!(open_lockfile_for_create(
-            parent_link.join(".victim.swp").to_str().unwrap()
-        ).is_err());
+        assert!(open_lockfile_for_create(&parent_link.join(".victim.swp")).is_err());
         assert!(confined_read_dir(parent_link.to_str().unwrap()).is_err());
         assert!(staging.persist(&target).is_err());
 
@@ -5357,15 +5359,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let existing = directory.path().join("existing.swp");
         std::fs::write(&existing, b"owned by someone else").unwrap();
-        assert!(open_lockfile_for_create(existing.to_str().unwrap()).is_err());
+        assert!(open_lockfile_for_create(&existing).is_err());
         assert_eq!(std::fs::read(&existing).unwrap(), b"owned by someone else");
 
         let victim = directory.path().join("victim");
         let link = directory.path().join("link.swp");
         std::fs::write(&victim, b"do not truncate").unwrap();
         symlink(&victim, &link).unwrap();
-        assert!(open_lockfile_for_create(link.to_str().unwrap()).is_err());
-        assert!(open_existing_lockfile(link.to_str().unwrap()).is_err());
+        assert!(open_lockfile_for_create(&link).is_err());
+        assert!(open_existing_lockfile(&link).is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
     }
 
@@ -5383,7 +5385,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    open_lockfile_for_create(path.to_str().unwrap()).is_ok()
+                    open_lockfile_for_create(&path).is_ok()
                 })
             })
             .collect();
@@ -5401,14 +5403,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owned.swp");
         let displaced = directory.path().join("displaced.swp");
-        let mut held = create_lockfile(path.to_str().unwrap(), "document", false).unwrap();
+        let mut held = create_lockfile(&path, Path::new("document"), false).unwrap();
         std::fs::rename(&path, &displaced).unwrap();
         std::fs::write(&path, b"racing editor").unwrap();
 
         assert!(!write_lockfile(
             &mut held,
-            path.to_str().unwrap(),
-            "document",
+            &path,
+            Path::new("document"),
             true,
         ));
         assert!(!delete_lockfile(path.to_str().unwrap(), Some(&held)));
@@ -5420,7 +5422,7 @@ mod tests {
     fn retained_lock_descriptor_allows_its_own_name_to_be_unlinked() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owned.swp");
-        let held = create_lockfile(path.to_str().unwrap(), "document", false).unwrap();
+        let held = create_lockfile(&path, Path::new("document"), false).unwrap();
 
         assert!(delete_lockfile(path.to_str().unwrap(), Some(&held)));
         assert!(!path.exists());

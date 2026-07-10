@@ -10,7 +10,9 @@ use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{winio, files, search, history, rcfile, color, prompt};
-use crate::{ISSET, SET, UNSET, TOGGLE};
+use crate::{ISSET, SET, UNSET};
+#[cfg(not(feature = "tiny"))]
+use crate::TOGGLE;
 
 // ---------------------------------------------------------------------------
 // Atomic signal flags (replacing volatile sig_atomic_t globals in C)

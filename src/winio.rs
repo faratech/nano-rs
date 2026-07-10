@@ -35,10 +35,12 @@ use crate::definitions::*;
 use crate::global::{
     with_state, with_state_mut, state, state_mut, NanoWindow,
     KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
-    KEY_PPAGE, KEY_NPAGE, KEY_DC, KEY_IC, KEY_BACKSPACE, KEY_ENTER,
-    KEY_F0, key_f, A_REVERSE, shown_entries_for,
+    KEY_PPAGE, KEY_NPAGE, KEY_DC, KEY_IC, KEY_BACKSPACE,
+    key_f, A_REVERSE, shown_entries_for,
     flag_index, flag_mask,
 };
+#[cfg(not(feature = "tiny"))]
+use crate::global::{KEY_ENTER, KEY_F0};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::chars::{
     is_cntrl_char, control_mbrep, char_length,

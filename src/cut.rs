@@ -4,6 +4,7 @@
 //             Copyright (C) 2014 Mark Majeres
 //             Copyright (C) 2016, 2018-2020 Benno Schulenberg
 
+#[cfg(not(feature = "tiny"))]
 use std::cell::RefCell;
 use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};

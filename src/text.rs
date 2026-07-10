@@ -4418,7 +4418,10 @@ pub fn do_linter() {
 
         #[cfg(not(feature = "tiny"))]
         {
-            if kbinput == THE_WINDOW_RESIZED as i32 {
+            if crate::winio::consume_resize_request(Some(kbinput)) {
+                // Repaint the current lint entry against the rebuilt windows
+                // instead of drawing into stale dimensions.
+                last_shown = None;
                 continue;
             }
         }
