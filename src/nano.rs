@@ -993,7 +993,7 @@ extern "C" fn request_suspend(_signal: libc::c_int) {
     SUSPEND_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-fn process_pending_signal_requests() {
+pub(crate) fn process_pending_signal_requests() {
     #[cfg(unix)]
     {
         let signal = TERMINATION_SIGNAL.swap(0, Ordering::SeqCst);

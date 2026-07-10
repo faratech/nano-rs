@@ -1075,14 +1075,21 @@ pub fn read_keys_from() {
         let _ = execute!(stdout, Show);
     }
 
-    // Wait for and read the first event (blocking)
+    // Wait for the first event.  A HUP/TERM or suspend published by a signal
+    // handler must not sit until the next keystroke (GNU nano dies promptly
+    // on SIGTERM), so block in short poll slices and surface deferred signal
+    // work between them.  Poll errors are EINTR from those same signals.
     let first_event = loop {
-        match event::read() {
-            Ok(ev) => break ev,
-            Err(_) => {
-                // Treat unrecoverable read failure as resize
-                break Event::Resize(80, 24);
-            }
+        crate::nano::process_pending_signal_requests();
+        match event::poll(Duration::from_millis(100)) {
+            Ok(true) => match event::read() {
+                Ok(ev) => break ev,
+                Err(_) => {
+                    // Treat unrecoverable read failure as resize
+                    break Event::Resize(80, 24);
+                }
+            },
+            _ => continue,
         }
     };
 

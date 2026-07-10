@@ -60,7 +60,7 @@ jobs:
         run: |
           printf 'smoke line one\nsmoke line two\n' > /tmp/smoke.txt
           for flags in "" "-l"; do
-            script -qec "timeout 2 ./target/release/nano $flags /tmp/smoke.txt" /dev/null \
+            script -qec "timeout -k 4 2 ./target/release/nano $flags /tmp/smoke.txt" /dev/null \
               > /tmp/smoke.out 2>&1 || true
             if grep -a "panicked" /tmp/smoke.out; then
               echo "nano $flags panicked during interactive startup" >&2
