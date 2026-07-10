@@ -52,6 +52,27 @@ jobs:
       - name: Build release binary
         run: cargo build --release --verbose
 
+      # Unit tests and Miri cannot see a startup crash that only happens in a
+      # real interactive session (the 0.0.10 confirm_margin panic passed every
+      # other gate).  Boot the release binary under a pty, with and without
+      # line numbers, and require a rendered buffer and no panic.
+      - name: Interactive startup smoke test under a pty
+        run: |
+          printf 'smoke line one\nsmoke line two\n' > /tmp/smoke.txt
+          for flags in "" "-l"; do
+            script -qec "timeout 2 ./target/release/nano $flags /tmp/smoke.txt" /dev/null \
+              > /tmp/smoke.out 2>&1 || true
+            if grep -a "panicked" /tmp/smoke.out; then
+              echo "nano $flags panicked during interactive startup" >&2
+              exit 1
+            fi
+            grep -aq "smoke line one" /tmp/smoke.out || {
+              echo "nano $flags did not render the buffer" >&2
+              exit 1
+            }
+            rm -f /tmp/.smoke.txt.swp
+          done
+
   feature-matrix:
     name: Feature tests (${{ matrix.name }})
     runs-on: ubuntu-latest
