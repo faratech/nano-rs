@@ -1159,26 +1159,23 @@ pub const SKIPTHISFILE: i32 = -2;
  * failure.  Rust retains the exclusively acquired descriptor alongside the
  * pathname, and a special Err(()) means SKIPTHISFILE. */
 #[cfg(not(feature = "tiny"))]
-pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String, File)>, ()> {
-    // Build lock filename: <dir>/.<basename>.swp
-    let path = Path::new(filename);
-    let dirname = usable_parent(path);
-    let basename = path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    let lockfilename = dirname
-        .join(format!("{}{}{}", LOCKING_PREFIX, basename, LOCKING_SUFFIX))
-        .to_string_lossy()
-        .into_owned();
+pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBuf, File)>, ()> {
+    // Build lock filename: <dir>/.<basename>.swp — byte-preserving, so a
+    // non-UTF-8 file name locks its exact sibling name.
+    let dirname = usable_parent(filename);
+    let mut lockname = std::ffi::OsString::from(LOCKING_PREFIX);
+    lockname.push(filename.file_name().unwrap_or_default());
+    lockname.push(LOCKING_SUFFIX);
+    let lockfilename: PathBuf = dirname.join(&lockname);
+    let lockfilename_str = printable_path(&lockfilename);
 
     // symlink_metadata also sees dangling symlinks.  Such a path must count as
     // occupied so create_new() can fail closed instead of following it.
-    let lock_exists = match path_exists_nofollow(Path::new(&lockfilename)) {
+    let lock_exists = match path_exists_nofollow(&lockfilename) {
         Ok(exists) => exists,
         Err(error) => {
             statusline(MessageType::Alert,
-                &format!("Error checking lock file {}: {}", lockfilename, error));
+                &format!("Error checking lock file {}: {}", lockfilename_str, error));
             return Ok(None);
         }
     };
@@ -1189,10 +1186,10 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
         return Ok(None);
     } else if lock_exists {
         // Read and parse the lock file
-        match open_existing_lockfile(Path::new(&lockfilename)) {
+        match open_existing_lockfile(&lockfilename) {
             Err(e) => {
                 statusline(MessageType::Alert,
-                    &format!("Error opening lock file {}: {}", lockfilename, e));
+                    &format!("Error opening lock file {}: {}", lockfilename_str, e));
                 return Ok(None);
             }
             Ok(mut f) => {
@@ -1204,7 +1201,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
                     Ok(amount) => amount,
                     Err(e) => {
                         statusline(MessageType::Alert,
-                            &format!("Error reading lock file {}: {}", lockfilename, e));
+                            &format!("Error reading lock file {}: {}", lockfilename_str, e));
                         return Ok(None);
                     }
                 };
@@ -1212,7 +1209,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
                 // Validate magic bytes and minimum size
                 if readamt < 68 || lockbuf[0] != 0x62 || lockbuf[1] != 0x30 {
                     statusline(MessageType::Alert,
-                        &format!("Bad lock file is ignored: {}", lockfilename));
+                        &format!("Bad lock file is ignored: {}", lockfilename_str));
                     return Ok(None);
                 }
 
@@ -1247,7 +1244,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
                     + breadth(&lockprog)
                     + breadth(&pidstring);
                 let room = COLS() as isize - total_fixed as isize + 7;
-                let postedname = crop_to_fit(filename, room);
+                let postedname = crop_to_fit(&printable_path(filename), room);
                 let promptstr = question
                     .replacen("%s", &postedname, 1)
                     .replacen("%s", &lockuser, 1)
@@ -1270,7 +1267,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
                 // Override the stale lock through the exact descriptor that we
                 // inspected.  A swapped directory entry is neither unlinked nor
                 // overwritten and causes the identity checks to fail closed.
-                if write_lockfile(&mut f, Path::new(&lockfilename), Path::new(filename), false) {
+                if write_lockfile(&mut f, &lockfilename, filename, false) {
                     return Ok(Some((lockfilename, f)));
                 }
                 return Ok(None);
@@ -1278,7 +1275,7 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String,
         }
     }
 
-    Ok(create_lockfile(Path::new(&lockfilename), Path::new(filename), false)
+    Ok(create_lockfile(&lockfilename, filename, false)
         .map(|lockfile| (lockfilename, lockfile)))
 }
 
@@ -1539,11 +1536,17 @@ pub fn make_new_buffer() {
 pub(crate) fn discard_transient_buffer() {
     #[cfg(not(feature = "tiny"))]
     {
-        let (lock_filename, lock_file) = with_state_mut(|s| match s.openfile.as_mut() {
-            Some(buffer) => (buffer.lock_filename.take(), buffer.lock_file.take()),
-            None => (None, None),
+        let (lock_filename, lock_path, lock_file) = with_state_mut(|s| match s.openfile.as_mut() {
+            Some(buffer) => (
+                buffer.lock_filename.take(),
+                buffer.lock_path.take(),
+                buffer.lock_file.take(),
+            ),
+            None => (None, None, None),
         });
-        if let Some(lock_filename) = lock_filename {
+        if let Some(lock_path) = lock_path {
+            delete_lockfile(&lock_path, lock_file.as_ref());
+        } else if let Some(lock_filename) = lock_filename {
             delete_lockfile(&lock_filename, lock_file.as_ref());
         }
         drop(lock_file);
@@ -1557,7 +1560,10 @@ pub(crate) fn discard_transient_buffer() {
     }
 }
 
-pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
+pub fn open_buffer_impl(filename: impl AsRef<Path>, new_one: bool) -> bool {
+    let filename = filename.as_ref();
+    let filename_given = !filename.as_os_str().is_empty();
+
     // Display newlines in filenames as ^J
     state_mut().as_an_at = false;
 
@@ -1565,7 +1571,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     {
         let confined = with_state(|s| {
             s.operating_dir.as_deref()
-                .map(|_od| outside_of_confinement(filename, false))
+                .map(|_od| outside_of_confinement_path(filename, false))
                 .unwrap_or(false)
         });
         if confined {
@@ -1576,23 +1582,25 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
         }
     }
 
-    let realname = expand_leading_tilde(filename);
+    // The authoritative path; convert to a string only for display.
+    let realname = expand_leading_tilde_path(filename);
+    let realname_str = printable_path(&realname);
 
     // Don't try to open directories, character files, or block files.
-    if !filename.is_empty() {
-        if let Ok(info) = path_info(Path::new(&realname)) {
+    if filename_given {
+        if let Ok(info) = path_info(&realname) {
             if info.is_dir {
-                statusline(MessageType::Alert, &format!("\"{}\" is a directory", realname));
+                statusline(MessageType::Alert, &format!("\"{}\" is a directory", realname_str));
                 return false;
             }
             // Check for block/char device and FIFO (requires libc)
             if info.is_special {
-                statusline(MessageType::Alert, &format!("\"{}\" is a device file", realname));
+                statusline(MessageType::Alert, &format!("\"{}\" is a device file", realname_str));
                 return false;
             }
             #[cfg(feature = "tiny")]
             if info.is_fifo {
-                statusline(MessageType::Alert, &format!("\"{}\" is a FIFO", realname));
+                statusline(MessageType::Alert, &format!("\"{}\" is a FIFO", realname_str));
                 return false;
             }
             #[cfg(all(not(feature = "tiny"), unix))]
@@ -1600,7 +1608,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                 let euid = unsafe { libc::geteuid() };
                 if new_one && (info.mode & 0o222) == 0 && euid == ROOT_UID {
                     statusline(MessageType::Alert,
-                        &format!("{} is meant to be read-only", realname));
+                        &format!("{} is meant to be read-only", realname_str));
                 }
             }
         }
@@ -1614,7 +1622,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
             {
                 let do_locking = ISSET!(LOCKING);
                 let view_mode = ISSET!(VIEW_MODE);
-                if do_locking && !view_mode && !filename.is_empty() {
+                if do_locking && !view_mode && filename_given {
                     match do_lockfile(&realname, true) {
                         Err(()) => {
                             // SKIPTHISFILE
@@ -1625,8 +1633,9 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                         Ok(lock) => {
                             with_state_mut(|s| {
                                 if let Some(ref mut of) = s.openfile {
-                                    if let Some((lock_filename, lock_file)) = lock {
-                                        of.lock_filename = Some(lock_filename);
+                                    if let Some((lock_path, lock_file)) = lock {
+                                        of.lock_filename = Some(printable_path(&lock_path));
+                                        of.lock_path = Some(lock_path);
                                         of.lock_file = Some(lock_file);
                                     }
                                 }
@@ -1643,7 +1652,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     let mut descriptor: i32 = 0;
     let mut file_handle: Option<File> = None;
 
-    if !filename.is_empty() && !noread {
+    if filename_given && !noread {
         descriptor = open_file_impl(&realname, new_one, &mut file_handle);
     }
 
@@ -1686,7 +1695,7 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     if descriptor >= 0 && new_one {
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
-                of.filename = realname.clone();
+                set_openfile_filename(of, realname.clone());
                 let filetop = of.filetop.clone();
                 of.current = filetop;
                 of.current_x = 0;
@@ -1721,16 +1730,22 @@ pub fn set_modified() {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let (mut lock_file, lock_fname, buf_filename) = with_state_mut(|s| {
+        let (mut lock_file, lock_path, buf_path) = with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
-                (of.lock_file.take(), of.lock_filename.clone(), of.filename.clone())
+                let lock_path = of.lock_path.clone()
+                    .or_else(|| of.lock_filename.as_deref().map(PathBuf::from));
+                let buf_path = match openfile_filename_path(of) {
+                    Some(path) => path.to_path_buf(),
+                    None => PathBuf::from(&of.filename),
+                };
+                (of.lock_file.take(), lock_path, buf_path)
             } else {
-                (None, None, String::new())
+                (None, None, PathBuf::new())
             }
         });
-        let keep_lock = match (lock_file.as_mut(), lock_fname.as_deref()) {
+        let keep_lock = match (lock_file.as_mut(), lock_path.as_deref()) {
             (Some(file), Some(path)) => {
-                write_lockfile(file, Path::new(path), Path::new(&buf_filename), true)
+                write_lockfile(file, path, &buf_path, true)
             }
             (None, None) => true,
             _ => false,
@@ -1744,6 +1759,7 @@ pub fn set_modified() {
                     of.lock_file = lock_file;
                 } else if !keep_lock {
                     of.lock_filename = None;
+                    of.lock_path = None;
                 }
             }
         });
@@ -2004,7 +2020,13 @@ fn read_until_cancelled<R: Read>(
 // read_file_impl — read an open file into the current buffer
 // C: void read_file(FILE *f, int fd, const char *filename, bool undoable)
 // ---------------------------------------------------------------------------
-pub fn read_file_impl<R: Read>(mut f: R, had_real_fd: bool, filename: &str, undoable: bool) -> bool {
+pub fn read_file_impl<R: Read>(
+    mut f: R,
+    had_real_fd: bool,
+    filename: impl AsRef<Path>,
+    undoable: bool,
+) -> bool {
+    let filename = filename.as_ref();
     let was_lineno = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.current.as_ref())
@@ -2091,7 +2113,9 @@ pub fn read_file_impl<R: Read>(mut f: R, had_real_fd: bool, filename: &str, undo
     let writable = if had_real_fd && !undoable && !ISSET!(VIEW_MODE) {
         #[cfg(unix)]
         {
-            let cname = std::ffi::CString::new(filename).unwrap_or_default();
+            use std::os::unix::ffi::OsStrExt;
+            let cname = std::ffi::CString::new(filename.as_os_str().as_bytes())
+                .unwrap_or_default();
             let access_ret = unsafe { libc::access(cname.as_ptr(), libc::W_OK) };
             access_ret == 0
         }
@@ -2175,7 +2199,8 @@ pub fn read_file_impl<R: Read>(mut f: R, had_real_fd: bool, filename: &str, undo
     });
 
     if !writable {
-        statusline(MessageType::Alert, &format!("File '{}' is unwritable", filename));
+        statusline(MessageType::Alert,
+            &format!("File '{}' is unwritable", printable_path(filename)));
     } else {
         let zero = ISSET!(ZERO);
         let minibar = ISSET!(MINIBAR);
@@ -2253,14 +2278,14 @@ pub fn read_file_impl<R: Read>(mut f: R, had_real_fd: bool, filename: &str, undo
 // C: int open_file(const char *filename, bool new_one, FILE **f)
 // Returns 0=new file, -1=failure, or the file descriptor on success.
 // ---------------------------------------------------------------------------
-pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>) -> i32 {
-    let full_filename = get_full_path(filename);
-    let resolved = full_filename.as_deref().unwrap_or(filename).to_string();
+pub fn open_file_impl(filename: &Path, new_one: bool, out_file: &mut Option<File>) -> i32 {
+    let full_filename = get_full_path_buf(filename);
+    let resolved: PathBuf = full_filename.unwrap_or_else(|| filename.to_path_buf());
 
     // Check if it's a FIFO
     #[cfg(not(feature = "tiny"))]
     {
-        if let Ok(info) = path_info(Path::new(&resolved)) {
+        if let Ok(info) = path_info(&resolved) {
             if info.is_fifo {
                 statusbar("Reading from FIFO...");
             }
@@ -2273,7 +2298,7 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
     // This is the authority-bearing read.  When operating-directory mode is
     // active it resolves and opens beneath the retained root in one operation;
     // the earlier display/metadata checks are never trusted for confinement.
-    let open_result = open_path(Path::new(&resolved));
+    let open_result = open_path(&resolved);
 
     #[cfg(not(feature = "tiny"))]
     {
@@ -2288,14 +2313,15 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
                 statusline(MessageType::Remark, "New File");
                 0
             } else if err_kind == io::ErrorKind::NotFound {
-                statusline(MessageType::Alert, &format!("File \"{}\" not found", filename));
+                statusline(MessageType::Alert,
+                    &format!("File \"{}\" not found", printable_path(filename)));
                 -1
             } else if err_kind == io::ErrorKind::Interrupted {
                 statusline(MessageType::Alert, "Interrupted");
                 -1
             } else {
                 statusline(MessageType::Alert,
-                    &format!("Error reading {}: {}", filename, e));
+                    &format!("Error reading {}: {}", printable_path(filename), e));
                 -1
             }
         }
@@ -3516,18 +3542,22 @@ fn backup_path_key(path: &Path) -> String {
 }
 
 #[cfg(not(feature = "tiny"))]
-pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
+pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
     statusbar("Making backup...");
 
     let backup_dir = state().backup_dir.clone();
 
-    let backupname: String = if backup_dir.is_none() {
-        format!("{}~", realname)
+    let backupname: PathBuf = if backup_dir.is_none() {
+        // Byte-preserving "<name>~" so a non-UTF-8 file backs up beside itself.
+        let mut name = realname.as_os_str().to_os_string();
+        name.push("~");
+        PathBuf::from(name)
     } else {
         let bd = backup_dir.as_ref().unwrap();
-        let source_path = get_full_path(realname)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(realname).to_path_buf());
+        let source_path = get_full_path_buf(realname)
+            .unwrap_or_else(|| realname.to_path_buf());
+        // backup_path_key hex-encodes the path bytes, so the result is plain
+        // ASCII and safe to handle as a string.
         let thename = backup_path_key(&source_path);
         let base = Path::new(bd).join(thename).to_string_lossy().into_owned();
         let next = get_next_filename(&base, "~");
@@ -3535,7 +3565,7 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
             statusline(MessageType::Alert, "Too many existing backup files");
             return false;
         }
-        next
+        PathBuf::from(next)
     };
 
     let fail = |reason: &str| {
@@ -3549,7 +3579,7 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
         }
     };
 
-    let mut original = match open_path(Path::new(realname)) {
+    let mut original = match open_path(realname) {
         Ok(file) => file,
         Err(error) => return fail(&format!("Cannot read original file: {}", error)),
     };
@@ -3557,7 +3587,7 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
     // Stage beside the destination so the final rename is atomic.  tempfile
     // creates this path exclusively with mode 0600, and its Drop removes any
     // incomplete candidate without disturbing an older complete backup.
-    let parent = usable_parent(Path::new(&backupname));
+    let parent = usable_parent(&backupname);
     let mut staging = match create_staging_file(parent, ".nano-backup.") {
         Ok(file) => file,
         Err(error) => return fail(&error.to_string()),
@@ -3596,14 +3626,14 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
         return fail(&format!("Cannot sync backup: {}", error));
     }
 
-    let persisted = match staging.persist(Path::new(&backupname)) {
+    let persisted = match staging.persist(&backupname) {
         Ok(file) => file,
         Err(error) => return fail(&format!("Cannot install backup: {}", error)),
     };
     drop(persisted);
 
     #[cfg(unix)]
-    if let Err(error) = sync_parent_of(Path::new(&backupname)) {
+    if let Err(error) = sync_parent_of(&backupname) {
         return fail(&format!("Cannot sync backup directory: {}", error));
     }
 
@@ -3616,19 +3646,21 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
 //                    kind_of_writing_type method, bool annotate)
 // ---------------------------------------------------------------------------
 pub fn write_file(
-    name: &str,
+    name: impl AsRef<Path>,
     thefile: Option<File>,
     normal: bool,
     method: KindOfWritingType,
     annotate: bool,
 ) -> bool {
-    let realname = expand_leading_tilde(name);
+    // The authoritative path; `realname_str` exists only for messages.
+    let realname: PathBuf = expand_leading_tilde_path(name.as_ref());
+    let realname_str = printable_path(&realname);
 
     #[cfg(feature = "operatingdir")]
     if normal {
         let confined = with_state(|s| {
             s.operating_dir.as_deref()
-                .map(|_od| outside_of_confinement(&realname, false))
+                .map(|_od| outside_of_confinement_path(&realname, false))
                 .unwrap_or(false)
         });
         if confined {
@@ -3666,14 +3698,14 @@ pub fn write_file(
 
     #[cfg(not(feature = "tiny"))]
     let is_existing_file = {
-        normal && path_info(Path::new(&realname)).is_ok()
+        normal && path_info(&realname).is_ok()
     };
 
     // Make backup if needed
     #[cfg(not(feature = "tiny"))]
     if ISSET!(MAKE_BACKUP) && is_existing_file {
         // Check it's not a FIFO
-        let is_fifo = path_info(Path::new(&realname))
+        let is_fifo = path_info(&realname)
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
@@ -3690,18 +3722,18 @@ pub fn write_file(
     // been flushed, synced, and atomically installed.
     #[cfg(not(feature = "tiny"))]
     if method == KindOfWritingType::Prepend {
-        let is_fifo = path_info(Path::new(&realname))
+        let is_fifo = path_info(&realname)
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if is_fifo {
-            statusline(MessageType::Alert, &format!("Error writing {}: FIFO", realname));
+            statusline(MessageType::Alert, &format!("Error writing {}: FIFO", realname_str));
             return false;
         }
 
-        let source = match open_path(Path::new(&realname)) {
+        let source = match open_path(&realname) {
             Err(e) => {
                 statusline(MessageType::Alert,
-                    &format!("Error reading {}: {}", realname, e));
+                    &format!("Error reading {}: {}", realname_str, e));
                 return false;
             }
             Ok(f) => f,
@@ -3712,7 +3744,7 @@ pub fn write_file(
             prepend_statinfo = stat_with_alloc(&realname);
         }
 
-        let parent = usable_parent(Path::new(&realname));
+        let parent = usable_parent(&realname);
         prepend_staging = match create_staging_file(parent, ".nano-prepend.") {
             Ok(file) => Some(file),
             Err(error) => {
@@ -3725,7 +3757,7 @@ pub fn write_file(
 
     #[cfg(not(feature = "tiny"))]
     {
-        let is_fifo = path_info(Path::new(&realname))
+        let is_fifo = path_info(&realname)
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if is_existing_file && is_fifo {
@@ -3760,7 +3792,7 @@ pub fn write_file(
 
             let open_result = match method {
                 KindOfWritingType::Append => open_path_with(
-                    Path::new(&realname),
+                    &realname,
                     PathOpenOptions {
                         write: true,
                         create: true,
@@ -3770,7 +3802,7 @@ pub fn write_file(
                     },
                 ),
                 KindOfWritingType::Emergency => open_path_with(
-                    Path::new(&realname),
+                    &realname,
                     PathOpenOptions {
                         write: true,
                         create_new: true,
@@ -3779,7 +3811,7 @@ pub fn write_file(
                     },
                 ),
                 _ => open_path_with(
-                    Path::new(&realname),
+                    &realname,
                     PathOpenOptions {
                         write: true,
                         create: true,
@@ -3802,7 +3834,7 @@ pub fn write_file(
                         statusline(MessageType::Alert, "Interrupted");
                     } else {
                         statusline(MessageType::Alert,
-                            &format!("Error writing {}: {}", realname, e));
+                            &format!("Error writing {}: {}", realname_str, e));
                     }
                     return false;
                 }
@@ -3858,7 +3890,7 @@ pub fn write_file(
 
         if data_res.is_err() {
             let e = io::Error::last_os_error();
-            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
             return false;
         }
 
@@ -3875,14 +3907,14 @@ pub fn write_file(
         if fmt == FormatType::DosFile {
             if writer.write_all(b"\r").is_err() {
                 let e = io::Error::last_os_error();
-                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
                 return false;
             }
         }
 
         if writer.write_all(b"\n").is_err() {
             let e = io::Error::last_os_error();
-            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
             return false;
         }
 
@@ -3902,14 +3934,14 @@ pub fn write_file(
                     Ok(n) => n,
                     Err(e) => {
                         statusline(MessageType::Alert,
-                            &format!("Error reading {}: {}", realname, e));
+                            &format!("Error reading {}: {}", realname_str, e));
                         return false;
                     }
                 };
                 if writer.write_all(&buf[..n]).is_err() {
                     let e = io::Error::last_os_error();
                     statusline(MessageType::Alert,
-                        &format!("Error writing {}: {}", realname, e));
+                        &format!("Error writing {}: {}", realname_str, e));
                     return false;
                 }
             }
@@ -3920,7 +3952,7 @@ pub fn write_file(
     // durability sync below (sync_all is a File method, not on the BufWriter).
     if writer.flush().is_err() {
         let e = io::Error::last_os_error();
-        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
         return false;
     }
     drop(writer);
@@ -3928,13 +3960,13 @@ pub fn write_file(
     // Flush and sync (not for FIFOs)
     #[cfg(not(feature = "tiny"))]
     {
-        let is_fifo = path_info(Path::new(&realname))
+        let is_fifo = path_info(&realname)
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
             if the_file.flush().is_err() || the_file.sync_all().is_err() {
                 let e = io::Error::last_os_error();
-                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
                 drop(the_file);
                 return false;
             }
@@ -3944,7 +3976,7 @@ pub fn write_file(
     // Close the file
     if the_file.flush().is_err() {
         let e = io::Error::last_os_error();
-        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
+        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
 
         // Check for ENOSPC
         #[cfg(not(feature = "tiny"))]
@@ -3992,7 +4024,7 @@ pub fn write_file(
             if unsafe { libc::fchown(fd, info.st_uid, info.st_gid) } != 0 {
                 statusline(MessageType::Alert, &format!(
                     "Error preserving ownership of {}: {}",
-                    realname,
+                    realname_str,
                     io::Error::last_os_error()
                 ));
                 return false;
@@ -4000,7 +4032,7 @@ pub fn write_file(
             if unsafe { libc::fchmod(fd, info.st_mode & 0o7777) } != 0 {
                 statusline(MessageType::Alert, &format!(
                     "Error preserving permissions of {}: {}",
-                    realname,
+                    realname_str,
                     io::Error::last_os_error()
                 ));
                 return false;
@@ -4012,49 +4044,58 @@ pub fn write_file(
             if let Err(error) = staging.as_file().set_permissions(permissions) {
                 statusline(MessageType::Alert, &format!(
                     "Error preserving permissions of {}: {}",
-                    realname, error
+                    realname_str, error
                 ));
                 return false;
             }
         }
 
         if let Err(error) = staging.as_file_mut().flush().and_then(|_| staging.as_file().sync_all()) {
-            statusline(MessageType::Alert, &format!("Error syncing {}: {}", realname, error));
+            statusline(MessageType::Alert, &format!("Error syncing {}: {}", realname_str, error));
             return false;
         }
 
-        match staging.persist(Path::new(&realname)) {
+        match staging.persist(&realname) {
             Ok(file) => drop(file),
             Err(error) => {
-                statusline(MessageType::Alert, &format!("Error installing {}: {}", realname, error));
+                statusline(MessageType::Alert, &format!("Error installing {}: {}", realname_str, error));
                 return false;
             }
         }
 
         #[cfg(unix)]
-        if let Err(error) = sync_parent_of(Path::new(&realname)) {
-            statusline(MessageType::Alert, &format!("Error syncing directory for {}: {}", realname, error));
+        if let Err(error) = sync_parent_of(&realname) {
+            statusline(MessageType::Alert, &format!("Error syncing directory for {}: {}", realname_str, error));
             return false;
         }
     }
 
     // When having written an entire buffer, update administrivia.
     if annotate && method == KindOfWritingType::Overwrite {
-        let old_filename = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default()
+        // Compare against the authoritative path; fall back to the display
+        // string only for buffers that never had a real path recorded.
+        let name_changed = with_state(|s| {
+            s.openfile.as_ref().map(|of| {
+                match openfile_filename_path(of) {
+                    Some(old_path) => old_path != realname,
+                    None => of.filename != realname_str,
+                }
+            }).unwrap_or(true)
         });
 
-        if old_filename != realname {
+        if name_changed {
             #[cfg(not(feature = "tiny"))]
             {
-                let (lock_file, lock_fname) = with_state_mut(|s| {
+                let (lock_file, lock_fname, lock_path) = with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
-                        (of.lock_file.take(), of.lock_filename.take())
+                        (of.lock_file.take(), of.lock_filename.take(), of.lock_path.take())
                     } else {
-                        (None, None)
+                        (None, None, None)
                     }
                 });
-                if let Some(lf) = lock_fname {
+                if let Some(lp) = lock_path {
+                    delete_lockfile(&lp, lock_file.as_ref());
+                } else if let Some(lf) = lock_fname {
                     delete_lockfile(&lf, lock_file.as_ref());
                 }
                 drop(lock_file);
@@ -4062,8 +4103,9 @@ pub fn write_file(
                     let lock_result = do_lockfile(&realname, false);
                     with_state_mut(|s| {
                         if let Some(ref mut of) = s.openfile {
-                            if let Some((lock_filename, lock_file)) = lock_result.ok().flatten() {
-                                of.lock_filename = Some(lock_filename);
+                            if let Some((lock_path, lock_file)) = lock_result.ok().flatten() {
+                                of.lock_filename = Some(printable_path(&lock_path));
+                                of.lock_path = Some(lock_path);
                                 of.lock_file = Some(lock_file);
                             }
                         }
@@ -4073,7 +4115,7 @@ pub fn write_file(
 
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
-                    of.filename = realname.clone();
+                    set_openfile_filename(of, realname.clone());
                 }
             });
 
@@ -4156,7 +4198,7 @@ pub fn write_file(
 // ---------------------------------------------------------------------------
 #[cfg(not(feature = "tiny"))]
 pub fn write_region_to_file(
-    name: &str,
+    name: impl AsRef<Path>,
     stream: Option<File>,
     normal: bool,
     method: KindOfWritingType,
@@ -4548,8 +4590,15 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                                 wipe_statusbar();
 
                                 if ISSET!(SAVE_ON_EXIT) && withprompt {
+                                    // Saving to the buffer's own file: use the
+                                    // authoritative path when one is recorded.
                                     let fname = with_state(|s| {
-                                        s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default()
+                                        s.openfile.as_ref().map(|of| {
+                                            match openfile_filename_path(of) {
+                                                Some(path) => path.to_path_buf(),
+                                                None => PathBuf::from(&of.filename),
+                                            }
+                                        }).unwrap_or_default()
                                     });
                                     if choice == YES {
                                         return write_file(&fname, None, NORMAL, KindOfWritingType::Overwrite, NONOTES) as i32;
@@ -4573,8 +4622,20 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
         break;
     }
 
-    // Write the file
+    // Write the file.  The prompt answer is a (possibly lossy) display string;
+    // when it names the buffer's own file, substitute the authoritative path so
+    // a non-UTF-8 filename round-trips to the exact original byte sequence.
     let final_answer = state().answer.clone();
+    let target: PathBuf = with_state(|s| {
+        s.openfile.as_ref().and_then(|of| {
+            let path = openfile_filename_path(of)?;
+            if of.filename == final_answer {
+                Some(path.to_path_buf())
+            } else {
+                None
+            }
+        })
+    }).unwrap_or_else(|| PathBuf::from(&final_answer));
 
     #[cfg(not(feature = "tiny"))]
     {
@@ -4582,11 +4643,11 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
             s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
         });
         if mark_on && withprompt && !exiting && !ISSET!(RESTRICTED) {
-            return write_region_to_file(&final_answer, None, NORMAL, method) as i32;
+            return write_region_to_file(&target, None, NORMAL, method) as i32;
         }
     }
 
-    write_file(&final_answer, None, NORMAL, method, ANNOTATE) as i32
+    write_file(&target, None, NORMAL, method, ANNOTATE) as i32
 }
 
 /* C: void do_writeout(void)
@@ -5445,9 +5506,91 @@ mod tests {
         state_mut().backup_dir = None;
 
         let info = stat_with_alloc(original.to_str().unwrap()).unwrap();
-        assert!(make_backup_of(original.to_str().unwrap(), &info));
+        assert!(make_backup_of(&original, &info));
         assert_eq!(std::fs::read(&backup).unwrap(), b"complete new backup");
         assert_eq!(std::fs::read(&victim).unwrap(), b"must survive");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn non_utf8_filename_round_trips_through_open_edit_save_and_backup() {
+        use crate::global::{state, state_mut, with_state};
+        use std::os::unix::ffi::OsStrExt;
+
+        // open_buffer_impl swaps the SIGINT handler around the read; keep the
+        // command tests (which raise SIGINT) from overlapping with that window.
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let weird = std::ffi::OsStr::from_bytes(b"weird-\xFF-name");
+        let target = directory.path().join(weird);
+        std::fs::write(&target, b"first line\n").unwrap();
+
+        state_mut().flags = [0; 4];
+        state_mut().backup_dir = None;
+        assert!(super::open_buffer_impl(&target, true));
+
+        // The authoritative path keeps the exact bytes; the display string is
+        // the lossy rendering used only for the UI.
+        let (stored_path, stored_display) = with_state(|editor| {
+            let buffer = editor.openfile.as_ref().unwrap();
+            (buffer.filename_path.clone(), buffer.filename.clone())
+        });
+        assert_eq!(
+            stored_path.file_name().unwrap().as_bytes(),
+            b"weird-\xFF-name"
+        );
+        assert!(stored_display.contains('\u{fffd}'));
+        assert_eq!(current_buffer_lines(), ["first line", ""]);
+
+        // Edit the buffer, then save through the unprompted write_it_out path
+        // (the do_savefile flow), with backups enabled.
+        let first = state().openfile.as_ref().unwrap().filetop.clone().unwrap();
+        first.borrow_mut().data = "second version".to_string();
+        crate::SET!(crate::definitions::MAKE_BACKUP);
+        assert_eq!(super::write_it_out(false, false), 1);
+
+        // The save landed at the exact original byte-name, and the backup at
+        // its byte-preserved sibling "<name>~" ...
+        assert_eq!(std::fs::read(&target).unwrap(), b"second version\n");
+        let mut backup_name = weird.to_os_string();
+        backup_name.push("~");
+        let backup = directory.path().join(&backup_name);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"first line\n");
+
+        // ... and NOT at any lossily-converted name.
+        assert!(!directory.path().join("weird-\u{fffd}-name").exists());
+        assert!(!directory.path().join("weird-\u{fffd}-name~").exists());
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn lockfile_for_non_utf8_filename_uses_byte_preserved_sibling_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(std::ffi::OsStr::from_bytes(b"weird-\xFF-name"));
+        std::fs::write(&target, b"content\n").unwrap();
+
+        let (lock_path, lock_file) = super::do_lockfile(&target, false)
+            .unwrap()
+            .expect("lock creation should succeed");
+
+        // The lock is the byte-preserved sibling ".<name>.swp" ...
+        assert_eq!(
+            lock_path.file_name().unwrap().as_bytes(),
+            b".weird-\xFF-name.swp"
+        );
+        let lockdata = std::fs::read(&lock_path).unwrap();
+        assert_eq!(lockdata.len(), super::LOCKSIZE);
+        // ... and it records the locked file's exact bytes, not a lossy form.
+        let recorded = &lockdata[108..108 + target.as_os_str().as_bytes().len()];
+        assert_eq!(recorded, target.as_os_str().as_bytes());
+        assert!(!directory.path().join(".weird-\u{fffd}-name.swp").exists());
+
+        // Deletion also goes through the byte-preserved name.
+        assert!(super::delete_lockfile(&lock_path, Some(&lock_file)));
+        assert!(!lock_path.exists());
     }
 
     #[cfg(not(feature = "tiny"))]

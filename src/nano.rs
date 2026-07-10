@@ -327,13 +327,15 @@ pub fn finish() {
 pub fn close_and_go() {
     #[cfg(not(feature = "tiny"))]
     {
-        let (lock_filename, lock_file) = with_state_mut(|s| {
+        let (lock_filename, lock_path, lock_file) = with_state_mut(|s| {
             match s.openfile.as_mut() {
-                Some(of) => (of.lock_filename.take(), of.lock_file.take()),
-                None => (None, None),
+                Some(of) => (of.lock_filename.take(), of.lock_path.take(), of.lock_file.take()),
+                None => (None, None, None),
             }
         });
-        if let Some(ref lf) = lock_filename {
+        if let Some(ref lp) = lock_path {
+            files::delete_lockfile(lp, lock_file.as_ref());
+        } else if let Some(ref lf) = lock_filename {
             files::delete_lockfile(lf, lock_file.as_ref());
         }
         drop(lock_file);
@@ -463,20 +465,26 @@ fn save_all_modified_buffers() {
     };
 
     for _ in 0..total {
-        let (lock, lock_file, save, filename) = with_state_mut(|s| {
+        let (lock, lock_path, lock_file, save, filename) = with_state_mut(|s| {
             let save = s.openfile.as_ref().map(|f| f.modified).unwrap_or(false) && !restricted;
             let filename = s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default();
             #[cfg(not(feature = "tiny"))]
-            let (lock, lock_file) = match s.openfile.as_mut() {
-                Some(file) => (file.lock_filename.take(), file.lock_file.take()),
-                None => (None, None),
+            let (lock, lock_path, lock_file) = match s.openfile.as_mut() {
+                Some(file) => (file.lock_filename.take(), file.lock_path.take(), file.lock_file.take()),
+                None => (None, None, None),
             };
             #[cfg(feature = "tiny")]
-            let (lock, lock_file): (Option<String>, Option<std::fs::File>) = (None, None);
-            (lock, lock_file, save, filename)
+            let (lock, lock_path, lock_file): (
+                Option<String>,
+                Option<std::path::PathBuf>,
+                Option<std::fs::File>,
+            ) = (None, None, None);
+            (lock, lock_path, lock_file, save, filename)
         });
 
-        if let Some(ref lf) = lock {
+        if let Some(ref lp) = lock_path {
+            files::delete_lockfile(lp, lock_file.as_ref());
+        } else if let Some(ref lf) = lock {
             files::delete_lockfile(lf, lock_file.as_ref());
         }
         drop(lock_file);
@@ -2302,13 +2310,17 @@ pub fn nano_main() {
     // may swap the executable on disk so the new version is used next launch).
     let _ = crate::installer::apply_pending_update();
 
-    // Parse command-line arguments.
-    let args: Vec<String> = std::env::args().collect();
-    let argv0 = args.first().map(|s| s.as_str()).unwrap_or("nano");
+    // Parse command-line arguments.  args_os() never panics on non-UTF-8
+    // arguments; positional FILE arguments keep their exact OS bytes, while
+    // option words themselves are required to be valid UTF-8.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let argv0: String = args.first()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "nano".to_string());
 
     // If executable starts with 'r', activate restricted mode.
     let tail_char = {
-        let t = crate::utils::tail(argv0);
+        let t = crate::utils::tail(&argv0);
         t.chars().next().unwrap_or('\0')
     };
     if tail_char == 'r' {
@@ -2377,14 +2389,14 @@ pub fn nano_main() {
     let mut hardwrap: i32 = -2; // -2 = not set, 0 = --nowrap, 1 = --breaklonglines
 
     let mut idx = 1usize;
-    let mut file_args: Vec<String> = Vec::new();
+    let mut file_args: Vec<std::ffi::OsString> = Vec::new();
     let mut done_with_options = false;
 
     while idx < args.len() {
-        let arg = &args[idx];
+        let arg_os = &args[idx];
 
         // End of options marker.
-        if !done_with_options && arg == "--" {
+        if !done_with_options && arg_os == "--" {
             done_with_options = true;
             idx += 1;
             continue;
@@ -2392,11 +2404,26 @@ pub fn nano_main() {
 
         // Collect file/+LINE arguments once done with options.
         // (A bare "-" means "read from standard input", not an option.)
-        if done_with_options || !arg.starts_with('-') || arg == "-" {
-            file_args.push(arg.clone());
+        // The dash test uses the lossy form; '-' is ASCII, so an invalid
+        // leading byte can never masquerade as an option.
+        let looks_like_option =
+            arg_os.to_string_lossy().starts_with('-') && arg_os != "-";
+        if done_with_options || !looks_like_option {
+            // Positional FILE arguments are preserved byte for byte.
+            file_args.push(arg_os.clone());
             idx += 1;
             continue;
         }
+
+        // The option word itself must be valid UTF-8.
+        let arg: &str = match arg_os.to_str() {
+            Some(arg) => arg,
+            None => {
+                eprintln!("Option '{}' is not valid UTF-8.",
+                    arg_os.to_string_lossy());
+                process::exit(1);
+            }
+        };
 
         // Long option.
         if arg.starts_with("--") {
@@ -2408,7 +2435,17 @@ pub fn nano_main() {
 
             let next_val = |idx: &mut usize| -> String {
                 *idx += 1;
-                args.get(*idx).cloned().unwrap_or_default()
+                match args.get(*idx) {
+                    None => String::new(),
+                    Some(value) => match value.to_str() {
+                        Some(value) => value.to_string(),
+                        None => {
+                            eprintln!("Option argument '{}' is not valid UTF-8.",
+                                value.to_string_lossy());
+                            process::exit(1);
+                        }
+                    },
+                }
             };
 
             if !long_option_is_available(&opt) {
@@ -2561,14 +2598,14 @@ pub fn nano_main() {
                         |= crate::global::flag_mask(SOLO_SIDESCROLL);
                 }); }
                 "install"        => {
-                    let force = std::env::args().any(|a| a == "--force");
+                    let force = std::env::args_os().any(|a| a == "--force");
                     match crate::installer::install_to_path(force) {
                         Ok(()) => process::exit(0),
                         Err(e) => { eprintln!("nano: install failed: {}", e); process::exit(1); }
                     }
                 }
                 "update"         => {
-                    let force = std::env::args().any(|a| a == "--force");
+                    let force = std::env::args_os().any(|a| a == "--force");
                     match crate::installer::update_from_github(force) {
                         Ok(()) => process::exit(0),
                         Err(e) => { eprintln!("nano: update failed: {}", e); process::exit(1); }
@@ -2594,7 +2631,8 @@ pub fn nano_main() {
                 reject_unavailable_option(&argv0, &format!("-{c}"));
             }
             // Helper: get next argument (either rest of this arg or next argv).
-            let next_arg = |ci: &mut usize, chars: &Vec<char>, idx: &mut usize, args: &Vec<String>| -> String {
+            let next_arg = |ci: &mut usize, chars: &Vec<char>, idx: &mut usize,
+                            args: &Vec<std::ffi::OsString>| -> String {
                 *ci += 1;
                 if *ci < chars.len() {
                     // Rest of current arg.
@@ -2602,7 +2640,17 @@ pub fn nano_main() {
                         .also(|_| *ci = chars.len())
                 } else {
                     *idx += 1;
-                    args.get(*idx).cloned().unwrap_or_default()
+                    match args.get(*idx) {
+                        None => String::new(),
+                        Some(value) => match value.to_str() {
+                            Some(value) => value.to_string(),
+                            None => {
+                                eprintln!("Option argument '{}' is not valid UTF-8.",
+                                    value.to_string_lossy());
+                                process::exit(1);
+                            }
+                        },
+                    }
                 }
             };
 
@@ -3147,9 +3195,13 @@ pub fn nano_main() {
         #[cfg(not(feature = "tiny"))]
         let mut searchstring: Option<String> = None;
 
-        // If there's a +LINE[,COLUMN] argument, consume it.
-        if file_idx + 1 < file_args_count && file_args[file_idx].starts_with('+') {
-            let plus_arg = file_args[file_idx].clone();
+        // If there's a +LINE[,COLUMN] argument, consume it.  ('+' is ASCII, so
+        // the lossy form is a faithful test; the argument itself is a line/
+        // column spec or search string, not a filename.)
+        if file_idx + 1 < file_args_count
+            && file_args[file_idx].to_string_lossy().starts_with('+')
+        {
+            let plus_arg = file_args[file_idx].to_string_lossy().into_owned();
             let rest = &plus_arg[1..];
 
             #[cfg(not(feature = "tiny"))]
@@ -3219,12 +3271,13 @@ pub fn nano_main() {
             break;
         }
 
-        let mut filename = file_args[file_idx].clone();
+        // The filename keeps its exact OS bytes all the way into the buffer.
+        let mut filename = std::path::PathBuf::from(file_args[file_idx].clone());
         file_idx += 1;
 
         // Handle '-' (stdin).
         #[cfg(not(feature = "tiny"))]
-        if filename == "-" {
+        if filename.as_os_str() == "-" {
             #[cfg(windows)]
             let read_succeeded = if let Some(reader) = redirected_stdin.take() {
                 scoop_stdin_from(reader, false)
@@ -3237,12 +3290,16 @@ pub fn nano_main() {
                 continue;
             }
         } else {
+            // Colon notation is only attempted for valid-UTF-8 names; a
+            // non-UTF-8 name is opened exactly as given.
             #[cfg(not(feature = "tiny"))]
             if ISSET!(COLON_PARSING) && givenline == 0 && givencol == 0 {
-                if let Some((parsed_filename, line, column)) = parse_colon_notation(&filename) {
-                    filename = parsed_filename;
-                    givenline = line;
-                    givencol = column;
+                if let Some(name_str) = filename.to_str() {
+                    if let Some((parsed_filename, line, column)) = parse_colon_notation(name_str) {
+                        filename = std::path::PathBuf::from(parsed_filename);
+                        givenline = line;
+                        givencol = column;
+                    }
                 }
             }
 
