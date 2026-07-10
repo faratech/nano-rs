@@ -10,7 +10,7 @@ use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET};
 use std::cell::RefCell;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
@@ -100,9 +100,18 @@ pub const COLOR_MAGENTA: i16 = 5;
 pub const COLOR_CYAN:    i16 = 6;
 pub const COLOR_WHITE:   i16 = 7;
 
-/// Number of colors the terminal supports (placeholder; will be 8 or 256).
-/// C: COLORS — ncurses global. We use 256 as a safe default for config parsing.
-const COLORS: i16 = 256;
+/// Number of indexed colors the current terminal can actually display.
+fn terminal_colors() -> i16 {
+    if let Some(level) = supports_color::on_cached(supports_color::Stream::Stdout) {
+        if level.has_256 || level.has_16m { 256 } else if level.has_basic { 8 } else { 0 }
+    } else {
+        // `supports-color` intentionally suppresses its answer for NO_COLOR,
+        // but explicit nanorc colors override NO_COLOR in GNU nano.  Retain the
+        // underlying indexed capability for that explicit-configuration case.
+        let term = std::env::var("TERM").unwrap_or_default();
+        if term == "dumb" { 0 } else if term.contains("256color") { 256 } else { 8 }
+    }
+}
 
 /// SYSCONFDIR — where the system-wide nanorc lives.
 const SYSCONFDIR: &str = "/etc";
@@ -134,7 +143,8 @@ static RCOPTS: &[RcOpt] = &[
     RcOpt { name: "historylog",            flag: HISTORYLOG },
     #[cfg(feature = "linenumbers")]
     RcOpt { name: "linenumbers",           flag: LINE_NUMBERS },
-    // "magic" only when HAVE_LIBMAGIC — treat as compile-time disabled for now
+    #[cfg(feature = "libmagic")]
+    RcOpt { name: "magic",                  flag: USE_MAGIC },
     #[cfg(feature = "mouse")]
     RcOpt { name: "mouse",                 flag: USE_MOUSE },
     #[cfg(feature = "multibuffer")]
@@ -722,7 +732,7 @@ fn closest_index_color(red: i16, green: i16, blue: i16) -> i16 {
     // Translation table, from 14 intended gray levels to 24 available levels.
     static GRAY: [i16; 14] = [1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 18, 21, 23];
 
-    if COLORS != 256 {
+    if terminal_colors() != 256 {
         return THE_DEFAULT;
     } else if red == green && green == blue && red > 0 && red < 0xF {
         return 232 + GRAY[(red - 1) as usize];
@@ -796,7 +806,7 @@ fn color_to_short(colorname: &str) -> (i16, bool, bool) {
             if i > 7 && vivid {
                 jot_error(&format!("Color '{}' takes no prefix", name));
                 return (BAD_COLOR, vivid, thick);
-            } else if i > 8 && COLORS < 255 {
+            } else if i > 8 && terminal_colors() < 255 {
                 return (THE_DEFAULT, vivid, thick);
             } else {
                 return (INDICES[i], vivid, thick);
@@ -844,7 +854,7 @@ fn parse_combination(combotext: &str) -> Option<(i16, i16, i32)> {
             return None;
         }
         let mut fg = color;
-        if vivid && !thick && COLORS > 8 {
+        if vivid && !thick && terminal_colors() > 8 {
             fg += 8;
         } else if vivid {
             attributes |= A_BOLD;
@@ -860,7 +870,7 @@ fn parse_combination(combotext: &str) -> Option<(i16, i16, i32)> {
             return None;
         }
         let mut bg = color;
-        if vivid && COLORS > 8 {
+        if vivid && terminal_colors() > 8 {
             bg += 8;
         }
         bg
@@ -1073,15 +1083,12 @@ fn grab_and_store_build(kind: &str, ptr: &str, for_default_syntax: bool) -> Opti
     let mut head: Option<Box<RegexListType>> = None;
     let mut tail: *mut Option<Box<RegexListType>> = &mut head;
 
-    let mut remaining = ptr;
+    let mut remaining = ptr.trim_start_matches(|c: char| c == ' ' || c == '\t');
     while !remaining.is_empty() {
         // Each regex string must start with '"'
         if !remaining.starts_with('"') {
-            // Skip to next '"'
-            remaining = remaining.trim_start_matches(|c: char| c != '"');
-            if remaining.is_empty() {
-                break;
-            }
+            jot_error(&format!("Regex strings for '{}' must begin with a \" character", kind));
+            return None;
         }
         remaining = &remaining[1..]; // skip opening '"'
 
@@ -1102,9 +1109,9 @@ fn grab_and_store_build(kind: &str, ptr: &str, for_default_syntax: bool) -> Opti
                         }
                     }
                 }
-                // Continue if next token is also a quoted string
-                if !remaining.starts_with('"') {
-                    break;
+                if !remaining.is_empty() && !remaining.starts_with('"') {
+                    jot_error(&format!("Unexpected text after '{}' regex", kind));
+                    return None;
                 }
             }
         }
@@ -1688,8 +1695,8 @@ fn parse_includes(ptr: &str) {
     }
 }
 
-/// Simple glob expansion using directory listing.
-/// Returns a sorted list of matched paths.
+/// POSIX-like glob expansion.  Literal separators and leading dots must be
+/// matched explicitly, which mirrors the `glob(3)` behavior nano relies on.
 fn expand_glob(pattern: &str) -> Vec<String> {
     // No glob characters: return the literal path even when it does not exist,
     // mirroring glob()'s GLOB_NOCHECK, so parse_one_include reports the read error
@@ -1698,73 +1705,28 @@ fn expand_glob(pattern: &str) -> Vec<String> {
         return vec![pattern.to_string()];
     }
 
-    // Split into directory and file pattern parts
-    let (dir_part, file_pattern) = match pattern.rfind('/') {
-        None => (".", pattern),
-        Some(pos) => (&pattern[..pos], &pattern[pos + 1..]),
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
     };
-
-    let mut results = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir_part) {
-        let mut entries: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name();
-                let name_str = name.to_string_lossy();
-                glob_matches(file_pattern, &name_str)
-            })
-            .map(|e| {
-                if dir_part == "." {
-                    e.file_name().to_string_lossy().into_owned()
-                } else {
-                    format!("{}/{}", dir_part, e.file_name().to_string_lossy())
-                }
-            })
-            .collect();
-        entries.sort();
-        results = entries;
-    }
+    let mut results: Vec<String> = match glob::glob_with(pattern, options) {
+        Ok(paths) => paths
+            .filter_map(Result::ok)
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        Err(error) => {
+            jot_error(&format!("Invalid include glob '{}': {}", pattern, error));
+            Vec::new()
+        }
+    };
+    results.sort();
     // GLOB_NOCHECK: when a wildcard pattern matches nothing, return the pattern
     // itself so parse_one_include emits the "Error reading" diagnostic, as C does.
     if results.is_empty() {
         results.push(pattern.to_string());
     }
     results
-}
-
-/// Simple glob match: supports * and ? wildcards.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let name = name.as_bytes();
-    glob_match_inner(pattern, name)
-}
-
-fn glob_match_inner(pattern: &[u8], name: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ni = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ni = 0;
-
-    while ni < name.len() {
-        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == name[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = pi;
-            star_ni = ni;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ni += 1;
-            ni = star_ni;
-        } else {
-            return false;
-        }
-    }
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
-    }
-    pi == pattern.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -1969,19 +1931,26 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
 
                 // File-matching commands need to be processed immediately
                 if cmd_keyword == "header" || cmd_keyword == "magic" {
-                    if cmd_keyword == "header" {
+                    if cmd_keyword == "header"
+                        || (cmd_keyword == "magic" && cfg!(feature = "libmagic"))
+                    {
                         // Build regex list OUTSIDE any STATE borrow (compile may call jot_error).
                         // For extendsyntax, C sets opensyntax = TRUE (paired with drop_open =
                         // TRUE, reset below) so grab_and_store does not reject the command with
                         // the spurious "requires a preceding 'syntax' command" error.
                         set_opensyntax(true);
                         let syntaxname_str = syntaxname.to_string();
-                        if let Some(new_items) = grab_and_store_build("header", cmd_rest, false) {
+                        let is_default = syntaxname == "default";
+                        if let Some(new_items) = grab_and_store_build(cmd_keyword, cmd_rest, is_default) {
                             with_state_mut(|s| {
                                 let mut cur = s.syntaxes.as_mut();
                                 while let Some(sx) = cur {
                                     if sx.name == syntaxname_str {
-                                        append_regex_list(&mut sx.headers, new_items);
+                                        if cmd_keyword == "header" {
+                                            append_regex_list(&mut sx.headers, new_items);
+                                        } else {
+                                            append_regex_list(&mut sx.magics, new_items);
+                                        }
                                         break;
                                     }
                                     cur = sx.next.as_mut();
@@ -1989,7 +1958,6 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                             });
                         }
                     }
-                    // magic: only if HAVE_LIBMAGIC — skip for now
                     drop_open = true;
                 } else {
                     // Store for later processing
@@ -2046,7 +2014,20 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                     }
                 }
             } else if keyword == "magic" {
-                // Only if HAVE_LIBMAGIC — skip for now
+                #[cfg(feature = "libmagic")]
+                if intros_only {
+                    let is_default = with_state(|s| {
+                        s.syntaxes.as_ref().map(|sx| sx.name == "default").unwrap_or(false)
+                    });
+                    if let Some(new_items) = grab_and_store_build("magic", rest_after_kw, is_default) {
+                        with_state_mut(|s| {
+                            if let Some(ref mut sx) = s.syntaxes {
+                                append_regex_list(&mut sx.magics, new_items);
+                            }
+                        });
+                    }
+                }
+                #[cfg(not(feature = "libmagic"))]
                 let _ = rest_after_kw;
             } else if just_syntax
                 && (keyword == "set"
@@ -2420,4 +2401,131 @@ pub fn do_rcfiles() {
     check_vitals_mapped();
 
     set_nanorc(None);
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "color")]
+    use super::expand_glob;
+
+    #[cfg(feature = "nanorc")]
+    fn reset_binding_test_state(menu: u32) {
+        use crate::global::with_state_mut;
+
+        with_state_mut(|state| {
+            state.currmenu = menu;
+            state.sclist.clear();
+            state.commandname = None;
+            state.planted_shortcut = None;
+            state.startup_problem = None;
+        });
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        #[cfg(feature = "color")]
+        super::set_opensyntax(false);
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn include_globs_cover_components_classes_unicode_and_dot_rules() {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["a", "b"] {
+            std::fs::create_dir(root.path().join(directory)).unwrap();
+            std::fs::write(root.path().join(directory).join("x.nanorc"), b"").unwrap();
+        }
+        std::fs::write(root.path().join("é.nanorc"), b"").unwrap();
+        std::fs::write(root.path().join(".hidden.nanorc"), b"").unwrap();
+
+        let nested = format!("{}/[ab]/*.nanorc", root.path().display());
+        assert_eq!(expand_glob(&nested).len(), 2);
+
+        let unicode = format!("{}/?.nanorc", root.path().display());
+        assert_eq!(
+            expand_glob(&unicode),
+            vec![root.path().join("é.nanorc").to_string_lossy().into_owned()]
+        );
+
+        let visible = format!("{}/*.nanorc", root.path().display());
+        assert!(!expand_glob(&visible).iter().any(|path| path.contains(".hidden")));
+    }
+
+    #[cfg(feature = "nanorc")]
+    #[test]
+    fn quoted_function_name_remains_a_literal_string_bind() {
+        use crate::definitions::MWHEREIS;
+        use crate::definitions::FuncPtr;
+        use crate::global::state;
+
+        reset_binding_test_state(MWHEREIS);
+        super::parse_binding("M-X \"left\" search", true);
+
+        let state = state();
+        let binding = state.sclist.iter().find(|entry| entry.keystr == "M-X")
+            .expect("quoted string binding");
+        assert_eq!(binding.func, Some(super::implant_sentinel as FuncPtr));
+        assert_eq!(binding.expansion.as_deref(), Some("left"));
+    }
+
+    #[cfg(feature = "nanorc")]
+    #[test]
+    fn invalid_string_bind_menu_reports_a_configuration_error() {
+        use crate::definitions::MYESNO;
+
+        reset_binding_test_state(MYESNO);
+        super::parse_binding("M-X \"text\" yesno", true);
+
+        let errors = super::ERROR_LIST.with(|items| items.borrow().clone());
+        assert!(errors.iter().any(|message| {
+            message.contains("does not exist in menu 'yesno'")
+        }));
+    }
+
+    #[cfg(feature = "nanorc")]
+    #[test]
+    fn planted_function_names_resolve_via_nanorc_function_parser() {
+        use crate::definitions::{FuncPtr, MWHEREIS, PLANTED_A_COMMAND};
+        use crate::global;
+
+        reset_binding_test_state(MWHEREIS);
+        crate::winio::implant("{left}{}}");
+
+        let command_code = crate::winio::get_input(None);
+        assert_eq!(command_code, PLANTED_A_COMMAND as i32);
+        assert_eq!(
+            global::get_shortcut(command_code),
+            Some(global::do_left as FuncPtr),
+        );
+        assert_eq!(crate::winio::get_input(None), b'}' as i32);
+
+        let state = global::state();
+        let planted = state.planted_shortcut.expect("transient planted shortcut");
+        assert_eq!(state.sclist[planted].keycode, PLANTED_A_COMMAND as i32);
+        assert_eq!(state.sclist[planted].menus as u32, MWHEREIS);
+        drop(state);
+
+        crate::winio::implant("{{}");
+        assert_eq!(crate::winio::get_input(None), b'{' as i32);
+
+        #[cfg(not(feature = "tiny"))]
+        {
+            use crate::definitions::NO_HELP;
+
+            crate::winio::implant("{nohelp}");
+            assert_eq!(crate::winio::get_input(None), PLANTED_A_COMMAND as i32);
+            let state = global::state();
+            let planted = state.planted_shortcut.expect("planted toggle shortcut");
+            assert_eq!(state.sclist[planted].toggle as u32, NO_HELP);
+        }
+    }
+
+    #[cfg(feature = "nanorc")]
+    #[test]
+    fn unknown_planted_function_returns_the_dedicated_error_code() {
+        use crate::definitions::{MWHEREIS, NO_SUCH_FUNCTION};
+
+        reset_binding_test_state(MWHEREIS);
+        crate::winio::implant("{not_a_nanorc_function}");
+
+        assert_eq!(crate::winio::get_input(None), NO_SUCH_FUNCTION as i32);
+        assert_eq!(crate::global::state().commandname.as_deref(), Some("not_a_nanorc_function"));
+    }
 }

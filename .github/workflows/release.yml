@@ -112,6 +112,15 @@ jobs:
           echo "$MESSAGE" > release_notes.md
           echo "Generated release notes for $TAG"
 
+      - name: Generate SHA-256 manifest
+        run: |
+          cd artifacts
+          sha256sum \
+            nano-amd64.exe \
+            nano-arm64.exe \
+            nano-linux-amd64 \
+            nano-linux-arm64 > nano-checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -124,4 +133,5 @@ jobs:
             artifacts/nano-arm64.exe
             artifacts/nano-linux-amd64
             artifacts/nano-linux-arm64
+            artifacts/nano-checksums.txt
           body_path: release_notes.md

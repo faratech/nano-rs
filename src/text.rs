@@ -64,6 +64,19 @@ fn safe_char_boundary_end(s: &str, pos: usize) -> usize {
     (pos..=s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(s.len())
 }
 
+/// Return a stored byte range only when it is wholly valid for this String.
+/// Undo metadata should already satisfy this invariant; treating malformed
+/// offsets as unusable is preferable to panicking or deleting half a scalar.
+#[inline]
+fn checked_char_range(s: &str, start: usize, len: usize) -> Option<std::ops::Range<usize>> {
+    let end = start.checked_add(len)?;
+    if end <= s.len() && s.is_char_boundary(start) && s.is_char_boundary(end) {
+        Some(start..end)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Local helper stubs for functions not yet imported from other modules.
 // These forward to the real implementations once all modules are wired.
@@ -174,9 +187,7 @@ fn confirm_margin() { crate::nano::confirm_margin() }
 fn block_sigwinch(block: bool) { crate::nano::block_sigwinch(block) }
 
 /// C: terminal_init() — restore terminal settings after external program.
-fn terminal_init() {
-    let _ = crate::winio::terminal_init();
-}
+fn terminal_init() { crate::nano::terminal_init(); }
 
 /// C: doupdate() — flush pending ncurses updates.
 fn doupdate() {
@@ -219,8 +230,8 @@ fn wnoutrefresh() {
 }
 
 /// C: read_file(stream, fd, filename, undoable) — read file into buffer.
-fn read_file(file: std::fs::File, is_new_file: bool, filename: &str, undoable: bool) {
-    crate::files::read_file_impl(file, is_new_file, filename, undoable);
+fn read_file<R: std::io::Read>(file: R, is_new_file: bool, filename: &str, undoable: bool) -> bool {
+    crate::files::read_file_impl(file, is_new_file, filename, undoable)
 }
 
 /// C: write_file(name, stream, temporary, kind, notes) — write buffer to file.
@@ -845,8 +856,10 @@ pub fn do_comment() {
     // Store the comment sequence in the undo record's strdata.
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
-            if let Some(ref mut u_box) = f.undotop {
-                u_box.strdata = Some(comment_seq.clone());
+            if !f.current_undo.is_null() {
+                // The active cursor was created through a unique Box path in
+                // add_undo; keep using that provenance for record mutation.
+                unsafe { (*f.current_undo).strdata = Some(comment_seq.clone()); }
             }
         }
     });
@@ -1038,8 +1051,8 @@ pub fn do_undo() {
                 let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
                 let strdata_len = strdata.len();
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() && u_head_x + strdata_len <= data.len() {
-                    data.replace_range(u_head_x..u_head_x + strdata_len, "");
+                if let Some(range) = checked_char_range(&data, u_head_x, strdata_len) {
+                    data.replace_range(range, "");
                     ln.borrow_mut().data = data;
                 }
             }
@@ -1092,7 +1105,7 @@ pub fn do_undo() {
             if let Some(ref ln) = line {
                 let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() {
+                if u_head_x <= data.len() && data.is_char_boundary(u_head_x) {
                     data.insert_str(u_head_x, &strdata);
                     ln.borrow_mut().data = data;
                 }
@@ -1112,7 +1125,7 @@ pub fn do_undo() {
             } else if let Some(ref ln) = line {
                 {
                     let mut node = ln.borrow_mut();
-                    if u_tail_x <= node.data.len() {
+                    if u_tail_x <= node.data.len() && node.data.is_char_boundary(u_tail_x) {
                         node.data.truncate(u_tail_x);
                     }
                 }
@@ -1260,11 +1273,12 @@ pub fn do_undo() {
 
     advance_current_undo();
 
+    let placewewant = xplustabs();
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             f.last_action = UndoType::Other;
             f.mark = None;
-            f.placewewant = xplustabs();
+            f.placewewant = placewewant;
             f.totsize = u_wassize;
         }
     });
@@ -1304,7 +1318,12 @@ fn advance_current_undo() {
     unsafe {
         let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo)).unwrap_or(std::ptr::null_mut());
         if !ptr.is_null() {
-            let next_ptr = (*ptr).next.as_deref().map(|b| b as *const UndoStruct as *mut UndoStruct).unwrap_or(std::ptr::null_mut());
+            // Preserve mutable provenance for a cursor that will later be used
+            // to update the record.  Casting a shared `&UndoStruct` to `*mut`
+            // makes the subsequent unique dereference undefined behaviour.
+            let next_ptr = (*ptr).next.as_deref_mut()
+                .map(|record| record as *mut UndoStruct)
+                .unwrap_or(std::ptr::null_mut());
             with_state_mut(|s| {
                 if let Some(ref mut f) = s.openfile {
                     f.current_undo = next_ptr;
@@ -1317,35 +1336,49 @@ fn advance_current_undo() {
 /* C: void do_redo(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn do_redo() {
-    let undotop_is_none = with_state(|s| s.openfile.as_ref().map(|f| f.undotop.is_none()).unwrap_or(true));
-    if undotop_is_none {
-        statusline(MessageType::Ahem, tr!("Nothing to redo"));
-        return;
-    }
-
-    let (undotop_ptr, current_undo_ptr) = with_state(|s| {
-        s.openfile.as_ref().map(|f| {
-            let top = f.undotop.as_deref().map(|b| b as *const UndoStruct as *mut UndoStruct).unwrap_or(std::ptr::null_mut());
-            (top, f.current_undo)
-        }).unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
+    let current_undo_ptr = with_state(|s| {
+        s.openfile.as_ref().map(|f| f.current_undo).unwrap_or(std::ptr::null_mut())
     });
 
-    if undotop_ptr == current_undo_ptr {
+    // Find the item before current_undo in the chain (the item to redo).  Each
+    // candidate pointer is obtained through `as_deref_mut`, because redo may
+    // swap owned fields in the selected record.
+    let (has_undo, u_ptr): (bool, *mut UndoStruct) = with_state_mut(|s| {
+        let Some(f) = s.openfile.as_mut() else {
+            return (false, std::ptr::null_mut());
+        };
+        let has_undo = f.undotop.is_some();
+        let mut candidate = f.undotop.as_deref_mut()
+            .map(|record| record as *mut UndoStruct)
+            .unwrap_or(std::ptr::null_mut());
+
+        if candidate == current_undo_ptr {
+            // Refresh the stored cursor with the provenance of this unique
+            // traversal before returning: obtaining a new mutable path through
+            // the Box supersedes an older raw reborrow of the same record.
+            f.current_undo = candidate;
+            return (has_undo, std::ptr::null_mut());
+        }
+
+        unsafe {
+            while !candidate.is_null() {
+                let next = (*candidate).next.as_deref_mut()
+                    .map(|record| record as *mut UndoStruct)
+                    .unwrap_or(std::ptr::null_mut());
+                if next == current_undo_ptr {
+                    f.current_undo = next;
+                    break;
+                }
+                candidate = next;
+            }
+        }
+        (has_undo, candidate)
+    });
+
+    if !has_undo {
         statusline(MessageType::Ahem, tr!("Nothing to redo"));
         return;
     }
-
-    // Find the item before current_undo in the chain (i.e., the one to redo).
-    let u_ptr: *mut UndoStruct = unsafe {
-        let mut p = undotop_ptr;
-        let target = current_undo_ptr;
-        loop {
-            if p.is_null() { break p; }
-            let next = (*p).next.as_deref().map(|b| b as *const UndoStruct as *mut UndoStruct).unwrap_or(std::ptr::null_mut());
-            if next == target { break p; }
-            p = next;
-        }
-    };
 
     if u_ptr.is_null() {
         statusline(MessageType::Ahem, tr!("Nothing to redo"));
@@ -1377,7 +1410,7 @@ pub fn do_redo() {
             if let Some(ref ln) = line {
                 let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() {
+                if u_head_x <= data.len() && data.is_char_boundary(u_head_x) {
                     data.insert_str(u_head_x, &strdata);
                     ln.borrow_mut().data = data;
                 }
@@ -1389,7 +1422,7 @@ pub fn do_redo() {
             if let Some(ref ln) = line {
                 {
                     let mut node = ln.borrow_mut();
-                    if u_head_x <= node.data.len() {
+                    if u_head_x <= node.data.len() && node.data.is_char_boundary(u_head_x) {
                         node.data.truncate(u_head_x);
                     }
                 }
@@ -1406,8 +1439,8 @@ pub fn do_redo() {
             if let Some(ref ln) = line {
                 let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() && u_head_x + strdata.len() <= data.len() {
-                    data.replace_range(u_head_x..u_head_x + strdata.len(), "");
+                if let Some(range) = checked_char_range(&data, u_head_x, strdata.len()) {
+                    data.replace_range(range, "");
                     ln.borrow_mut().data = data;
                 }
             }
@@ -1459,10 +1492,9 @@ pub fn do_redo() {
                 if t == Some(UndoType::SplitEnd) || t.is_none() { break; }
                 do_redo();
             }
-            let (head_lineno, head_x) = unsafe {
-                if !u_ptr.is_null() { ((*u_ptr).head_lineno, (*u_ptr).head_x) } else { (0, 0) }
-            };
-            goto_line_posx(head_lineno, head_x);
+            // Recursive redos can reborrow the undo chain, so use the scalars
+            // copied before recursion instead of dereferencing the old cursor.
+            goto_line_posx(u_head_lineno, u_head_x);
             ensure_firstcolumn_is_aligned();
             return;
         }
@@ -1547,11 +1579,12 @@ pub fn do_redo() {
 
     set_current_undo_to(u_ptr);
 
+    let placewewant = xplustabs();
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             f.last_action = UndoType::Other;
             f.mark = None;
-            f.placewewant = xplustabs();
+            f.placewewant = placewewant;
             f.totsize = u_newsize;
         }
     });
@@ -1787,19 +1820,54 @@ pub fn do_enter() {
 /* C: void inject(char *buf, size_t buf_len) */
 pub fn inject(buf: &str, buf_len: usize) {
     let insertion_end = safe_char_boundary(buf, buf_len.min(buf.len()));
-    let insertion = &buf[..insertion_end];
+    let raw_insertion = &buf[..insertion_end];
+    if raw_insertion.is_empty() {
+        return;
+    }
+    let insertion = if raw_insertion.contains('\0') {
+        std::borrow::Cow::Owned(raw_insertion.replace('\0', "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(raw_insertion)
+    };
 
-    let (current_line, current_x) = with_state(|s| {
+    let (current_line, requested_x) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
         (f.current.clone().expect("a current line"), f.current_x)
     });
 
+    // Keep malformed restored state or a partially ported caller from making
+    // String::insert_str panic or leaving the cursor beyond end-of-line.
+    let current_x = {
+        let line = current_line.borrow();
+        safe_char_boundary(&line.data, requested_x)
+    };
+    if current_x != requested_x {
+        with_state_mut(|s| {
+            if let Some(ref mut f) = s.openfile {
+                f.current_x = current_x;
+            }
+        });
+    }
+
     #[cfg(not(feature = "tiny"))]
-    let last_action = with_state(|s| s.openfile.as_ref().map(|f| f.last_action).unwrap_or(UndoType::Other));
+    let continues_previous_add = with_state(|s| {
+        let Some(f) = s.openfile.as_ref() else { return false; };
+        if f.last_action != UndoType::Add || f.current_undo.is_null() {
+            return false;
+        }
+
+        let lineno = current_line.borrow().lineno;
+        // SAFETY: current_undo points into this buffer's owned undo chain.  A
+        // non-null pointer paired with last_action == Add is the active record.
+        let undo = unsafe { &*f.current_undo };
+        undo.r#type == UndoType::Add
+            && undo.tail_lineno == lineno
+            && undo.tail_x == current_x
+    });
 
     #[cfg(not(feature = "tiny"))]
     {
-        if last_action != UndoType::Add {
+        if !continues_previous_add {
             add_undo(UndoType::Add, None);
         }
     }
@@ -1808,9 +1876,9 @@ pub fn inject(buf: &str, buf_len: usize) {
         let mut node = current_line.borrow_mut();
         let mut data = node.data.clone();
         if current_x <= data.len() {
-            data.insert_str(current_x, insertion);
+            data.insert_str(current_x, insertion.as_ref());
         } else {
-            data.push_str(insertion);
+            data.push_str(insertion.as_ref());
         }
         node.data = data;
     }
@@ -1831,7 +1899,7 @@ pub fn inject(buf: &str, buf_len: usize) {
         let mark_adjust = with_state(|s| {
             let f = s.openfile.as_ref()?;
             let mark = f.mark.as_ref()?;
-            if mark.as_ptr() == current_line.as_ptr() && f.mark_x >= current_x {
+            if mark.as_ptr() == current_line.as_ptr() && f.mark_x > current_x {
                 Some(f.mark_x + insertion_len)
             } else {
                 None
@@ -1925,10 +1993,22 @@ pub fn discard_until(thisitem: *const UndoStruct) {
         }
     }
 
-    // Adjust current_undo.
+    // Re-resolve the retained item through mutable links.  `thisitem` is only
+    // an identity token: it may have originated from a shared lookup and must
+    // never itself be cast into the mutable undo cursor.
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
-            f.current_undo = thisitem as *mut UndoStruct;
+            let mut retained = f.undotop.as_deref_mut()
+                .map(|record| record as *mut UndoStruct)
+                .unwrap_or(std::ptr::null_mut());
+            unsafe {
+                while !retained.is_null() && !std::ptr::eq(retained.cast_const(), thisitem) {
+                    retained = (*retained).next.as_deref_mut()
+                        .map(|record| record as *mut UndoStruct)
+                        .unwrap_or(std::ptr::null_mut());
+                }
+            }
+            f.current_undo = retained;
         }
     });
 
@@ -1977,13 +2057,14 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
             // Insert under the top item.
             with_state_mut(|s| {
                 if let Some(ref mut f) = s.openfile {
-                    if let Some(ref top) = f.undotop {
+                    if let Some(top) = f.undotop.as_deref_mut() {
                         u.wassize = top.wassize;
-                    }
-                    // Move top's next into u.next, then put u after top.
-                    if let Some(ref mut top) = f.undotop {
+                        // Move top's next into u.next, then put u after top.
                         u.next = top.next.take();
                         top.next = Some(u);
+                        // Refresh current_undo after uniquely traversing the
+                        // Box that owns the active top record.
+                        f.current_undo = top as *mut UndoStruct;
                     }
                 }
             });
@@ -1994,12 +2075,13 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
     }
 
     // Prepend to undo stack.
-    let _new_u_raw = &*u as *const UndoStruct as *mut UndoStruct;
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             u.next = f.undotop.take();
             f.undotop = Some(u);
-            f.current_undo = f.undotop.as_deref().map(|b| b as *const UndoStruct as *mut UndoStruct).unwrap_or(std::ptr::null_mut());
+            f.current_undo = f.undotop.as_deref_mut()
+                .map(|record| record as *mut UndoStruct)
+                .unwrap_or(std::ptr::null_mut());
         }
     });
 
@@ -2232,8 +2314,7 @@ pub fn update_undo(action: UndoType) {
     unsafe {
         let ptr = with_state(|s| {
             s.openfile.as_ref()
-                .and_then(|f| f.undotop.as_deref())
-                .map(|b| b as *const UndoStruct as *mut UndoStruct)
+                .map(|f| f.current_undo)
                 .unwrap_or(std::ptr::null_mut())
         });
         if ptr.is_null() { return; }
@@ -2587,8 +2668,7 @@ pub fn do_wrap() {
                     // Update the ENTER undo record.
                     let ptr = with_state(|s| {
                         s.openfile.as_ref()
-                            .and_then(|f| f.undotop.as_deref())
-                            .map(|b| b as *const UndoStruct as *mut UndoStruct)
+                            .map(|f| f.current_undo)
                             .unwrap_or(std::ptr::null_mut())
                     });
                     if !ptr.is_null() {
@@ -3520,12 +3600,10 @@ pub fn construct_argument_list(command: &str, filename: &str) -> Vec<String> {
 }
 
 /* C: bool replace_buffer(const char *filename, undo_type action, const char *operation) */
-#[cfg(all(any(feature = "speller", feature = "formatter"), unix))]
+#[cfg(all(unix, any(not(feature = "tiny"), feature = "speller", feature = "formatter")))]
 pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool {
-    use std::fs::File;
-
-    let file = match File::open(filename) {
-        Ok(f) => f,
+    let replacement = match std::fs::read(filename) {
+        Ok(bytes) => bytes,
         Err(_) => return false,
     };
 
@@ -3558,13 +3636,11 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
     free_lines(new_cut);
     set_cutbuffer(was_cutbuffer);
 
-    // Cross-platform file clone instead of fd round-trip.
-    let file2 = file.try_clone().unwrap_or_else(|_| {
-        // If clone fails, create a new file handle
-        std::fs::File::open(filename).unwrap_or_else(|_| file)
-    });
-
-    read_file(file2, true, filename, true);
+    // The complete replacement was read before mutating the buffer, so no
+    // filesystem error can expose a cut-without-insert intermediate state.
+    if !read_file(std::io::Cursor::new(replacement), true, filename, true) {
+        return false;
+    }
 
     #[cfg(not(feature = "tiny"))]
     add_undo(UndoType::CoupleEnd, Some(operation));
@@ -3573,7 +3649,7 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
 }
 
 /* Windows stub for replace_buffer */
-#[cfg(all(any(feature = "speller", feature = "formatter"), not(unix)))]
+#[cfg(all(not(unix), any(not(feature = "tiny"), feature = "speller", feature = "formatter")))]
 pub fn replace_buffer(_filename: &str, _action: UndoType, _operation: &str) -> bool {
     false  // Not supported on Windows
 }
@@ -3583,6 +3659,15 @@ pub fn replace_buffer(_filename: &str, _action: UndoType, _operation: &str) -> b
 pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
     use std::process::Command;
     use std::fs;
+
+    if cfg!(not(unix)) {
+        let tool = if spelling { "speller" } else { "formatter" };
+        statusline(
+            MessageType::Alert,
+            &format!("External {} execution is not supported on this platform", tool),
+        );
+        return;
+    }
 
     let was_lineno = with_state(|s| {
         s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|c| c.borrow().lineno).unwrap_or(0)
@@ -3778,7 +3863,9 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
     });
     adjust_viewport(UpdateType::Stationary);
 
-    if spelling {
+    if !replaced {
+        statusline(MessageType::Alert, tr!("Could not apply tool output"));
+    } else if spelling {
         statusline(MessageType::Remark, tr!("Finished checking spelling"));
     } else {
         statusline(MessageType::Remark, tr!("Buffer has been processed"));
@@ -3954,7 +4041,14 @@ fn get_region_as_lines_coords() -> Option<(LinePtr, usize, LinePtr, usize)> {
 #[cfg(feature = "speller")]
 pub fn spell_check(tempfile_name: &str) {
     use std::process::{Command, Stdio};
-    
+
+    if cfg!(not(unix)) {
+        statusline(
+            MessageType::Alert,
+            "External spell checking is not supported on this platform",
+        );
+        return;
+    }
 
     statusbar(tr!("Invoking spell checker..."));
 
@@ -4403,27 +4497,34 @@ struct LintEntry {
 /// Parse one line of linter output in the format "filename:line:col: message".
 #[cfg(feature = "linter")]
 fn parse_lint_line(line: &str) -> Option<LintEntry> {
-    let space_pos = line.find(' ')?;
-    let prefix = &line[..space_pos];
-    let msg = line[space_pos + 1..].to_string();
+    let (location, msg) = line.split_once(": ")?;
 
-    let mut parts = prefix.splitn(4, ':');
-    let filename = parts.next()?.to_string();
-    let linestr = parts.next()?;
-    let colstr = parts.next().unwrap_or("1");
+    fn split_number(text: &str) -> Option<(&str, isize)> {
+        let separator = text.rfind(':')?;
+        let number = text[separator + 1..]
+            .split(',')
+            .next()?
+            .parse()
+            .ok()?;
+        Some((&text[..separator], number))
+    }
 
-    let lineno: isize = linestr.parse().ok()?;
+    let (before_last, last_number) = split_number(location)?;
+    let (filename, lineno, colno) = match split_number(before_last) {
+        Some((filename, line_number)) => (filename, line_number, last_number),
+        None => (before_last, last_number, 1),
+    };
     if lineno <= 0 {
         return None;
     }
-
-    // colstr might be "col" or "col,col".
-    let colno: isize = colstr.split(',').next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
     let colno = if colno <= 0 { 1 } else { colno };
 
-    Some(LintEntry { filename, lineno, colno, msg })
+    Some(LintEntry {
+        filename: filename.to_string(),
+        lineno,
+        colno,
+        msg: msg.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4680,6 +4781,26 @@ thread_local! {
     static SCOURING_ID: RefCell<usize> = RefCell::new(0);
 }
 
+/// Advance word completion to the next open buffer without rotating the
+/// editor's active buffer ring.  ID zero denotes the active buffer and IDs
+/// one onward map to the ring's forward order.
+#[cfg(all(feature = "wordcomp", feature = "multibuffer"))]
+fn next_completion_buffer_line() -> Option<LinePtr> {
+    SCOURING_ID.with(|scouring| {
+        let mut id = scouring.borrow_mut();
+        let total = state().buffer_ring.len();
+
+        while *id < total {
+            *id += 1;
+            if let Some(line) = with_state(|s| s.buffer_ring.get(*id - 1)
+                    .and_then(|buffer| buffer.filetop.clone())) {
+                return Some(line);
+            }
+        }
+        None
+    })
+}
+
 /* C: void complete_a_word(void) */
 #[cfg(feature = "wordcomp")]
 pub fn complete_a_word() {
@@ -4693,6 +4814,8 @@ pub fn complete_a_word() {
         // Clear previous completions.
         COMPLETIONS.with(|c| c.borrow_mut().clear());
         PLETION_X.with(|px| *px.borrow_mut() = 0);
+        #[cfg(feature = "multibuffer")]
+        SCOURING_ID.with(|id| *id.borrow_mut() = 0);
 
         with_state_mut(|s| {
             if let Some(ref mut f) = s.openfile {
@@ -4826,10 +4949,11 @@ pub fn complete_a_word() {
 
         #[cfg(feature = "multibuffer")]
         {
-            // C: when at end of buffer and there is another, search that one.
-            // The circular openfile list is not yet fully ported; stub left for
-            // when multibuffer wiring is complete.
-            let _ = (); // TODO: cycle through openfile->next when multibuffer is wired
+            // When this buffer is exhausted, continue through the remaining
+            // buffers in ring order, stopping before returning to the active one.
+            if state().pletion_line.is_none() {
+                state_mut().pletion_line = next_completion_buffer_line();
+            }
         }
     }
 
@@ -4840,6 +4964,253 @@ pub fn complete_a_word() {
         statusline(MessageType::Ahem, tr!("No further matches"));
     } else {
         statusline(MessageType::Ahem, tr!("No matches"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "linter")]
+    #[test]
+    fn lint_parser_keeps_windows_drive_unc_and_space_paths() {
+        let drive = parse_lint_line(r"C:\work dir\main.rs:12:7: bad token").unwrap();
+        assert_eq!(drive.filename, r"C:\work dir\main.rs");
+        assert_eq!((drive.lineno, drive.colno), (12, 7));
+        assert_eq!(drive.msg, "bad token");
+
+        let unc = parse_lint_line(r"\\server\share\main.rs:4: warning").unwrap();
+        assert_eq!(unc.filename, r"\\server\share\main.rs");
+        assert_eq!((unc.lineno, unc.colno), (4, 1));
+        assert_eq!(unc.msg, "warning");
+    }
+
+    fn buffer_with_line(data: &str, current_x: usize) -> (Box<OpenFileStruct>, LinePtr) {
+        let line = crate::nano::make_new_node(None);
+        line.borrow_mut().data = data.to_string();
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filetop = Some(line.clone());
+        buffer.filebot = Some(line.clone());
+        buffer.edittop = Some(line.clone());
+        buffer.current = Some(line.clone());
+        buffer.current_x = current_x;
+        buffer.placewewant = crate::utils::wideness(
+            data, safe_char_boundary(data, current_x));
+        buffer.totsize = data.chars().count();
+        // Avoid terminal title updates in unit tests.
+        buffer.modified = true;
+        (buffer, line)
+    }
+
+    fn install_buffer(data: &str, current_x: usize) -> LinePtr {
+        let (buffer, line) = buffer_with_line(data, current_x);
+        with_state_mut(|s| {
+            s.openfile = Some(buffer);
+            s.flags[flag_index(NO_NEWLINES)] |= flag_mask(NO_NEWLINES);
+            s.flags[flag_index(ZERO)] |= flag_mask(ZERO);
+            s.editwincols = 80;
+            s.editwinrows = 24;
+        });
+        line
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    fn install_two_line_buffer(first_data: &str, second_data: &str) -> (LinePtr, LinePtr) {
+        let first = crate::nano::make_new_node(None);
+        first.borrow_mut().data = first_data.to_owned();
+        let second = crate::nano::make_new_node(Some(&first));
+        second.borrow_mut().data = second_data.to_owned();
+        first.borrow_mut().next = Some(second.clone());
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filetop = Some(first.clone());
+        buffer.filebot = Some(second.clone());
+        buffer.edittop = Some(first.clone());
+        buffer.current = Some(second.clone());
+        buffer.current_x = second_data.len();
+        buffer.totsize = first_data.len() + second_data.len() + 1;
+        buffer.modified = true;
+
+        with_state_mut(|s| {
+            s.openfile = Some(buffer);
+            s.flags[flag_index(NO_NEWLINES)] |= flag_mask(NO_NEWLINES);
+            s.flags[flag_index(ZERO)] |= flag_mask(ZERO);
+            s.editwincols = 80;
+            s.editwinrows = 24;
+        });
+        (first, second)
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    fn current_buffer_text() -> String {
+        let mut line = with_state(|s| {
+            s.openfile.as_ref().and_then(|buffer| buffer.filetop.clone())
+        });
+        let mut pieces = Vec::new();
+        while let Some(node) = line {
+            pieces.push(node.borrow().data.clone());
+            line = node.borrow().next.clone();
+        }
+        pieces.join("\n")
+    }
+
+    #[test]
+    fn inject_defends_utf8_boundaries_and_encodes_nul() {
+        let line = install_buffer("éclair", 1);
+        inject("X\0", 2);
+
+        assert_eq!(line.borrow().data, "X\néclair");
+        assert_eq!(state().openfile.as_ref().unwrap().current_x, 2);
+    }
+
+    #[test]
+    fn inject_does_not_split_a_multibyte_burst() {
+        let line = install_buffer("ok", 2);
+        inject("é", 1);
+
+        assert_eq!(line.borrow().data, "ok");
+        assert_eq!(state().openfile.as_ref().unwrap().current_x, 2);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn inject_starts_new_undo_after_noncontiguous_cursor_move() {
+        let line = install_buffer("abcd", 0);
+        inject("x", 1);
+        inject("y", 1);
+        state_mut().openfile.as_mut().unwrap().current_x = 4;
+        inject("z", 1);
+
+        assert_eq!(line.borrow().data, "xyabzcd");
+        let state_guard = state();
+        let top = state_guard.openfile.as_ref().unwrap().undotop.as_ref().unwrap();
+        assert_eq!(top.r#type, UndoType::Add);
+        assert_eq!((top.head_lineno, top.head_x), (1, 4));
+        assert_eq!((top.tail_lineno, top.tail_x), (1, 5));
+        let previous = top.next.as_ref().expect("separate prior ADD record");
+        assert_eq!(previous.strdata.as_deref(), Some("xy"));
+        assert!(previous.next.is_none());
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn cross_line_unicode_injection_undoes_only_the_contiguous_add() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
+        let (first, second) = install_two_line_buffer("", "");
+
+        inject("é", "é".len());
+        with_state_mut(|s| {
+            let buffer = s.openfile.as_mut().unwrap();
+            buffer.current = Some(first.clone());
+            buffer.current_x = 0;
+        });
+        inject("\t", 1);
+
+        assert_eq!(first.borrow().data, "\t");
+        assert_eq!(second.borrow().data, "é");
+        do_undo();
+        assert_eq!(first.borrow().data, "");
+        assert_eq!(second.borrow().data, "é");
+
+        do_redo();
+        assert_eq!(first.borrow().data, "\t");
+        assert_eq!(second.borrow().data, "é");
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn malformed_undo_byte_range_does_not_split_a_unicode_scalar() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
+        let line = install_buffer("", 0);
+        inject("é", "é".len());
+
+        with_state_mut(|s| {
+            let buffer = s.openfile.as_mut().unwrap();
+            let top = buffer.undotop.as_deref_mut().unwrap();
+            top.strdata = Some("x".to_owned());
+            buffer.current_undo = top as *mut UndoStruct;
+        });
+
+        do_undo();
+        assert_eq!(line.borrow().data, "é");
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
+    }
+
+    #[cfg(all(not(feature = "tiny"), unix))]
+    #[test]
+    #[cfg_attr(miri, ignore = "requires filesystem access; rerun Miri with isolation disabled")]
+    fn replacement_couple_is_undone_and_redone_as_one_action() {
+        use std::io::Write;
+
+        install_buffer("before", 0);
+        let mut replacement = tempfile::NamedTempFile::new().unwrap();
+        replacement.write_all(b"after").unwrap();
+        replacement.flush().unwrap();
+
+        assert!(replace_buffer(
+            &replacement.path().to_string_lossy(),
+            UndoType::CutToEof,
+            "filtering",
+        ));
+        update_undo(UndoType::CoupleEnd);
+        assert_eq!(current_buffer_text(), "after");
+
+        do_undo();
+        assert_eq!(current_buffer_text(), "before");
+
+        do_redo();
+        assert_eq!(current_buffer_text(), "after");
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn in_memory_replacement_couple_is_miri_checkable() {
+        install_buffer("before", 0);
+        add_undo(UndoType::CoupleBegin, Some("filtering"));
+
+        set_cutbuffer(None);
+        add_undo(UndoType::CutToEof, None);
+        do_snip(false, true, false);
+        update_undo(UndoType::CutToEof);
+
+        let replacement = crate::nano::make_new_node(None);
+        replacement.borrow_mut().data = "after".to_owned();
+        add_undo(UndoType::Insert, None);
+        ingraft_buffer(replacement);
+        update_undo(UndoType::Insert);
+
+        add_undo(UndoType::CoupleEnd, Some("filtering"));
+        update_undo(UndoType::CoupleEnd);
+        assert_eq!(current_buffer_text(), "after");
+
+        do_undo();
+        assert_eq!(current_buffer_text(), "before");
+        do_redo();
+        assert_eq!(current_buffer_text(), "after");
+    }
+
+    #[cfg(all(feature = "wordcomp", feature = "multibuffer"))]
+    #[test]
+    fn word_completion_scours_other_buffers() {
+        let active_line = install_buffer("hel", 3);
+        let (other, _) = buffer_with_line("hello", 0);
+        state_mut().buffer_ring.push_back(other);
+
+        complete_a_word();
+
+        assert_eq!(active_line.borrow().data, "hello");
+        assert_eq!(state().buffer_ring.len(), 1);
+        assert_eq!(state().openfile.as_ref().unwrap().current_x, 5);
     }
 }
 

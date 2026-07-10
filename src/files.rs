@@ -8,8 +8,10 @@ use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::{ISSET, SET, UNSET, TOGGLE};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+#[cfg(feature = "operatingdir")]
+use std::cell::RefCell;
 
 // Re-export stubs for winio/text/search/nano functions referenced here.
 // These will be replaced by real implementations when those modules are ported.
@@ -19,7 +21,411 @@ use std::path::Path;
 // ---------------------------------------------------------------------------
 
 const LOCKSIZE: usize = 1024;
-const LUMPSIZE: usize = 120;
+
+// The operating directory is a security boundary, not just a pathname
+// predicate.  Keep the directory open and resolve every user-controlled path
+// through that handle.  cap-std implements beneath/no-escape resolution on
+// Linux, macOS, FreeBSD, and Windows, including safe fallback walking when the
+// newest native primitive is unavailable.
+#[cfg(feature = "operatingdir")]
+struct OperatingRoot {
+    display_path: PathBuf,
+    dir: cap_std::fs::Dir,
+}
+
+#[cfg(feature = "operatingdir")]
+thread_local! {
+    static OPERATING_ROOT: RefCell<Option<OperatingRoot>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "operatingdir")]
+fn relative_to_root(root: &OperatingRoot, path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        path.strip_prefix(&root.display_path)
+            .map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    relative.to_path_buf()
+                }
+            })
+            .map_err(|_| io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "path is outside the operating directory",
+            ))
+    } else {
+        Ok(path.to_path_buf())
+    }
+}
+
+#[cfg(feature = "operatingdir")]
+fn with_operating_root<T>(
+    path: &Path,
+    operation: impl FnOnce(&OperatingRoot, &Path) -> io::Result<T>,
+) -> Option<io::Result<T>> {
+    OPERATING_ROOT.with(|slot| {
+        let root = slot.borrow();
+        root.as_ref().map(|root| {
+            let relative = relative_to_root(root, path)?;
+            operation(root, &relative)
+        })
+    })
+}
+
+fn operating_root_required_but_unavailable() -> bool {
+    #[cfg(feature = "operatingdir")]
+    {
+        state().operating_dir.is_some()
+            && OPERATING_ROOT.with(|slot| slot.borrow().is_none())
+    }
+    #[cfg(not(feature = "operatingdir"))]
+    {
+        false
+    }
+}
+
+fn operating_root_is_active() -> bool {
+    #[cfg(feature = "operatingdir")]
+    {
+        OPERATING_ROOT.with(|slot| slot.borrow().is_some())
+    }
+    #[cfg(not(feature = "operatingdir"))]
+    {
+        false
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PathOpenOptions {
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+    nofollow: bool,
+    mode: u32,
+}
+
+fn open_path_with(path: &Path, options: PathOpenOptions) -> io::Result<File> {
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        let mut cap_options = cap_std::fs::OpenOptions::new();
+        cap_options
+            .read(options.read)
+            .write(options.write)
+            .append(options.append)
+            .truncate(options.truncate)
+            .create(options.create)
+            .create_new(options.create_new);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            cap_options.mode(options.mode);
+            if options.nofollow {
+                cap_options.custom_flags(libc::O_NOFOLLOW);
+            }
+        }
+        root.dir
+            .open_with(relative, &cap_options)
+            .map(cap_std::fs::File::into_std)
+    }) {
+        return result;
+    }
+
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
+    }
+
+    let mut ambient_options = OpenOptions::new();
+    ambient_options
+        .read(options.read)
+        .write(options.write)
+        .append(options.append)
+        .truncate(options.truncate)
+        .create(options.create)
+        .create_new(options.create_new);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        ambient_options.mode(options.mode);
+        if options.nofollow {
+            ambient_options.custom_flags(libc::O_NOFOLLOW);
+        }
+    }
+    ambient_options.open(path)
+}
+
+fn open_path(path: &Path) -> io::Result<File> {
+    open_path_with(path, PathOpenOptions {
+        read: true,
+        ..PathOpenOptions::default()
+    })
+}
+
+fn path_exists_nofollow(path: &Path) -> io::Result<bool> {
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        match root.dir.symlink_metadata(relative) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        root.dir.remove_file(relative)
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    std::fs::remove_file(path)
+}
+
+fn rename_path(from: &Path, to: &Path, source: &File) -> io::Result<()> {
+    let _ = source;
+    #[cfg(feature = "operatingdir")]
+    {
+        let result = OPERATING_ROOT.with(|slot| {
+            let root = slot.borrow();
+            root.as_ref().map(|root| {
+                let _from = relative_to_root(root, from)?;
+                let to = relative_to_root(root, to)?;
+                #[cfg(windows)]
+                {
+                    replace_capability_file_on_windows(root, source, &to)
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = source;
+                    root.dir.rename(_from, &root.dir, to)
+                }
+            })
+        });
+        if let Some(result) = result {
+            return result;
+        }
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    std::fs::rename(from, to)
+}
+
+/// Atomically install an already-open staging file on Windows without
+/// converting either directory capability back into an ambient path.
+///
+/// `std::fs::rename` cannot replace an existing file on Windows.  The native
+/// handle API can, and its `RootDirectory` field anchors a simple destination
+/// name to an already-open parent directory.  Both the source and destination
+/// parent therefore remain capability-confined throughout the operation.
+#[cfg(all(windows, feature = "operatingdir"))]
+fn replace_capability_file_on_windows(
+    root: &OperatingRoot,
+    source: &File,
+    destination: &Path,
+) -> io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+        FILE_RENAME_INFO_0,
+    };
+
+    let basename = destination.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "replacement destination has no file name",
+        )
+    })?;
+    let parent = destination.parent().filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = root.dir.open_dir(parent)?;
+
+    let mut name: Vec<u16> = basename.encode_wide().collect();
+    if name.is_empty() || name.iter().any(|unit| *unit == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "replacement destination has an invalid file name",
+        ));
+    }
+    let name_bytes = name.len().checked_mul(size_of::<u16>()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
+    })?;
+    let buffer_bytes = size_of::<FILE_RENAME_INFO>()
+        .checked_add(name_bytes)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
+        })?;
+    let buffer_units = buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>());
+    let mut buffer = vec![FILE_RENAME_INFO::default(); buffer_units];
+    let info = buffer.as_mut_ptr();
+
+    unsafe {
+        (*info).Anonymous = FILE_RENAME_INFO_0 {
+            ReplaceIfExists: true,
+        };
+        (*info).RootDirectory = HANDLE(parent.as_raw_handle());
+        (*info).FileNameLength = name_bytes.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
+        })?;
+        std::ptr::copy_nonoverlapping(
+            name.as_mut_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+
+        SetFileInformationByHandle(
+            HANDLE(source.as_raw_handle()),
+            FileRenameInfo,
+            info.cast(),
+            buffer_bytes.try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "replacement file name is too long")
+            })?,
+        )
+        .map_err(|_| io::Error::last_os_error())
+    }
+}
+
+fn sync_parent_of(path: &Path) -> io::Result<()> {
+    let parent = usable_parent(path);
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(parent, |root, relative| {
+        root.dir.open_dir(relative)?.into_std_file().sync_all()
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    File::open(parent)?.sync_all()
+}
+
+/// Return whether the actual resolved object is a directory without allowing
+/// resolution to leave the retained operating-directory capability.
+pub(crate) fn confined_is_dir(path: impl AsRef<Path>) -> io::Result<bool> {
+    let path = path.as_ref();
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        root.dir.metadata(relative).map(|metadata| metadata.is_dir())
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    std::fs::metadata(path).map(|metadata| metadata.is_dir())
+}
+
+#[derive(Clone, Copy)]
+struct PathInfo {
+    is_dir: bool,
+    is_special: bool,
+    is_fifo: bool,
+    mode: u32,
+}
+
+fn path_info(path: &Path) -> io::Result<PathInfo> {
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        let metadata = root.dir.metadata(relative)?;
+        #[cfg(unix)]
+        {
+            use cap_std::fs::{FileTypeExt as _, MetadataExt as _};
+            let file_type = metadata.file_type();
+            return Ok(PathInfo {
+                is_dir: metadata.is_dir(),
+                is_special: file_type.is_char_device() || file_type.is_block_device(),
+                is_fifo: file_type.is_fifo(),
+                mode: metadata.mode(),
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            return Ok(PathInfo {
+                is_dir: metadata.is_dir(),
+                is_special: false,
+                is_fifo: false,
+                mode: 0,
+            });
+        }
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+
+    let metadata = std::fs::metadata(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+        let file_type = metadata.file_type();
+        Ok(PathInfo {
+            is_dir: metadata.is_dir(),
+            is_special: file_type.is_char_device() || file_type.is_block_device(),
+            is_fifo: file_type.is_fifo(),
+            mode: metadata.permissions().mode(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathInfo {
+            is_dir: metadata.is_dir(),
+            is_special: false,
+            is_fifo: false,
+            mode: 0,
+        })
+    }
+}
+
+/// Read directory entry names through the retained capability.  Names alone
+/// are returned so callers cannot accidentally regain an ambient path handle.
+pub(crate) fn confined_read_dir(path: impl AsRef<Path>) -> io::Result<Vec<std::ffi::OsString>> {
+    let path = path.as_ref();
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        root.dir
+            .read_dir(relative)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    }) {
+        return result;
+    }
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Stub calls to other modules (forward declarations)
@@ -74,6 +480,133 @@ fn usable_parent(path: &Path) -> &Path {
     }
 }
 
+static STAGING_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+struct CapabilityTempFile {
+    relative_path: PathBuf,
+    file: Option<File>,
+    installed: bool,
+}
+
+impl CapabilityTempFile {
+    fn as_file(&self) -> &File {
+        self.file.as_ref().expect("capability temp file is open")
+    }
+
+    fn as_file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("capability temp file is open")
+    }
+
+    fn persist(mut self, destination: &Path) -> io::Result<File> {
+        rename_path(&self.relative_path, destination, self.as_file())?;
+        self.installed = true;
+        Ok(self.file.take().expect("capability temp file is open"))
+    }
+}
+
+impl Drop for CapabilityTempFile {
+    fn drop(&mut self) {
+        if self.installed {
+            return;
+        }
+        #[cfg(feature = "operatingdir")]
+        OPERATING_ROOT.with(|slot| {
+            if let Some(root) = slot.borrow().as_ref() {
+                let _ = root.dir.remove_file(&self.relative_path);
+            }
+        });
+    }
+}
+
+enum StagingFile {
+    Ambient(tempfile::NamedTempFile),
+    Capability(CapabilityTempFile),
+}
+
+impl StagingFile {
+    fn as_file(&self) -> &File {
+        match self {
+            Self::Ambient(file) => file.as_file(),
+            Self::Capability(file) => file.as_file(),
+        }
+    }
+
+    fn as_file_mut(&mut self) -> &mut File {
+        match self {
+            Self::Ambient(file) => file.as_file_mut(),
+            Self::Capability(file) => file.as_file_mut(),
+        }
+    }
+
+    fn persist(self, destination: &Path) -> io::Result<File> {
+        match self {
+            Self::Ambient(file) => file
+                .persist(destination)
+                .map_err(|error| error.error),
+            Self::Capability(file) => file.persist(destination),
+        }
+    }
+}
+
+fn create_staging_file(parent: &Path, prefix: &str) -> io::Result<StagingFile> {
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(parent, |root, relative_parent| {
+        use std::sync::atomic::Ordering;
+
+        for _ in 0..128 {
+            let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let candidate = relative_parent.join(format!(
+                "{}{}.{:016x}",
+                prefix,
+                std::process::id(),
+                sequence,
+            ));
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+                use windows::Win32::Storage::FileSystem::DELETE;
+
+                options.access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0);
+            }
+            #[cfg(unix)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            match root.dir.open_with(&candidate, &options) {
+                Ok(file) => {
+                    return Ok(StagingFile::Capability(CapabilityTempFile {
+                        relative_path: candidate,
+                        file: Some(file.into_std()),
+                        installed: false,
+                    }));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique staging file",
+        ))
+    }) {
+        return result;
+    }
+
+    if operating_root_required_but_unavailable() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized"));
+    }
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempfile_in(parent)
+        .map(StagingFile::Ambient)
+}
+
 fn last_path_separator(text: &str) -> Option<usize> {
     text.char_indices()
         .rev()
@@ -83,6 +616,79 @@ fn last_path_separator(text: &str) -> Option<usize> {
 
 fn path_join_display(base: &str, child: &str) -> String {
     Path::new(base).join(child).to_string_lossy().into_owned()
+}
+
+#[inline]
+fn printable_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Expand a leading `~` without converting the path through UTF-8.  Only the
+/// returned `PathBuf` is authoritative; callers may derive a lossy string for
+/// UI text with `printable_path()`.
+pub fn expand_leading_tilde_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut components = path.components();
+    let first = match components.next() {
+        Some(Component::Normal(component)) => component,
+        _ => return path.to_path_buf(),
+    };
+
+    #[cfg(unix)]
+    let first_bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        first.as_bytes()
+    };
+    #[cfg(not(unix))]
+    let first_bytes = first.to_str().unwrap_or("").as_bytes();
+
+    if first_bytes.first() != Some(&b'~') {
+        return path.to_path_buf();
+    }
+
+    let home = if first_bytes.len() == 1 {
+        crate::utils::get_homedir();
+        state().homedir_raw.clone()
+    } else {
+        #[cfg(unix)]
+        {
+            let username = match std::ffi::CString::new(&first_bytes[1..]) {
+                Ok(username) => username,
+                Err(_) => return path.to_path_buf(),
+            };
+            let entry = unsafe { libc::getpwnam(username.as_ptr()) };
+            if entry.is_null() {
+                None
+            } else {
+                use std::os::unix::ffi::OsStrExt;
+                let bytes = unsafe { std::ffi::CStr::from_ptr((*entry).pw_dir) }.to_bytes();
+                Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+
+    match home {
+        Some(home) => home.join(components.as_path()),
+        None => path.to_path_buf(),
+    }
+}
+
+fn set_openfile_filename(openfile: &mut OpenFileStruct, path: PathBuf) {
+    openfile.filename = printable_path(&path);
+    openfile.filename_path = path;
+}
+
+fn openfile_filename_path(openfile: &OpenFileStruct) -> Option<&Path> {
+    if openfile.filename_path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(&openfile.filename_path)
+    }
 }
 
 /// C: make_new_node(prev) — nano.c.
@@ -135,7 +741,7 @@ fn mbstrcasecmp(a: &str, b: &str) -> i32 {
 /// C: reconnect_and_store_state() — nano.c; reattach the keyboard to stdin.
 #[inline]
 fn reconnect_and_store_state() { crate::nano::reconnect_and_store_state(); }
-fn terminal_init() { let _ = crate::winio::terminal_init(); }
+fn terminal_init() { crate::nano::terminal_init(); }
 fn doupdate() {}  // stub: no crate::winio::doupdate exists
 fn isendwin() -> bool { false }  // stub: no crate::winio::isendwin exists
 
@@ -228,9 +834,6 @@ fn COLS() -> usize {
 fn LINES() -> usize {
     state().midwin.rows as usize
 }
-fn editwinrows() -> i32 {
-    state().editwinrows
-}
 
 // ---------------------------------------------------------------------------
 // crop_to_fit — return the given file name cropped to fit within `room` cols
@@ -262,41 +865,167 @@ pub const LOCKING_PREFIX: &str = ".";
 #[cfg(not(feature = "tiny"))]
 pub const LOCKING_SUFFIX: &str = ".swp";
 
-/* C: bool delete_lockfile(const char *lockfilename)
- * Delete the lock file.  Return TRUE on success, and FALSE otherwise. */
+#[cfg(feature = "tiny")]
+pub fn delete_lockfile(_lockfilename: impl AsRef<Path>, _lockfile: Option<&File>) -> bool {
+    true
+}
+
 #[cfg(not(feature = "tiny"))]
-pub fn delete_lockfile(lockfilename: &str) -> bool {
-    match std::fs::remove_file(lockfilename) {
+fn open_lockfile_for_create(lockfilename: &Path) -> io::Result<File> {
+    // O_EXCL is the ownership boundary: another editor (or a racing symlink)
+    // must never be unlinked and silently replaced.
+    open_path_with(lockfilename, PathOpenOptions {
+        read: true,
+        write: true,
+        create_new: true,
+        nofollow: true,
+        mode: 0o666,
+        ..PathOpenOptions::default()
+    })
+}
+
+#[cfg(not(feature = "tiny"))]
+fn open_existing_lockfile(lockfilename: &Path) -> io::Result<File> {
+    let file = open_path_with(lockfilename, PathOpenOptions {
+        read: true,
+        write: true,
+        nofollow: true,
+        ..PathOpenOptions::default()
+    })?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "lock path is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file.metadata()?.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "lock file has multiple hard links",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+#[cfg(all(windows, not(feature = "tiny")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowsFileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+    link_count: u32,
+}
+
+#[cfg(all(windows, not(feature = "tiny")))]
+fn windows_file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)
+            .map_err(|_| io::Error::last_os_error())?;
+    }
+    Ok(WindowsFileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+        link_count: information.nNumberOfLinks,
+    })
+}
+
+#[cfg(not(feature = "tiny"))]
+fn lockfile_still_names(file: &File, lockfilename: &Path) -> bool {
+    let held = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    // Resolve the name through the same retained directory capability.  The
+    // held descriptor is the only object ever mutated; this second descriptor
+    // is solely an identity check, so a subsequent rename cannot redirect the
+    // write to an attacker-selected object.
+    let named_file = match open_path_with(lockfilename, PathOpenOptions {
+        read: true,
+        nofollow: true,
+        ..PathOpenOptions::default()
+    }) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let named = match named_file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if !held.is_file() || !named.file_type().is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return held.dev() == named.dev() && held.ino() == named.ino() && held.nlink() == 1;
+    }
+    #[cfg(windows)]
+    {
+        let held = match windows_file_identity(file) {
+            Ok(identity) => identity,
+            Err(_) => return false,
+        };
+        let named = match windows_file_identity(&named_file) {
+            Ok(identity) => identity,
+            Err(_) => return false,
+        };
+        held == named && held.link_count == 1
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/* C: bool delete_lockfile(const char *lockfilename)
+ * Delete the lock file only while the name still identifies the descriptor
+ * retained by this editor.  Return TRUE on success, and FALSE otherwise. */
+#[cfg(not(feature = "tiny"))]
+pub fn delete_lockfile(lockfilename: impl AsRef<Path>, lockfile: Option<&File>) -> bool {
+    let lockfilename = lockfilename.as_ref();
+    let Some(lockfile) = lockfile else {
+        statusline(MessageType::Mild,
+            &format!("Refusing to delete lock file without its handle: {}", lockfilename.display()));
+        return false;
+    };
+
+    if !lockfile_still_names(lockfile, lockfilename) {
+        // Preserve the historical success result when the lock name is
+        // already gone, but never unlink a replacement object.
+        if matches!(path_exists_nofollow(lockfilename), Ok(false)) {
+            return true;
+        }
+        statusline(MessageType::Mild,
+            &format!("Refusing to delete changed lock file: {}", lockfilename.display()));
+        return false;
+    }
+
+    match remove_path(lockfilename) {
         Ok(_) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => true,
         Err(e) => {
             statusline(MessageType::Mild,
-                &format!("Error deleting lock file {}: {}", lockfilename, e));
+                &format!("Error deleting lock file {}: {}", lockfilename.display(), e));
             false
         }
     }
 }
 
-#[cfg(feature = "tiny")]
-pub fn delete_lockfile(_lockfilename: &str) -> bool {
-    true
-}
-
-/* C: bool write_lockfile(const char *lockfilename, const char *filename, bool modified)
- * Write a lock file under the given lockfilename.  Always annihilates an
- * existing version of that file.  Return TRUE on success; FALSE otherwise. */
 #[cfg(not(feature = "tiny"))]
-pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> bool {
-    
-
-    // First remove any existing lock file.
-    if !delete_lockfile(lockfilename) {
-        return false;
-    }
-
+fn build_lockdata(filename: &Path, modified: bool) -> Option<Vec<u8>> {
     let pid = std::process::id();
 
-    // Get username
     let username: String = {
         #[cfg(unix)]
         unsafe {
@@ -304,7 +1033,7 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
             let pw = libc::getpwuid(uid);
             if pw.is_null() {
                 statusline(MessageType::Mild, "Couldn't determine my identity for lock file");
-                return false;
+                return None;
             }
             let name = std::ffi::CStr::from_ptr((*pw).pw_name);
             name.to_string_lossy().into_owned()
@@ -313,7 +1042,6 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
         String::from("unknown")
     };
 
-    // Get hostname
     #[cfg(unix)]
     let hostname: String = {
         let mut buf = [0u8; 32];
@@ -321,7 +1049,7 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
         if ret < 0 {
             statusline(MessageType::Mild,
                 &format!("Couldn't determine hostname: {}", io::Error::last_os_error()));
-            return false;
+            return None;
         }
         buf[31] = 0;
         let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char) };
@@ -331,77 +1059,90 @@ pub fn write_lockfile(lockfilename: &str, filename: &str, modified: bool) -> boo
     #[cfg(not(unix))]
     let hostname: String = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
 
-    // Build lock data (1024 bytes)
     let mut lockdata = vec![0u8; LOCKSIZE];
-
     lockdata[0] = 0x62;
     lockdata[1] = 0x30;
 
-    // bytes 2-11: program name "nano VERSION" (truncated to 10 bytes)
     let progname = format!("nano {}", GNU_NANO_VERSION);
     let progname_bytes = progname.as_bytes();
     let plen = progname_bytes.len().min(10);
-    lockdata[2..2+plen].copy_from_slice(&progname_bytes[..plen]);
+    lockdata[2..2 + plen].copy_from_slice(&progname_bytes[..plen]);
 
-    // bytes 24-27: PID, little endian
     lockdata[24] = (pid % 256) as u8;
     lockdata[25] = ((pid / 256) % 256) as u8;
     lockdata[26] = ((pid / (256 * 256)) % 256) as u8;
     lockdata[27] = (pid / (256 * 256 * 256)) as u8;
 
-    // bytes 28-43: username (up to 16 bytes)
     let uname_bytes = username.as_bytes();
     let ulen = uname_bytes.len().min(16);
-    lockdata[28..28+ulen].copy_from_slice(&uname_bytes[..ulen]);
+    lockdata[28..28 + ulen].copy_from_slice(&uname_bytes[..ulen]);
 
-    // bytes 68-99: hostname (up to 32 bytes)
     let hname_bytes = hostname.as_bytes();
     let hlen = hname_bytes.len().min(32);
-    lockdata[68..68+hlen].copy_from_slice(&hname_bytes[..hlen]);
+    lockdata[68..68 + hlen].copy_from_slice(&hname_bytes[..hlen]);
 
-    // bytes 108-875: filename (up to 768 bytes)
-    let fname_bytes = filename.as_bytes();
-    let flen = fname_bytes.len().min(768);
-    lockdata[108..108+flen].copy_from_slice(&fname_bytes[..flen]);
-
-    // byte 1007: modified flag
-    lockdata[1007] = if modified { 0x55 } else { 0x00 };
-
-    // Create file exclusively
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o666); // RW_FOR_ALL
-    }
-    let file_result = opts.open(lockfilename);
+    let fname_bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        filename.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let fname_bytes = filename.to_string_lossy().as_bytes().to_vec();
+    let flen = fname_bytes.len().min(768);
+    lockdata[108..108 + flen].copy_from_slice(&fname_bytes[..flen]);
+    lockdata[1007] = if modified { 0x55 } else { 0x00 };
+    Some(lockdata)
+}
 
-    match file_result {
-        Err(e) => {
+/* Write lock contents through the descriptor acquired for this buffer. */
+#[cfg(not(feature = "tiny"))]
+pub fn write_lockfile(
+    lockfile: &mut File,
+    lockfilename: &Path,
+    filename: &Path,
+    modified: bool,
+) -> bool {
+    if !lockfile_still_names(lockfile, lockfilename) {
+        statusline(MessageType::Mild, &format!("Lock file changed: {}", lockfilename.display()));
+        return false;
+    }
+    let lockdata = match build_lockdata(filename, modified) {
+        Some(data) => data,
+        None => return false,
+    };
+    let result = lockfile
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| lockfile.set_len(0))
+        .and_then(|_| lockfile.write_all(&lockdata))
+        .and_then(|_| lockfile.sync_all());
+    if let Err(error) = result {
+        statusline(MessageType::Mild,
+            &format!("Error writing lock file {}: {}", lockfilename.display(), error));
+        return false;
+    }
+    if !lockfile_still_names(lockfile, lockfilename) {
+        statusline(MessageType::Mild, &format!("Lock file changed: {}", lockfilename.display()));
+        return false;
+    }
+    true
+}
+
+#[cfg(not(feature = "tiny"))]
+fn create_lockfile(lockfilename: &Path, filename: &Path, modified: bool) -> Option<File> {
+    let mut lockfile = match open_lockfile_for_create(lockfilename) {
+        Ok(file) => file,
+        Err(error) => {
             statusline(MessageType::Mild,
-                &format!("Error writing lock file {}: {}", lockfilename, e));
-            false
+                &format!("Error writing lock file {}: {}", lockfilename.display(), error));
+            return None;
         }
-        Ok(mut f) => {
-            match f.write_all(&lockdata) {
-                Ok(_) => {
-                    match f.flush() {
-                        Ok(_) => true,
-                        Err(e) => {
-                            statusline(MessageType::Mild,
-                                &format!("Error writing lock file {}: {}", lockfilename, e));
-                            false
-                        }
-                    }
-                }
-                Err(e) => {
-                    statusline(MessageType::Mild,
-                        &format!("Error writing lock file {}: {}", lockfilename, e));
-                    false
-                }
-            }
-        }
+    };
+    if write_lockfile(&mut lockfile, lockfilename, filename, modified) {
+        Some(lockfile)
+    } else {
+        let _ = delete_lockfile(lockfilename, Some(&lockfile));
+        drop(lockfile);
+        None
     }
 }
 
@@ -413,10 +1154,10 @@ pub const SKIPTHISFILE: i32 = -2;
  * First check if a lock file already exists.  If so, and ask_the_user is TRUE,
  * ask whether to open the corresponding file anyway.  Return SKIPTHISFILE when
  * the user answers "No", return the lock filename on success, and return None on
- * failure.  Rust version returns Option<String> (None = failure, Some(path) = success)
- * and a special Err(()) means SKIPTHISFILE. */
+ * failure.  Rust retains the exclusively acquired descriptor alongside the
+ * pathname, and a special Err(()) means SKIPTHISFILE. */
 #[cfg(not(feature = "tiny"))]
-pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>, ()> {
+pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<(String, File)>, ()> {
     // Build lock filename: <dir>/.<basename>.swp
     let path = Path::new(filename);
     let dirname = usable_parent(path);
@@ -429,24 +1170,36 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
         .to_string_lossy()
         .into_owned();
 
-    let lock_exists = Path::new(&lockfilename).exists();
-
+    // symlink_metadata also sees dangling symlinks.  Such a path must count as
+    // occupied so create_new() can fail closed instead of following it.
+    let lock_exists = match path_exists_nofollow(Path::new(&lockfilename)) {
+        Ok(exists) => exists,
+        Err(error) => {
+            statusline(MessageType::Alert,
+                &format!("Error checking lock file {}: {}", lockfilename, error));
+            return Ok(None);
+        }
+    };
     if lock_exists && !ask_the_user {
         blank_bottombars();
         statusline(MessageType::Alert, "Someone else is also editing this file");
         napms(1200);
+        return Ok(None);
     } else if lock_exists {
         // Read and parse the lock file
-        match File::open(&lockfilename) {
+        match open_existing_lockfile(&lockfilename) {
             Err(e) => {
                 statusline(MessageType::Alert,
                     &format!("Error opening lock file {}: {}", lockfilename, e));
                 return Ok(None);
             }
             Ok(mut f) => {
-                let mut lockbuf = vec![0u8; LOCKSIZE];
-                let readamt = match f.read(&mut lockbuf) {
-                    Ok(n) => n,
+                let mut lockbuf = Vec::with_capacity(LOCKSIZE);
+                let readamt = match (&mut f)
+                    .take((LOCKSIZE + 1) as u64)
+                    .read_to_end(&mut lockbuf)
+                {
+                    Ok(amount) => amount,
                     Err(e) => {
                         statusline(MessageType::Alert,
                             &format!("Error reading lock file {}: {}", lockfilename, e));
@@ -511,25 +1264,51 @@ pub fn do_lockfile(filename: &str, ask_the_user: bool) -> Result<Option<String>,
                     wipe_statusbar();
                     return Err(());
                 }
+
+                // Override the stale lock through the exact descriptor that we
+                // inspected.  A swapped directory entry is neither unlinked nor
+                // overwritten and causes the identity checks to fail closed.
+                if write_lockfile(&mut f, &lockfilename, filename, false) {
+                    return Ok(Some((lockfilename, f)));
+                }
+                return Ok(None);
             }
         }
     }
 
-    if write_lockfile(&lockfilename, filename, false) {
-        Ok(Some(lockfilename))
-    } else {
-        Ok(None)
-    }
+    Ok(create_lockfile(&lockfilename, filename, false)
+        .map(|lockfile| (lockfilename, lockfile)))
 }
 
 /* C: void stat_with_alloc(const char *filename, struct stat **pstat)
  * Perform a stat call on the given filename.  On success, *pstat points to
  * the stat's result.  On failure, *pstat is freed and made NULL. */
 #[cfg(not(feature = "tiny"))]
-pub fn stat_with_alloc(filename: &str) -> Option<FileStat> {
+pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
+    let filename = filename.as_ref();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        #[cfg(feature = "operatingdir")]
+        if let Some(result) = with_operating_root(filename, |root, relative| {
+            root.dir.metadata(relative)
+        }) {
+            use cap_std::fs::MetadataExt as _;
+            return result.ok().map(|meta| FileStat {
+                st_mtime: meta.mtime(),
+                st_dev: meta.dev(),
+                st_ino: meta.ino(),
+                st_uid: meta.uid(),
+                st_gid: meta.gid(),
+                st_mode: meta.mode(),
+                st_atime: meta.atime(),
+                st_atime_nsec: meta.atime_nsec() as i64,
+                st_mtime_nsec: meta.mtime_nsec() as i64,
+            });
+        }
+        if operating_root_required_but_unavailable() {
+            return None;
+        }
         match std::fs::metadata(filename) {
             Ok(meta) => {
                 Some(FileStat {
@@ -549,6 +1328,22 @@ pub fn stat_with_alloc(filename: &str) -> Option<FileStat> {
     }
     #[cfg(not(unix))]
     {
+        #[cfg(feature = "operatingdir")]
+        if let Some(result) = with_operating_root(filename, |root, relative| {
+            root.dir.metadata(relative)
+        }) {
+            return result.ok().map(|meta| FileStat {
+                st_mtime: meta.modified().ok()
+                    .and_then(|t| t.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+                st_dev: 0,
+                st_ino: 0,
+            });
+        }
+        if operating_root_required_but_unavailable() {
+            return None;
+        }
         match std::fs::metadata(filename) {
             Ok(meta) => {
                 Some(FileStat {
@@ -569,8 +1364,8 @@ pub fn stat_with_alloc(filename: &str) -> Option<FileStat> {
 // has_valid_path — verify that the containing directory exists
 // C: bool has_valid_path(const char *filename)
 // ---------------------------------------------------------------------------
-pub fn has_valid_path(filename: &str) -> bool {
-    let path = Path::new(filename);
+pub fn has_valid_path(filename: impl AsRef<Path>) -> bool {
+    let path = filename.as_ref();
     let parentdir = usable_parent(path);
     let parentdir_str = parentdir.to_string_lossy();
 
@@ -584,7 +1379,7 @@ pub fn has_valid_path(filename: &str) -> bool {
         }
     }
 
-    match std::fs::metadata(parentdir) {
+    match confined_is_dir(parentdir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             statusline(MessageType::Alert,
                 &format!("Directory '{}' does not exist", parentdir_str));
@@ -595,20 +1390,27 @@ pub fn has_valid_path(filename: &str) -> bool {
                 &format!("Path '{}': {}", parentdir_str, e));
             false
         }
-        Ok(meta) => {
-            if !meta.is_dir() {
+        Ok(is_directory) => {
+            if !is_directory {
                 statusline(MessageType::Alert,
                     &format!("Path '{}' is not a directory", parentdir_str));
                 return false;
             }
 
+            // Opening the parent through the capability already checked
+            // traversal permissions without a second ambient resolution.
+            if operating_root_is_active() {
+                return true;
+            }
+
             // Check for execute access
-            let cpath = match std::ffi::CString::new(parentdir_str.as_ref()) {
-                Ok(s) => s,
-                Err(_) => return false,
-            };
             #[cfg(unix)]
             {
+                use std::os::unix::ffi::OsStrExt;
+                let cpath = match std::ffi::CString::new(parentdir.as_os_str().as_bytes()) {
+                    Ok(path) => path,
+                    Err(_) => return false,
+                };
                 let x_ok = unsafe { libc::access(cpath.as_ptr(), libc::X_OK) };
                 if x_ok < 0 {
                     statusline(MessageType::Alert,
@@ -625,6 +1427,11 @@ pub fn has_valid_path(filename: &str) -> bool {
                 if locking && !view_mode {
                     #[cfg(unix)]
                     {
+                        use std::os::unix::ffi::OsStrExt;
+                        let cpath = match std::ffi::CString::new(parentdir.as_os_str().as_bytes()) {
+                            Ok(path) => path,
+                            Err(_) => return false,
+                        };
                         let w_ok = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
                         if w_ok < 0 {
                             statusline(MessageType::Mild,
@@ -644,6 +1451,12 @@ pub fn has_valid_path(filename: &str) -> bool {
 // C: void make_new_buffer(void)
 // ---------------------------------------------------------------------------
 pub fn make_new_buffer() {
+    // Allocate before borrowing AppState mutably: LinePtr allocation itself
+    // enters the state allocator, and RefCell correctly rejects re-entrancy.
+    let filetop = make_new_node(None);
+    filetop.borrow_mut().data = String::new();
+    filetop.borrow_mut().lineno = 1;
+
     with_state_mut(|s| {
         let mut newnode = Box::new(OpenFileStruct::default());
 
@@ -677,10 +1490,6 @@ pub fn make_new_buffer() {
         // Initialize fields
         newnode.filename = String::new();
 
-        let filetop = make_new_node(None);
-        filetop.borrow_mut().data = String::new();
-        filetop.borrow_mut().lineno = 1;
-
         let filetop_clone = filetop.clone();
         newnode.filetop = Some(filetop);
         newnode.filebot = Some(filetop_clone.clone());
@@ -708,6 +1517,7 @@ pub fn make_new_buffer() {
             newnode.last_action = UndoType::Other;
             newnode.statinfo = None;
             newnode.lock_filename = None;
+            newnode.lock_file = None;
         }
 
         #[cfg(feature = "multibuffer")]
@@ -724,6 +1534,27 @@ pub fn make_new_buffer() {
 // open_buffer — create or populate a buffer from a file
 // C: bool open_buffer(const char *filename, bool new_one)
 // ---------------------------------------------------------------------------
+pub(crate) fn discard_transient_buffer() {
+    #[cfg(not(feature = "tiny"))]
+    {
+        let (lock_filename, lock_file) = with_state_mut(|s| match s.openfile.as_mut() {
+            Some(buffer) => (buffer.lock_filename.take(), buffer.lock_file.take()),
+            None => (None, None),
+        });
+        if let Some(lock_filename) = lock_filename {
+            delete_lockfile(&lock_filename, lock_file.as_ref());
+        }
+        drop(lock_file);
+    }
+
+    #[cfg(feature = "multibuffer")]
+    close_buffer_impl();
+    #[cfg(not(feature = "multibuffer"))]
+    {
+        state_mut().openfile = None;
+    }
+}
+
 pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     // Display newlines in filenames as ^J
     state_mut().as_an_at = false;
@@ -747,27 +1578,25 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
 
     // Don't try to open directories, character files, or block files.
     if !filename.is_empty() {
-        if let Ok(meta) = std::fs::metadata(&realname) {
-            if meta.is_dir() {
+        if let Ok(info) = path_info(Path::new(&realname)) {
+            if info.is_dir {
                 statusline(MessageType::Alert, &format!("\"{}\" is a directory", realname));
                 return false;
             }
             // Check for block/char device and FIFO (requires libc)
-            if is_special_file(&meta) {
+            if info.is_special {
                 statusline(MessageType::Alert, &format!("\"{}\" is a device file", realname));
                 return false;
             }
             #[cfg(feature = "tiny")]
-            if is_fifo_file(&meta) {
+            if info.is_fifo {
                 statusline(MessageType::Alert, &format!("\"{}\" is a FIFO", realname));
                 return false;
             }
             #[cfg(all(not(feature = "tiny"), unix))]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = meta.permissions().mode();
                 let euid = unsafe { libc::geteuid() };
-                if new_one && (mode & 0o222) == 0 && euid == ROOT_UID {
+                if new_one && (info.mode & 0o222) == 0 && euid == ROOT_UID {
                     statusline(MessageType::Alert,
                         &format!("{} is meant to be read-only", realname));
                 }
@@ -791,10 +1620,13 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
                             close_buffer_impl();
                             return false;
                         }
-                        Ok(lock_fname) => {
+                        Ok(lock) => {
                             with_state_mut(|s| {
                                 if let Some(ref mut of) = s.openfile {
-                                    of.lock_filename = lock_fname;
+                                    if let Some((lock_filename, lock_file)) = lock {
+                                        of.lock_filename = Some(lock_filename);
+                                        of.lock_file = Some(lock_file);
+                                    }
                                 }
                             });
                         }
@@ -817,8 +1649,14 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
     if descriptor > 0 {
         if let Some(f) = file_handle {
             install_handler_for_Ctrl_C();
-            read_file_impl(f, true, &realname, !new_one);
+            let read_succeeded = read_file_impl(f, true, &realname, !new_one);
             restore_handler_for_Ctrl_C();
+            if !read_succeeded {
+                if new_one {
+                    discard_transient_buffer();
+                }
+                return false;
+            }
 
             #[cfg(not(feature = "tiny"))]
             {
@@ -836,13 +1674,8 @@ pub fn open_buffer_impl(filename: &str, new_one: bool) -> bool {
             }
         }
     } else if descriptor < 0 {
-        #[cfg(feature = "multibuffer")]
         if new_one {
-            close_buffer_impl();
-        }
-        #[cfg(not(feature = "multibuffer"))]
-        if new_one {
-            state_mut().openfile = None;
+            discard_transient_buffer();
         }
         return false;
     }
@@ -886,22 +1719,30 @@ pub fn set_modified() {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let (has_lock, lock_fname, buf_filename) = with_state(|s| {
-            if let Some(ref of) = s.openfile {
-                (
-                    of.lock_filename.is_some(),
-                    of.lock_filename.clone(),
-                    of.filename.clone(),
-                )
+        let (mut lock_file, lock_fname, buf_filename) = with_state_mut(|s| {
+            if let Some(ref mut of) = s.openfile {
+                (of.lock_file.take(), of.lock_filename.clone(), of.filename.clone())
             } else {
-                (false, None, String::new())
+                (None, None, String::new())
             }
         });
-        if has_lock {
-            if let (Some(lf), fname) = (lock_fname, buf_filename) {
-                write_lockfile(&lf, &fname, true);
-            }
+        let keep_lock = match (lock_file.as_mut(), lock_fname.as_deref()) {
+            (Some(file), Some(path)) => write_lockfile(file, path, &buf_filename, true),
+            (None, None) => true,
+            _ => false,
+        };
+        if !keep_lock {
+            lock_file = None;
         }
+        with_state_mut(|s| {
+            if let Some(ref mut of) = s.openfile {
+                if keep_lock && of.lock_file.is_none() {
+                    of.lock_file = lock_file;
+                } else if !keep_lock {
+                    of.lock_filename = None;
+                }
+            }
+        });
     }
 }
 
@@ -1129,11 +1970,37 @@ pub fn encode_data(buf: &[u8]) -> (String, bool) {
     }
 }
 
+fn read_until_cancelled<R: Read>(
+    reader: &mut R,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> io::Result<(Vec<u8>, bool)> {
+    let mut content = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+
+    loop {
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok((content, true));
+        }
+
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok((content, false)),
+            Ok(amount) => content.extend_from_slice(&chunk[..amount]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok((content, true));
+                }
+                // EINTR without a cancellation request is transient.
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // read_file_impl — read an open file into the current buffer
 // C: void read_file(FILE *f, int fd, const char *filename, bool undoable)
 // ---------------------------------------------------------------------------
-pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: bool) {
+pub fn read_file_impl<R: Read>(mut f: R, had_real_fd: bool, filename: &str, undoable: bool) -> bool {
     let was_lineno = with_state(|s| {
         s.openfile.as_ref()
             .and_then(|of| of.current.as_ref())
@@ -1152,9 +2019,6 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         } else {
             0
         };
-        if undoable {
-            add_undo(UndoType::Insert, None);
-        }
     }
     #[cfg(feature = "tiny")]
     { was_leftedge = 0; }
@@ -1164,27 +2028,31 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     let mut bottomline = topline.clone();
     let mut num_lines: usize = 0;
 
-    // Read the file byte by byte
-    let _buf: Vec<u8> = Vec::with_capacity(LUMPSIZE);
     let mut error_occurred = false;
     let mut error_msg = String::new();
-    let _interrupted = false;
 
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(true);
 
-    state_mut().control_C_was_pressed = false;
+    crate::nano::CONTROL_C_WAS_PRESSED.store(
+        false,
+        std::sync::atomic::Ordering::SeqCst,
+    );
 
-    // Read the entire file contents
-    let mut content = Vec::new();
-    let mut had_invalid_utf8 = false;
-    match f.read_to_end(&mut content) {
-        Ok(_) => {}
-        Err(e) => {
+    // Read in bounded chunks so a SIGINT interruption is observed between
+    // reads.  The signal handler publishes only to the atomic flag.
+    let (content, interrupted) = match read_until_cancelled(
+        &mut f,
+        &crate::nano::CONTROL_C_WAS_PRESSED,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
             error_occurred = true;
-            error_msg = e.to_string();
+            error_msg = error.to_string();
+            (Vec::new(), false)
         }
-    }
+    };
+    let mut had_invalid_utf8 = false;
 
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(false);
@@ -1201,13 +2069,18 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         }
     }
 
+    // Keep the legacy field synchronized for callers that inspect it, but never
+    // mutate AppState from the asynchronous handler itself.
+    state_mut().control_C_was_pressed = interrupted;
     if error_occurred {
         statusline(MessageType::Alert, &error_msg);
+        return false;
     }
-
-    let ctrl_c = state().control_C_was_pressed;
-    if ctrl_c {
+    if interrupted {
         statusline(MessageType::Alert, "Interrupted");
+        // Do not ingraft a partially read file/FIFO.  The caller's pre-existing
+        // buffer remains the only observable state.
+        return false;
     }
 
     // Check writability
@@ -1242,10 +2115,6 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
             Some(rel) => start + rel,
             None => break, // no further newline; trailing bytes handled below
         };
-        if state().control_C_was_pressed {
-            break;
-        }
-
         let mut line: &[u8] = &content[start..nl];
         #[cfg(not(feature = "tiny"))]
         {
@@ -1271,10 +2140,8 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
     }
 
     // Handle the final segment after the last newline (may be empty when the file
-    // ends in '\n'). If the read was interrupted by ^C (the flag may already be set
-    // on entry, before any newline is seen), finalize with an empty line — matching
-    // the old byte-loop, which broke immediately and never emitted the remainder.
-    let tail: &[u8] = if state().control_C_was_pressed { &[] } else { &content[start..] };
+    // ends in '\n').
+    let tail: &[u8] = &content[start..];
     if tail.is_empty() {
         bottomline.borrow_mut().data = String::new();
     } else {
@@ -1282,6 +2149,13 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
         had_invalid_utf8 |= invalid_utf8;
         bottomline.borrow_mut().data = data;
         num_lines += 1;
+    }
+
+    // Capture the undo origin only after the complete input is available; a
+    // failed or cancelled read must not leave a phantom undo entry.
+    #[cfg(not(feature = "tiny"))]
+    if undoable {
+        add_undo(UndoType::Insert, None);
     }
 
     // Insert the read buffer into the current buffer
@@ -1367,6 +2241,7 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
             }
         });
     }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,32 +2251,13 @@ pub fn read_file_impl(mut f: File, had_real_fd: bool, filename: &str, undoable: 
 // ---------------------------------------------------------------------------
 pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>) -> i32 {
     let full_filename = get_full_path(filename);
-
-    // Resolve path, falling back to given path if realpath fails
-    let resolved = {
-        let candidate = full_filename.as_deref().unwrap_or(filename);
-        if std::fs::metadata(candidate).is_ok() {
-            candidate.to_string()
-        } else {
-            filename.to_string()
-        }
-    };
-
-    if std::fs::metadata(&resolved).is_err() {
-        if new_one {
-            statusline(MessageType::Remark, "New File");
-            return 0;
-        } else {
-            statusline(MessageType::Alert, &format!("File \"{}\" not found", filename));
-            return -1;
-        }
-    }
+    let resolved = full_filename.as_deref().unwrap_or(filename).to_string();
 
     // Check if it's a FIFO
     #[cfg(not(feature = "tiny"))]
     {
-        if let Ok(meta) = std::fs::metadata(&resolved) {
-            if is_fifo_file(&meta) {
+        if let Ok(info) = path_info(Path::new(&resolved)) {
+            if info.is_fifo {
                 statusbar("Reading from FIFO...");
             }
         }
@@ -1410,7 +2266,10 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
     }
 
     // Open the file
-    let open_result = File::open(&resolved);
+    // This is the authority-bearing read.  When operating-directory mode is
+    // active it resolves and opens beneath the retained root in one operation;
+    // the earlier display/metadata checks are never trusted for confinement.
+    let open_result = open_path(Path::new(&resolved));
 
     #[cfg(not(feature = "tiny"))]
     {
@@ -1421,13 +2280,20 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
     match open_result {
         Err(e) => {
             let err_kind = e.kind();
-            if err_kind == io::ErrorKind::Interrupted {
+            if err_kind == io::ErrorKind::NotFound && new_one {
+                statusline(MessageType::Remark, "New File");
+                0
+            } else if err_kind == io::ErrorKind::NotFound {
+                statusline(MessageType::Alert, &format!("File \"{}\" not found", filename));
+                -1
+            } else if err_kind == io::ErrorKind::Interrupted {
                 statusline(MessageType::Alert, "Interrupted");
+                -1
             } else {
                 statusline(MessageType::Alert,
                     &format!("Error reading {}: {}", filename, e));
+                -1
             }
-            -1
         }
         Ok(f) => {
             // Get the file descriptor
@@ -1457,14 +2323,18 @@ pub fn open_file_impl(filename: &str, new_one: bool, out_file: &mut Option<File>
 pub fn get_next_filename(name: &str, suffix: &str) -> String {
     let base = format!("{}{}", name, suffix);
 
-    if !Path::new(&base).exists() {
-        return base;
+    match path_exists_nofollow(Path::new(&base)) {
+        Ok(false) => return base,
+        Ok(true) => {}
+        Err(_) => return String::new(),
     }
 
     for i in 1u64..100_000 {
         let candidate = format!("{}.{}", base, i);
-        if !Path::new(&candidate).exists() {
-            return candidate;
+        match path_exists_nofollow(Path::new(&candidate)) {
+            Ok(false) => return candidate,
+            Ok(true) => {}
+            Err(_) => return String::new(),
         }
     }
 
@@ -1486,6 +2356,82 @@ static PID_OF_SENDER: AtomicI32 = AtomicI32::new(-1);
 #[cfg(not(feature = "tiny"))]
 static SHOULD_PIPE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(all(not(feature = "tiny"), unix))]
+struct CommandSession {
+    old_sigint: libc::sigaction,
+    old_termios: Option<libc::termios>,
+    terminal_was_left: bool,
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+impl CommandSession {
+    fn start(leave_terminal: bool) -> io::Result<Self> {
+        let mut old_sigint: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old_sigint) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        let old_termios = if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } == 0 {
+            Some(termios)
+        } else {
+            None
+        };
+
+        if leave_terminal {
+            crate::nano::restore_terminal();
+        }
+
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = cancel_command_trampoline as *const () as libc::sighandler_t;
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        action.sa_flags = 0;
+        if unsafe { libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) } != 0 {
+            if leave_terminal {
+                terminal_init();
+            }
+            return Err(io::Error::last_os_error());
+        }
+
+        enable_kb_interrupt();
+        Ok(Self {
+            old_sigint,
+            old_termios,
+            terminal_was_left: leave_terminal,
+        })
+    }
+
+    fn resume_editor_terminal(&mut self) {
+        if self.terminal_was_left {
+            terminal_init();
+            state_mut().refresh_needed = true;
+            self.terminal_was_left = false;
+        }
+    }
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+impl Drop for CommandSession {
+    fn drop(&mut self) {
+        PID_OF_COMMAND.store(-1, Ordering::SeqCst);
+        PID_OF_SENDER.store(-1, Ordering::SeqCst);
+        SHOULD_PIPE.store(false, Ordering::SeqCst);
+
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.old_sigint, std::ptr::null_mut());
+        }
+        if self.terminal_was_left {
+            terminal_init();
+            state_mut().refresh_needed = true;
+        }
+        if let Some(settings) = self.old_termios.as_ref() {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, settings);
+            }
+        }
+    }
+}
+
 /* C: void cancel_the_command(int signal)
  * Send an unconditional kill signal to the running external command. */
 #[cfg(not(feature = "tiny"))]
@@ -1497,7 +2443,14 @@ pub fn cancel_the_command(_signal: i32) {
         let piping = SHOULD_PIPE.load(Ordering::SeqCst);
 
         if pid_cmd > 0 {
-            unsafe { libc::kill(pid_cmd, libc::SIGKILL); }
+            unsafe {
+                // The command is its own process group, so descendants do not
+                // survive a cancelled shell.  Fall back to the leader in case
+                // setpgid lost a short spawn race.
+                if libc::kill(-pid_cmd, libc::SIGKILL) != 0 {
+                    libc::kill(pid_cmd, libc::SIGKILL);
+                }
+            }
         }
         if piping && pid_snd > 0 {
             unsafe { libc::kill(pid_snd, libc::SIGKILL); }
@@ -1506,6 +2459,29 @@ pub fn cancel_the_command(_signal: i32) {
     #[cfg(not(unix))]
     {
         // No-op on non-Unix platforms
+    }
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+extern "C" fn cancel_command_trampoline(signal: libc::c_int) {
+    cancel_the_command(signal);
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+fn wait_for_command(pid: libc::pid_t) -> io::Result<i32> {
+    let mut status = 0;
+    loop {
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            return Ok(status);
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
     }
 }
 
@@ -1554,6 +2530,86 @@ pub fn send_data(line: Option<LinePtr>, fd: i32) {
     }
 }
 
+#[cfg(not(feature = "tiny"))]
+fn append_pipe_text(output: &mut Vec<u8>, text: &str) {
+    output.extend(text.bytes().map(|byte| if byte == b'\n' { 0 } else { byte }));
+}
+
+#[cfg(not(feature = "tiny"))]
+fn command_input_snapshot() -> Vec<u8> {
+    let marked = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .and_then(|buffer| buffer.mark.as_ref())
+            .is_some()
+    });
+    let mut output = Vec::new();
+
+    if marked {
+        let mut top = None;
+        let mut top_x = 0;
+        let mut bottom = None;
+        let mut bottom_x = 0;
+        get_region(&mut top, &mut top_x, &mut bottom, &mut bottom_x);
+        let (top, bottom) = match (top, bottom) {
+            (Some(top), Some(bottom)) => (top, bottom),
+            _ => return output,
+        };
+
+        let mut line = Some(top.clone());
+        while let Some(node) = line {
+            let is_top = node == top;
+            let is_bottom = node == bottom;
+            let (data, next) = {
+                let borrowed = node.borrow();
+                (borrowed.data.clone(), borrowed.next.clone())
+            };
+            let start = if is_top { top_x } else { 0 };
+            let end = if is_bottom { bottom_x } else { data.len() };
+            if let Some(segment) = data.get(start..end) {
+                append_pipe_text(&mut output, segment);
+            }
+            if is_bottom {
+                break;
+            }
+            output.push(b'\n');
+            line = next;
+        }
+        return output;
+    }
+
+    let mut line = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .and_then(|buffer| buffer.filetop.clone())
+    });
+    while let Some(node) = line {
+        let (data, next) = {
+            let borrowed = node.borrow();
+            (borrowed.data.clone(), borrowed.next.clone())
+        };
+        if next.is_none() && data.is_empty() {
+            break;
+        }
+        append_pipe_text(&mut output, &data);
+        if next.is_some() {
+            output.push(b'\n');
+        }
+        line = next;
+    }
+    output
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+fn send_snapshot(data: &[u8], fd: i32) -> ! {
+    use std::os::unix::io::FromRawFd;
+
+    let mut pipe = unsafe { File::from_raw_fd(fd) };
+    let status = if pipe.write_all(data).is_ok() { 0 } else { 5 };
+    drop(pipe);
+    unsafe { libc::_exit(status) }
+}
+
 /* C: void execute_command(const char *command)
  * Execute the given command in a shell. */
 #[cfg(not(feature = "tiny"))]
@@ -1561,10 +2617,11 @@ pub fn execute_command(command: &str) {
     #[cfg(unix)]
     {
         
-        use std::os::unix::io::FromRawFd;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
 
         let should_pipe = command.starts_with('|');
         let capture_output = !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
+        let filter_mode = should_pipe && capture_output;
 
         SHOULD_PIPE.store(should_pipe, Ordering::SeqCst);
 
@@ -1576,9 +2633,49 @@ pub fn execute_command(command: &str) {
         } else {
             command
         };
+        let input_was_marked = should_pipe && with_state(|s| {
+            s.openfile
+                .as_ref()
+                .and_then(|buffer| buffer.mark.as_ref())
+                .is_some()
+        });
+        let command_input = if should_pipe {
+            Some(command_input_snapshot())
+        } else {
+            None
+        };
 
-        // Create from_fd pipe (output from command)
-        let (from_read_fd, from_write_fd) = {
+        // A filter writes stdout and stderr to separate secure staging files.
+        // The document is replaced only after both child processes succeed.
+        let mut filter_stdout = if filter_mode {
+            match tempfile::NamedTempFile::new() {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    statusline(MessageType::Alert,
+                        &format!("Could not create filter output: {}", error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let mut filter_stderr = if filter_mode {
+            match tempfile::NamedTempFile::new() {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    statusline(MessageType::Alert,
+                        &format!("Could not create filter diagnostics: {}", error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Non-filter commands stream captured output directly into the editor.
+        let (from_read_fd, from_write_fd) = if filter_mode {
+            (-1, -1)
+        } else {
             let mut fds = [0i32; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
                 statusline(MessageType::Alert,
@@ -1594,7 +2691,9 @@ pub fn execute_command(command: &str) {
             if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
                 statusline(MessageType::Alert,
                     &format!("Could not create pipe: {}", io::Error::last_os_error()));
-                unsafe { libc::close(from_read_fd); libc::close(from_write_fd); }
+                if !filter_mode {
+                    unsafe { libc::close(from_read_fd); libc::close(from_write_fd); }
+                }
                 return;
             }
             (fds[0], fds[1])
@@ -1602,17 +2701,52 @@ pub fn execute_command(command: &str) {
             (-1, -1)
         };
 
+        statusbar("Executing...");
+        let mut session = match CommandSession::start(!capture_output) {
+            Ok(session) => session,
+            Err(error) => {
+                statusline(MessageType::Alert,
+                    &format!("Could not prepare command session: {}", error));
+                unsafe {
+                    if !filter_mode {
+                        libc::close(from_read_fd);
+                        libc::close(from_write_fd);
+                    }
+                    if should_pipe {
+                        libc::close(to_read_fd);
+                        libc::close(to_write_fd);
+                    }
+                }
+                return;
+            }
+        };
+
         // Fork the child process
         let pid = unsafe { libc::fork() };
         if pid == 0 {
             // Child process
             unsafe {
-                libc::close(from_read_fd);
-                if capture_output {
-                    libc::dup2(from_write_fd, libc::STDOUT_FILENO);
+                libc::setpgid(0, 0);
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                if filter_mode {
+                    libc::dup2(
+                        filter_stdout.as_ref().unwrap().as_file().as_raw_fd(),
+                        libc::STDOUT_FILENO,
+                    );
+                    libc::dup2(
+                        filter_stderr.as_ref().unwrap().as_file().as_raw_fd(),
+                        libc::STDERR_FILENO,
+                    );
+                } else {
+                    libc::close(from_read_fd);
+                    if capture_output {
+                        libc::dup2(from_write_fd, libc::STDOUT_FILENO);
+                    }
+                    libc::dup2(from_write_fd, libc::STDERR_FILENO);
+                    libc::close(from_write_fd);
                 }
-                libc::dup2(from_write_fd, libc::STDERR_FILENO);
-                libc::close(from_write_fd);
 
                 if should_pipe {
                     libc::dup2(to_read_fd, libc::STDIN_FILENO);
@@ -1638,12 +2772,16 @@ pub fn execute_command(command: &str) {
         }
 
         // Parent
-        unsafe { libc::close(from_write_fd); }
+        if !filter_mode {
+            unsafe { libc::close(from_write_fd); }
+        }
 
         if pid < 0 {
             statusline(MessageType::Alert,
                 &format!("Could not fork: {}", io::Error::last_os_error()));
-            unsafe { libc::close(from_read_fd); }
+            if !filter_mode {
+                unsafe { libc::close(from_read_fd); }
+            }
             if should_pipe {
                 unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
             }
@@ -1651,22 +2789,23 @@ pub fn execute_command(command: &str) {
         }
 
         PID_OF_COMMAND.store(pid, Ordering::SeqCst);
-        statusbar("Executing...");
+        unsafe {
+            // Also set the group from the parent to close the child-side race.
+            libc::setpgid(pid, pid);
+        }
 
         // If the command starts with "|", pipe buffer or region to the command.
         let pid_sender;
         if should_pipe {
-            // Get the lines to pipe
-            let lines_to_send = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.filetop.clone())
-            });
-
             pid_sender = unsafe { libc::fork() };
             if pid_sender == 0 {
                 // Child sender process
-                unsafe { libc::close(to_read_fd); }
-                send_data(lines_to_send, to_write_fd);
-                unsafe { libc::_exit(0); }
+                unsafe {
+                    libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                    libc::close(to_read_fd);
+                }
+                send_snapshot(command_input.as_deref().unwrap_or_default(), to_write_fd);
             }
 
             if pid_sender < 0 {
@@ -1674,76 +2813,131 @@ pub fn execute_command(command: &str) {
                     &format!("Could not fork: {}", io::Error::last_os_error()));
             }
 
-            PID_OF_SENDER.store(pid_sender, Ordering::SeqCst);
+            if pid_sender > 0 {
+                PID_OF_SENDER.store(pid_sender, Ordering::SeqCst);
+            }
             unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
         } else {
             pid_sender = -1;
         }
 
-        // Set up signal handler
-        enable_kb_interrupt();
-
-        // Read command output
-        let stream = unsafe { File::from_raw_fd(from_read_fd) };
-        read_file_impl(stream, false, "pipe", true);
+        // Ordinary execute commands insert their output.  Filters keep stdout
+        // staged until the child and input-sender have both succeeded.
+        let output_was_ingrafted = if !filter_mode {
+            let stream = unsafe { File::from_raw_fd(from_read_fd) };
+            read_file_impl(stream, false, "pipe", true)
+        } else {
+            false
+        };
 
         // Wait for processes
-        let mut command_status: i32 = 0;
-        unsafe { libc::waitpid(pid, &mut command_status, 0); }
+        let (command_status, command_waited) = match wait_for_command(pid) {
+            Ok(status) => (status, true),
+            Err(error) => {
+                statusline(MessageType::Alert, &format!("Could not wait for command: {}", error));
+                (0, false)
+            }
+        };
 
         let mut sender_status: i32 = 0;
+        let mut sender_waited = !should_pipe;
         if should_pipe && pid_sender > 0 {
-            unsafe { libc::waitpid(pid_sender, &mut sender_status, 0); }
+            match wait_for_command(pid_sender) {
+                Ok(status) => {
+                    sender_status = status;
+                    sender_waited = true;
+                }
+                Err(error) => statusline(
+                    MessageType::Alert,
+                    &format!("Could not wait for pipe sender: {}", error),
+                ),
+            }
         }
 
+        session.resume_editor_terminal();
+        drop(session);
+
         // Check exit status
-        let cmd_ok = libc::WIFEXITED(command_status) && libc::WEXITSTATUS(command_status) == 0;
+        let cmd_ok = command_waited
+            && libc::WIFEXITED(command_status)
+            && libc::WEXITSTATUS(command_status) == 0;
         let cmd_signaled = libc::WIFSIGNALED(command_status);
+        let sender_ok = !should_pipe
+            || (pid_sender > 0
+                && sender_waited
+                && libc::WIFEXITED(sender_status)
+                && libc::WEXITSTATUS(sender_status) == 0);
 
         if !cmd_ok {
             if cmd_signaled {
                 statusline(MessageType::Alert, "Cancelled");
             } else {
-                // Try to extract error message from last line
-                let err_detail = with_state(|s| {
-                    s.openfile.as_ref()
-                        .and_then(|of| of.current.as_ref())
-                        .and_then(|c| {
-                            let b = c.borrow();
-                            b.prev.as_ref()
-                                .and_then(|pw| pw.upgrade())
-                                .map(|prev| {
-                                    let pb = prev.borrow();
-                                    if let Some(pos) = pb.data.find(": ") {
-                                        pb.data[pos + 2..].to_string()
-                                    } else {
-                                        "---".to_string()
-                                    }
-                                })
-                        })
-                        .unwrap_or_else(|| "---".to_string())
-                });
+                let err_detail = if filter_mode {
+                    let mut bytes = Vec::new();
+                    if let Some(diagnostics) = filter_stderr.as_mut() {
+                        let _ = diagnostics.as_file_mut().seek(SeekFrom::Start(0));
+                        let _ = diagnostics.as_file_mut().take(16 * 1024).read_to_end(&mut bytes);
+                    }
+                    let text = String::from_utf8_lossy(&bytes);
+                    text.lines().next().unwrap_or("---").to_string()
+                } else {
+                    // Try to extract an error message from the inserted output.
+                    with_state(|s| {
+                        s.openfile.as_ref()
+                            .and_then(|of| of.current.as_ref())
+                            .and_then(|c| {
+                                let b = c.borrow();
+                                b.prev.as_ref()
+                                    .and_then(|pw| pw.upgrade())
+                                    .map(|prev| {
+                                        let pb = prev.borrow();
+                                        if let Some(pos) = pb.data.find(": ") {
+                                            pb.data[pos + 2..].to_string()
+                                        } else {
+                                            "---".to_string()
+                                        }
+                                    })
+                            })
+                            .unwrap_or_else(|| "---".to_string())
+                    })
+                };
                 statusline(MessageType::Alert, &format!("Error: {}", err_detail));
             }
-        } else if should_pipe && pid_sender > 0 {
-            let sender_ok =
-                libc::WIFEXITED(sender_status) && libc::WEXITSTATUS(sender_status) == 0;
-            if !sender_ok {
-                statusline(MessageType::Alert, "Piping failed");
+        } else if !sender_ok {
+            statusline(MessageType::Alert, "Piping failed");
+        } else if filter_mode {
+            let output = filter_stdout.as_mut().expect("filter stdout staging");
+            let staged_ok = output
+                .as_file_mut()
+                .flush()
+                .and_then(|_| output.as_file().sync_all());
+            if let Err(error) = staged_ok {
+                statusline(MessageType::Alert, &format!("Could not sync filter output: {}", error));
+            } else {
+                let output_path = output.path().to_string_lossy().into_owned();
+                let action = if input_was_marked {
+                    UndoType::Cut
+                } else {
+                    UndoType::CutToEof
+                };
+                if crate::text::replace_buffer(&output_path, action, "filtering") {
+                    update_undo(UndoType::CoupleEnd);
+                    statusline(MessageType::Remark, "Buffer has been filtered");
+                } else {
+                    statusline(MessageType::Alert, "Could not apply filter output");
+                }
             }
         }
 
         // If there was an error, undo and discard what the command did.
         let last_msg = state().lastmessage;
-        if last_msg == MessageType::Alert {
+        if output_was_ingrafted && last_msg == MessageType::Alert {
             do_undo();
             let current_undo = with_state(|s| {
                 s.openfile.as_ref().map(|of| of.current_undo).unwrap_or(std::ptr::null_mut())
             });
             discard_until(current_undo);
         }
-
-        terminal_init();
     }
     #[cfg(not(unix))]
     {
@@ -2010,26 +3204,38 @@ pub fn do_execute() {
 // get_full_path — return the canonical absolute path
 // C: char *get_full_path(const char *origpath)
 // ---------------------------------------------------------------------------
-pub fn get_full_path(origpath: &str) -> Option<String> {
-    if origpath.is_empty() {
+pub fn get_full_path_buf(origpath: &Path) -> Option<PathBuf> {
+    if origpath.as_os_str().is_empty() {
         return None;
     }
 
-    let untilded = expand_leading_tilde(origpath);
-    let path = Path::new(&untilded);
+    let untilded = expand_leading_tilde_path(origpath);
+    let path = untilded.as_path();
+
+    #[cfg(feature = "operatingdir")]
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        let resolved = match root.dir.canonicalize(relative) {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                let filename = relative.file_name().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "path has no final component")
+                })?;
+                let parent = root.dir.canonicalize(usable_parent(relative))?;
+                parent.join(filename)
+            }
+        };
+        Ok(root.display_path.join(resolved))
+    }) {
+        return result.ok();
+    }
+
+    if operating_root_required_but_unavailable() {
+        return None;
+    }
 
     // Try canonicalize
     match std::fs::canonicalize(path) {
-        Ok(canonical) => {
-            let mut s = canonical.to_string_lossy().into_owned();
-            // Ensure non-apex directory paths end with slash
-            if let Ok(meta) = std::fs::metadata(&s) {
-                if meta.is_dir() && !s.ends_with('/') && s.len() > 1 {
-                    s.push('/');
-                }
-            }
-            Some(s)
-        }
+        Ok(canonical) => Some(canonical),
         Err(_) => {
             // Try without the last component (file may not exist yet)
             let parent = usable_parent(path);
@@ -2041,17 +3247,24 @@ pub fn get_full_path(origpath: &str) -> Option<String> {
 
             match std::fs::canonicalize(parent) {
                 Ok(canonical_parent) => {
-                    let mut s = canonical_parent.to_string_lossy().into_owned();
-                    if !s.ends_with('/') {
-                        s.push('/');
-                    }
-                    s.push_str(&filename.to_string_lossy());
-                    Some(s)
+                    Some(canonical_parent.join(filename))
                 }
                 Err(_) => None,
             }
         }
     }
+}
+
+pub fn get_full_path(origpath: &str) -> Option<String> {
+    let full = get_full_path_buf(Path::new(origpath))?;
+    let mut display = printable_path(&full);
+    if full.is_dir()
+        && full.parent().is_some()
+        && !display.ends_with(std::path::MAIN_SEPARATOR)
+    {
+        display.push(std::path::MAIN_SEPARATOR);
+    }
+    Some(display)
 }
 
 // ---------------------------------------------------------------------------
@@ -2082,36 +3295,25 @@ pub fn check_writable_directory(path: &str) -> Option<String> {
 // C: char *safe_tempfile(FILE **stream)
 // Returns (path, File) on success, None on failure.
 // ---------------------------------------------------------------------------
+fn temporary_suffix(filename: &str) -> String {
+    Path::new(filename)
+        .extension()
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default()
+}
+
 pub fn safe_tempfile() -> Option<(String, File)> {
-    let env_dir = std::env::var("TMPDIR").ok();
+    // std::env::temp_dir() honors the platform-native temp location (including
+    // the Windows APIs/environment contract) instead of hard-coding /tmp.
+    let tempdir = std::env::temp_dir();
 
-    // P_tmpdir is typically "/tmp" on Linux but is a C macro, not in libc crate.
-    // Use the standard fallback directly.
-    let tempdir = env_dir.as_deref()
-        .and_then(check_writable_directory)
-        .or_else(|| check_writable_directory("/tmp"))
-        .unwrap_or_else(|| "/tmp/".to_string());
-
-    // Get extension from current filename
     let extension = with_state(|s| {
-        s.openfile.as_ref().map(|of| {
-            let fname = &of.filename;
-            if let Some(dot_pos) = fname.rfind('.') {
-                // Only use the extension if there's no slash after the dot
-                let ext = &fname[dot_pos..];
-                if !ext.contains('/') {
-                    ext.to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        }).unwrap_or_default()
+        s.openfile
+            .as_ref()
+            .map(|of| temporary_suffix(&of.filename))
+            .unwrap_or_default()
     });
-
-    // Build template: <tempdir>nano.XXXXXX<ext>
-    let _template = format!("{}nano.XXXXXX{}", tempdir, extension);
 
     // Use tempfile crate (cross-platform)
     let temp_builder = tempfile::Builder::new()
@@ -2148,6 +3350,27 @@ pub fn init_operating_dir() {
                 eprintln!("Invalid operating directory: {}", od);
                 std::process::exit(1);
             }
+            // The process cwd itself identifies the directory selected by
+            // set_current_dir even if its old name is immediately replaced.
+            // Retain that exact object as the capability root, rather than
+            // reopening the attacker-mutable pathname a second time.
+            let directory = match cap_std::fs::Dir::open_ambient_dir(
+                ".",
+                cap_std::ambient_authority(),
+            ) {
+                Ok(directory) => directory,
+                Err(_) => {
+                    eprintln!("Invalid operating directory: {}", od);
+                    std::process::exit(1);
+                }
+            };
+            let display_path = PathBuf::from(&t);
+            OPERATING_ROOT.with(|slot| {
+                *slot.borrow_mut() = Some(OperatingRoot {
+                    display_path,
+                    dir: directory,
+                });
+            });
             state_mut().operating_dir = Some(t);
         }
     }
@@ -2156,24 +3379,41 @@ pub fn init_operating_dir() {
 /* C: bool outside_of_confinement(const char *somepath, bool tabbing)
  * Check whether the given path is outside of the operating directory. */
 #[cfg(feature = "operatingdir")]
+pub fn outside_of_confinement_path(somepath: &Path, tabbing: bool) -> bool {
+    let expanded = expand_leading_tilde_path(somepath);
+    let path = expanded.as_path();
+    if let Some(result) = with_operating_root(path, |root, relative| {
+        // Canonicalization in cap-std is rooted at the retained handle and
+        // rejects symlinks or `..` components that leave it.  A missing final
+        // component is allowed when its actual parent is still beneath root.
+        if root.dir.canonicalize(relative).is_ok() {
+            return Ok(true);
+        }
+        let parent = usable_parent(relative);
+        Ok(root.dir.canonicalize(parent).is_ok())
+    }) {
+        return !result.unwrap_or(false);
+    }
+
+    if tabbing {
+        let operating_dir = state().operating_dir_raw.clone().unwrap_or_default();
+        return !operating_dir.starts_with(path);
+    }
+    true
+}
+
+#[cfg(feature = "operatingdir")]
 pub fn outside_of_confinement(somepath: &str, tabbing: bool) -> bool {
-    let fullpath = match get_full_path(somepath) {
-        None => return tabbing,
-        Some(p) => p,
-    };
-
-    let operating_dir = state().operating_dir.clone().unwrap_or_default();
-
-    let fullpath_path = Path::new(&fullpath);
-    let operating_dir_path = Path::new(&operating_dir);
-    let is_inside = fullpath_path.strip_prefix(operating_dir_path).is_ok();
-    let begins_to_be = tabbing && operating_dir_path.strip_prefix(fullpath_path).is_ok();
-
-    !is_inside && !begins_to_be
+    outside_of_confinement_path(Path::new(somepath), tabbing)
 }
 
 #[cfg(not(feature = "operatingdir"))]
 pub fn outside_of_confinement(_somepath: &str, _tabbing: bool) -> bool {
+    false
+}
+
+#[cfg(not(feature = "operatingdir"))]
+pub fn outside_of_confinement_path(_somepath: &Path, _tabbing: bool) -> bool {
     false
 }
 
@@ -2246,6 +3486,32 @@ pub fn copy_file(mut inn: File, mut out: File, close_out: bool) -> i32 {
 // C: bool make_backup_of(char *realname, struct stat fileinfo)
 // ---------------------------------------------------------------------------
 #[cfg(not(feature = "tiny"))]
+fn backup_path_key(path: &Path) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::from("p");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        for byte in path.as_os_str().as_bytes() {
+            let _ = write!(encoded, "{:02X}", byte);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in path.as_os_str().encode_wide() {
+            let _ = write!(encoded, "{:04X}", unit);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    for byte in path.to_string_lossy().as_bytes() {
+        let _ = write!(encoded, "{:02X}", byte);
+    }
+    encoded
+}
+
+#[cfg(not(feature = "tiny"))]
 pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
     statusbar("Making backup...");
 
@@ -2255,11 +3521,11 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
         format!("{}~", realname)
     } else {
         let bd = backup_dir.as_ref().unwrap();
-        let thename = match get_full_path(realname) {
-            Some(full) => full.replace('/', "!"),
-            None => crate::utils::tail(realname).to_string(),
-        };
-        let base = format!("{}{}", bd, thename);
+        let source_path = get_full_path(realname)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(realname).to_path_buf());
+        let thename = backup_path_key(&source_path);
+        let base = Path::new(bd).join(thename).to_string_lossy().into_owned();
         let next = get_next_filename(&base, "~");
         if next.is_empty() {
             statusline(MessageType::Alert, "Too many existing backup files");
@@ -2268,94 +3534,73 @@ pub fn make_backup_of(realname: &str, fileinfo: &FileStat) -> bool {
         next
     };
 
-    // Remove existing backup
-    let _ = std::fs::remove_file(&backupname);
-
-    // Create backup file
-    let create_result = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&backupname);
-
-    let backup_file = match create_result {
-        Err(e) => {
-            warn_and_briefly_pause("Cannot make backup");
-            warn_and_briefly_pause(&e.to_string());
-            let err_msg = e.to_string();
-            if ask_user(YESORNO,
-                &format!("Cannot make backup; continue and save actual file? ")) == YES
-            {
-                return true;
-            }
-            statusline(MessageType::Hush,
-                &format!("Cannot make backup: {}", err_msg));
-            return false;
+    let fail = |reason: &str| {
+        warn_and_briefly_pause("Cannot make backup");
+        warn_and_briefly_pause(reason);
+        if ask_user(YESORNO, "Cannot make backup; continue and save actual file? ") == YES {
+            true
+        } else {
+            statusline(MessageType::Hush, &format!("Cannot make backup: {}", reason));
+            false
         }
-        Ok(f) => f,
     };
 
-    // Set permissions to match original
+    let mut original = match open_path(Path::new(realname)) {
+        Ok(file) => file,
+        Err(error) => return fail(&format!("Cannot read original file: {}", error)),
+    };
+
+    // Stage beside the destination so the final rename is atomic.  tempfile
+    // creates this path exclusively with mode 0600, and its Drop removes any
+    // incomplete candidate without disturbing an older complete backup.
+    let parent = usable_parent(Path::new(&backupname));
+    let mut staging = match create_staging_file(parent, ".nano-backup.") {
+        Ok(file) => file,
+        Err(error) => return fail(&error.to_string()),
+    };
+
+    if let Err(error) = io::copy(&mut original, staging.as_file_mut()) {
+        return fail(&format!("Cannot copy original file: {}", error));
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
-        let fd = backup_file.as_raw_fd();
-        unsafe {
-            libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid);
-            libc::fchmod(fd, fileinfo.st_mode);
+        let fd = staging.as_file().as_raw_fd();
+        let ownership = unsafe { libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid) };
+        if ownership != 0 {
+            return fail(&format!("Cannot preserve backup ownership: {}", io::Error::last_os_error()));
         }
-    }
+        let permissions = unsafe { libc::fchmod(fd, fileinfo.st_mode & 0o7777) };
+        if permissions != 0 {
+            return fail(&format!("Cannot preserve backup permissions: {}", io::Error::last_os_error()));
+        }
 
-    // Open original and copy to backup
-    let original = match File::open(realname) {
-        Err(_) => {
-            warn_and_briefly_pause("Cannot read original file");
-            drop(backup_file);
-            let _ = std::fs::remove_file(&backupname);
-            if ask_user(YESORNO,
-                "Cannot make backup; continue and save actual file? ") == YES
-            {
-                return true;
-            }
-            statusline(MessageType::Hush, "Cannot make backup");
-            return false;
-        }
-        Ok(f) => f,
-    };
-
-    let verdict = copy_file(original, backup_file, false);
-    if verdict < 0 {
-        warn_and_briefly_pause("Cannot read original file");
-        let _ = std::fs::remove_file(&backupname);
-        if ask_user(YESORNO,
-            "Cannot make backup; continue and save actual file? ") == YES
-        {
-            return true;
-        }
-        return false;
-    } else if verdict > 0 {
-        warn_and_briefly_pause("Cannot write backup file");
-        let _ = std::fs::remove_file(&backupname);
-        if ask_user(YESORNO,
-            "Cannot make backup; continue and save actual file? ") == YES
-        {
-            return true;
-        }
-        return false;
-    }
-
-    // Set timestamps to match original
-    #[cfg(unix)]
-    unsafe {
         let times = [
             libc::timespec { tv_sec: fileinfo.st_atime, tv_nsec: fileinfo.st_atime_nsec },
             libc::timespec { tv_sec: fileinfo.st_mtime, tv_nsec: fileinfo.st_mtime_nsec },
         ];
-        // Reopen backup to set times via futimens
-        if let Ok(bf) = File::open(&backupname) {
-            use std::os::unix::io::AsRawFd;
-            libc::futimens(bf.as_raw_fd(), times.as_ptr());
+        if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
+            return fail(&format!("Cannot preserve backup timestamps: {}", io::Error::last_os_error()));
         }
+    }
+
+    if let Err(error) = staging.as_file_mut().flush() {
+        return fail(&format!("Cannot flush backup: {}", error));
+    }
+    if let Err(error) = staging.as_file().sync_all() {
+        return fail(&format!("Cannot sync backup: {}", error));
+    }
+
+    let persisted = match staging.persist(Path::new(&backupname)) {
+        Ok(file) => file,
+        Err(error) => return fail(&format!("Cannot install backup: {}", error)),
+    };
+    drop(persisted);
+
+    #[cfg(unix)]
+    if let Err(error) = sync_parent_of(Path::new(&backupname)) {
+        return fail(&format!("Cannot sync backup directory: {}", error));
     }
 
     true
@@ -2405,20 +3650,27 @@ pub fn write_file(
         }
     }
 
-    let mut tempname: Option<String> = None;
+    #[cfg(not(feature = "tiny"))]
+    let mut prepend_staging: Option<StagingFile> = None;
+    #[cfg(not(feature = "tiny"))]
+    let mut prepend_source: Option<File> = None;
+    #[cfg(not(feature = "tiny"))]
+    let mut prepend_permissions: Option<std::fs::Permissions> = None;
+    #[cfg(all(not(feature = "tiny"), unix))]
+    let mut prepend_statinfo: Option<FileStat> = None;
     let mut lineswritten: usize = 0;
 
     #[cfg(not(feature = "tiny"))]
     let is_existing_file = {
-        normal && std::fs::metadata(&realname).is_ok()
+        normal && path_info(Path::new(&realname)).is_ok()
     };
 
     // Make backup if needed
     #[cfg(not(feature = "tiny"))]
     if ISSET!(MAKE_BACKUP) && is_existing_file {
         // Check it's not a FIFO
-        let is_fifo = std::fs::metadata(&realname)
-            .map(|m| is_fifo_file(&m))
+        let is_fifo = path_info(Path::new(&realname))
+            .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
             if let Some(st) = stat_with_alloc(&realname) {
@@ -2429,18 +3681,20 @@ pub fn write_file(
         }
     }
 
-    // When prepending, first copy existing file to a temporary file
+    // Build a prepend result in a same-directory staging file.  The live
+    // destination is not opened for writing until the complete candidate has
+    // been flushed, synced, and atomically installed.
     #[cfg(not(feature = "tiny"))]
     if method == KindOfWritingType::Prepend {
-        let is_fifo = std::fs::metadata(&realname)
-            .map(|m| is_fifo_file(&m))
+        let is_fifo = path_info(Path::new(&realname))
+            .map(|info| info.is_fifo)
             .unwrap_or(false);
         if is_fifo {
             statusline(MessageType::Alert, &format!("Error writing {}: FIFO", realname));
             return false;
         }
 
-        let source = match File::open(&realname) {
+        let source = match open_path(Path::new(&realname)) {
             Err(e) => {
                 statusline(MessageType::Alert,
                     &format!("Error reading {}: {}", realname, e));
@@ -2448,36 +3702,27 @@ pub fn write_file(
             }
             Ok(f) => f,
         };
+        prepend_permissions = source.metadata().ok().map(|metadata| metadata.permissions());
+        #[cfg(unix)]
+        {
+            prepend_statinfo = stat_with_alloc(&realname);
+        }
 
-        match safe_tempfile() {
-            None => {
-                statusline(MessageType::Alert,
-                    &format!("Error writing temp file: {}", io::Error::last_os_error()));
-                drop(source);
+        let parent = usable_parent(Path::new(&realname));
+        prepend_staging = match create_staging_file(parent, ".nano-prepend.") {
+            Ok(file) => Some(file),
+            Err(error) => {
+                statusline(MessageType::Alert, &format!("Error creating prepend staging file: {}", error));
                 return false;
             }
-            Some((tname, target)) => {
-                let verdict = copy_file(source, target, true);
-                if verdict < 0 {
-                    statusline(MessageType::Alert,
-                        &format!("Error reading {}: {}", realname, io::Error::last_os_error()));
-                    let _ = std::fs::remove_file(&tname);
-                    return false;
-                } else if verdict > 0 {
-                    statusline(MessageType::Alert,
-                        &format!("Error writing temp file: {}", io::Error::last_os_error()));
-                    let _ = std::fs::remove_file(&tname);
-                    return false;
-                }
-                tempname = Some(tname);
-            }
-        }
+        };
+        prepend_source = Some(source);
     }
 
     #[cfg(not(feature = "tiny"))]
     {
-        let is_fifo = std::fs::metadata(&realname)
-            .map(|m| is_fifo_file(&m))
+        let is_fifo = path_info(Path::new(&realname))
+            .map(|info| info.is_fifo)
             .unwrap_or(false);
         if is_existing_file && is_fifo {
             statusbar("Writing to FIFO...");
@@ -2485,7 +3730,21 @@ pub fn write_file(
     }
 
     // Open / create the file when not writing to a temp file
-    let mut the_file: File = match thefile {
+    #[cfg(not(feature = "tiny"))]
+    let staged_output = match prepend_staging.as_ref() {
+        Some(staging) => match staging.as_file().try_clone() {
+            Ok(file) => Some(file),
+            Err(error) => {
+                statusline(MessageType::Alert, &format!("Error opening prepend staging file: {}", error));
+                return false;
+            }
+        },
+        None => None,
+    };
+    #[cfg(feature = "tiny")]
+    let staged_output: Option<File> = None;
+
+    let mut the_file: File = match staged_output.or(thefile) {
         Some(f) => f,
         None => {
             let permissions: u32 = if normal { 0o666 } else { 0o600 };
@@ -2496,37 +3755,35 @@ pub fn write_file(
             if normal { install_handler_for_Ctrl_C(); }
 
             let open_result = match method {
-                KindOfWritingType::Append => {
-                    let mut opts = OpenOptions::new();
-                    opts.write(true).create(true).append(true);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        opts.mode(permissions);
-                    }
-                    opts.open(&realname)
-                }
-                KindOfWritingType::Emergency => {
-                    // O_EXCL — fail if exists
-                    let mut opts = OpenOptions::new();
-                    opts.write(true).create_new(true);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        opts.mode(permissions);
-                    }
-                    opts.open(&realname)
-                }
-                _ => {
-                    let mut opts = OpenOptions::new();
-                    opts.write(true).create(true).truncate(true);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        opts.mode(permissions);
-                    }
-                    opts.open(&realname)
-                }
+                KindOfWritingType::Append => open_path_with(
+                    Path::new(&realname),
+                    PathOpenOptions {
+                        write: true,
+                        create: true,
+                        append: true,
+                        mode: permissions,
+                        ..PathOpenOptions::default()
+                    },
+                ),
+                KindOfWritingType::Emergency => open_path_with(
+                    Path::new(&realname),
+                    PathOpenOptions {
+                        write: true,
+                        create_new: true,
+                        mode: permissions,
+                        ..PathOpenOptions::default()
+                    },
+                ),
+                _ => open_path_with(
+                    Path::new(&realname),
+                    PathOpenOptions {
+                        write: true,
+                        create: true,
+                        truncate: true,
+                        mode: permissions,
+                        ..PathOpenOptions::default()
+                    },
+                ),
             };
 
             #[cfg(not(feature = "tiny"))]
@@ -2542,9 +3799,6 @@ pub fn write_file(
                     } else {
                         statusline(MessageType::Alert,
                             &format!("Error writing {}: {}", realname, e));
-                    }
-                    if let Some(ref tn) = tempname {
-                        let _ = std::fs::remove_file(tn);
                     }
                     return false;
                 }
@@ -2601,7 +3855,6 @@ pub fn write_file(
         if data_res.is_err() {
             let e = io::Error::last_os_error();
             statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-            if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return false;
         }
 
@@ -2619,7 +3872,6 @@ pub fn write_file(
             if writer.write_all(b"\r").is_err() {
                 let e = io::Error::last_os_error();
                 statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-                if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
                 return false;
             }
         }
@@ -2627,7 +3879,6 @@ pub fn write_file(
         if writer.write_all(b"\n").is_err() {
             let e = io::Error::last_os_error();
             statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-            if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return false;
         }
 
@@ -2635,31 +3886,19 @@ pub fn write_file(
         line = next;
     }
 
-    // When prepending, append the temporary file to what we wrote above.
+    // When prepending, append the still-untouched original to the staged new
+    // content.  Any failure drops the staging file and preserves the target.
     #[cfg(not(feature = "tiny"))]
     if method == KindOfWritingType::Prepend {
-        if let Some(ref tn) = tempname {
-            let source = match File::open(tn) {
-                Err(e) => {
-                    statusline(MessageType::Alert,
-                        &format!("Error reading temp file: {}", e));
-                    if let Some(ref tn2) = tempname { let _ = std::fs::remove_file(tn2); }
-                    return false;
-                }
-                Ok(f) => f,
-            };
-
-            // copy_file closes source; we need to keep the_file open
-            // We'll do a manual copy here (through the buffered writer)
+        if let Some(mut source) = prepend_source.take() {
             let mut buf = [0u8; 8192];
-            let mut src = source;
             loop {
-                let n = match src.read(&mut buf) {
+                let n = match source.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) => {
                         statusline(MessageType::Alert,
-                            &format!("Error reading temp file: {}", e));
+                            &format!("Error reading {}: {}", realname, e));
                         return false;
                     }
                 };
@@ -2670,7 +3909,6 @@ pub fn write_file(
                     return false;
                 }
             }
-            let _ = std::fs::remove_file(tn);
         }
     }
 
@@ -2679,7 +3917,6 @@ pub fn write_file(
     if writer.flush().is_err() {
         let e = io::Error::last_os_error();
         statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-        if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
         return false;
     }
     drop(writer);
@@ -2687,15 +3924,14 @@ pub fn write_file(
     // Flush and sync (not for FIFOs)
     #[cfg(not(feature = "tiny"))]
     {
-        let is_fifo = std::fs::metadata(&realname)
-            .map(|m| is_fifo_file(&m))
+        let is_fifo = path_info(Path::new(&realname))
+            .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
             if the_file.flush().is_err() || the_file.sync_all().is_err() {
                 let e = io::Error::last_os_error();
                 statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
                 drop(the_file);
-                if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
                 return false;
             }
         }
@@ -2705,7 +3941,6 @@ pub fn write_file(
     if the_file.flush().is_err() {
         let e = io::Error::last_os_error();
         statusline(MessageType::Alert, &format!("Error writing {}: {}", realname, e));
-        if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
 
         // Check for ENOSPC
         #[cfg(not(feature = "tiny"))]
@@ -2736,6 +3971,69 @@ pub fn write_file(
     }
     drop(the_file);
 
+    #[cfg(not(feature = "tiny"))]
+    if method == KindOfWritingType::Prepend {
+        let mut staging = match prepend_staging.take() {
+            Some(file) => file,
+            None => {
+                statusline(MessageType::Alert, "Missing prepend staging file");
+                return false;
+            }
+        };
+
+        #[cfg(unix)]
+        if let Some(info) = prepend_statinfo.as_ref() {
+            use std::os::unix::io::AsRawFd;
+            let fd = staging.as_file().as_raw_fd();
+            if unsafe { libc::fchown(fd, info.st_uid, info.st_gid) } != 0 {
+                statusline(MessageType::Alert, &format!(
+                    "Error preserving ownership of {}: {}",
+                    realname,
+                    io::Error::last_os_error()
+                ));
+                return false;
+            }
+            if unsafe { libc::fchmod(fd, info.st_mode & 0o7777) } != 0 {
+                statusline(MessageType::Alert, &format!(
+                    "Error preserving permissions of {}: {}",
+                    realname,
+                    io::Error::last_os_error()
+                ));
+                return false;
+            }
+        }
+
+        #[cfg(not(unix))]
+        if let Some(permissions) = prepend_permissions.take() {
+            if let Err(error) = staging.as_file().set_permissions(permissions) {
+                statusline(MessageType::Alert, &format!(
+                    "Error preserving permissions of {}: {}",
+                    realname, error
+                ));
+                return false;
+            }
+        }
+
+        if let Err(error) = staging.as_file_mut().flush().and_then(|_| staging.as_file().sync_all()) {
+            statusline(MessageType::Alert, &format!("Error syncing {}: {}", realname, error));
+            return false;
+        }
+
+        match staging.persist(Path::new(&realname)) {
+            Ok(file) => drop(file),
+            Err(error) => {
+                statusline(MessageType::Alert, &format!("Error installing {}: {}", realname, error));
+                return false;
+            }
+        }
+
+        #[cfg(unix)]
+        if let Err(error) = sync_parent_of(Path::new(&realname)) {
+            statusline(MessageType::Alert, &format!("Error syncing directory for {}: {}", realname, error));
+            return false;
+        }
+    }
+
     // When having written an entire buffer, update administrivia.
     if annotate && method == KindOfWritingType::Overwrite {
         let old_filename = with_state(|s| {
@@ -2745,28 +4043,25 @@ pub fn write_file(
         if old_filename != realname {
             #[cfg(not(feature = "tiny"))]
             {
-                let (has_lock, lock_fname) = with_state(|s| {
-                    if let Some(ref of) = s.openfile {
-                        (of.lock_filename.is_some(), of.lock_filename.clone())
+                let (lock_file, lock_fname) = with_state_mut(|s| {
+                    if let Some(ref mut of) = s.openfile {
+                        (of.lock_file.take(), of.lock_filename.take())
                     } else {
-                        (false, None)
+                        (None, None)
                     }
                 });
-                if has_lock {
-                    if let Some(lf) = lock_fname {
-                        delete_lockfile(&lf);
-                    }
-                    with_state_mut(|s| {
-                        if let Some(ref mut of) = s.openfile {
-                            of.lock_filename = None;
-                        }
-                    });
+                if let Some(lf) = lock_fname {
+                    delete_lockfile(&lf, lock_file.as_ref());
                 }
+                drop(lock_file);
                 if ISSET!(LOCKING) {
                     let lock_result = do_lockfile(&realname, false);
                     with_state_mut(|s| {
                         if let Some(ref mut of) = s.openfile {
-                            of.lock_filename = lock_result.ok().flatten();
+                            if let Some((lock_filename, lock_file)) = lock_result.ok().flatten() {
+                                of.lock_filename = Some(lock_filename);
+                                of.lock_file = Some(lock_file);
+                            }
                         }
                     });
                 }
@@ -2834,7 +4129,6 @@ pub fn write_file(
         let lines = LINES();
         if minibar && !zero && lines > 1 && annotate {
             state_mut().report_size = true;
-            if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
             return true;
         }
     }
@@ -2848,7 +4142,6 @@ pub fn write_file(
         statusline(MessageType::Remark, &msg);
     }
 
-    if let Some(ref tn) = tempname { let _ = std::fs::remove_file(tn); }
     true
 }
 
@@ -3174,7 +4467,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                 with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default())
             });
             let of_path: &str = &of_filename_string;
-            let name_exists = std::fs::metadata(answer_path).is_ok();
+            let name_exists = path_exists_nofollow(Path::new(answer_path)).unwrap_or(false);
             let do_warning = if of_filename_empty {
                 name_exists
             } else {
@@ -3362,8 +4655,8 @@ pub fn expand_leading_tilde(path: &str) -> String {
 // ---------------------------------------------------------------------------
 #[cfg(any(feature = "tabcomp", feature = "browser"))]
 pub fn diralphasort(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_is_dir = std::fs::metadata(a).map(|m| m.is_dir()).unwrap_or(false);
-    let b_is_dir = std::fs::metadata(b).map(|m| m.is_dir()).unwrap_or(false);
+    let a_is_dir = confined_is_dir(a).unwrap_or(false);
+    let b_is_dir = confined_is_dir(b).unwrap_or(false);
 
     if a_is_dir && !b_is_dir {
         return std::cmp::Ordering::Less;
@@ -3388,7 +4681,7 @@ pub fn diralphasort(a: &str, b: &str) -> std::cmp::Ordering {
 #[cfg(feature = "tabcomp")]
 pub fn is_dir(path: &str) -> bool {
     let expanded = expand_leading_tilde(path);
-    std::fs::metadata(&expanded).map(|m| m.is_dir()).unwrap_or(false)
+    confined_is_dir(&expanded).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -3461,7 +4754,7 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
         (present_path.clone(), morsel.to_string())
     };
 
-    let dir = match std::fs::read_dir(&dirname) {
+    let dir = match confined_read_dir(&dirname) {
         Err(_) => {
             beep();
             return matches;
@@ -3472,8 +4765,7 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
     let _filenamelen = filename.len();
 
     for entry in dir {
-        let entry = match entry { Ok(e) => e, Err(_) => continue };
-        let entry_name = entry.file_name().to_string_lossy().into_owned();
+        let entry_name = entry.to_string_lossy().into_owned();
 
         if entry_name == "." || entry_name == ".." {
             continue;
@@ -3581,8 +4873,6 @@ pub fn input_tab(
 
     // Build shared prefix: path_prefix + common portion of matches
     let mut shared = format!("{}{}", &morsel[..length_of_path], &matches[0][..common_len]);
-    let total_common_len = shared.len();
-
     // Append slash if single match that is a directory
     let present_path = with_state(|s| s.present_path.clone().unwrap_or_else(|| "./".to_string()));
     let glued = path_join_display(&present_path, &shared);
@@ -3592,8 +4882,10 @@ pub fn input_tab(
         shared.push(std::path::MAIN_SEPARATOR);
     }
 
-    // Update morsel if common part is longer than current position
-    let new_morsel = if total_common_len != *place {
+    // Compare after adding a directory separator.  Comparing the old common
+    // prefix length dropped the separator when the user had already typed an
+    // exact directory name (for example, `src` + Tab).
+    let new_morsel = if shared.len() != *place {
         *place = shared.len();
         shared.clone()
     } else {
@@ -3608,26 +4900,11 @@ pub fn input_tab(
         // Sort matches
         matches.sort_by(|a, b| diralphasort(a, b));
 
-        let editwinrows_val = editwinrows();
-        let zero = ISSET!(ZERO);
-        let lines = LINES();
-        let _lastrow = editwinrows_val - 1 - (if zero && lines > 1 { 1 } else { 0 });
-        let cols = COLS();
-
-        // Find the longest match name
-        let longest_name = matches.iter().map(|m| breadth(m)).max().unwrap_or(0);
-        let longest_name = longest_name.min(cols.saturating_sub(1));
-
-        // Calculate columns and rows
-        let ncols = if longest_name + 2 > 0 { (cols + 1) / (longest_name + 2) } else { 1 };
-        let _nrows = (matches.len() + ncols - 1) / ncols;
-
         if !*listed {
             beep();
         }
 
-        // In the real implementation, we'd draw to the edit window via winio.
-        // Here we just set listed = true as a stub.
+        crate::winio::show_completion_candidates(&matches);
         *listed = true;
     }
 
@@ -3636,8 +4913,114 @@ pub fn input_tab(
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_data, usable_parent};
+    use super::{encode_data, read_until_cancelled, temporary_suffix, usable_parent};
+    #[cfg(all(not(feature = "tiny"), any(unix, windows)))]
+    use super::{create_lockfile, delete_lockfile, open_lockfile_for_create, write_lockfile};
+    #[cfg(all(unix, not(feature = "tiny")))]
+    use super::open_existing_lockfile;
+    use std::io::{self, Cursor, Read};
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+
+    #[cfg(feature = "tabcomp")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(feature = "tabcomp")]
+    static COMPLETION_REFRESHES: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(feature = "tabcomp")]
+    fn count_completion_refresh() {
+        COMPLETION_REFRESHES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    static COMMAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "operatingdir")]
+    struct TestOperatingRoot {
+        previous_path: Option<String>,
+        previous_root: Option<super::OperatingRoot>,
+    }
+
+    #[cfg(feature = "operatingdir")]
+    impl TestOperatingRoot {
+        fn install(path: &Path) -> Self {
+            let display_path = std::fs::canonicalize(path).unwrap();
+            let directory = cap_std::fs::Dir::open_ambient_dir(
+                &display_path,
+                cap_std::ambient_authority(),
+            ).unwrap();
+            let previous_root = super::OPERATING_ROOT.with(|slot| {
+                slot.borrow_mut().replace(super::OperatingRoot {
+                    display_path: display_path.clone(),
+                    dir: directory,
+                })
+            });
+            let previous_path = crate::global::state().operating_dir.clone();
+            crate::global::state_mut().operating_dir =
+                Some(display_path.to_string_lossy().into_owned());
+            Self { previous_path, previous_root }
+        }
+    }
+
+    #[cfg(feature = "operatingdir")]
+    impl Drop for TestOperatingRoot {
+        fn drop(&mut self) {
+            super::OPERATING_ROOT.with(|slot| {
+                *slot.borrow_mut() = self.previous_root.take();
+            });
+            crate::global::state_mut().operating_dir = self.previous_path.take();
+        }
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    fn install_test_buffer(lines: &[&str]) -> Vec<crate::definitions::LinePtr> {
+        use super::{make_new_buffer, make_new_node};
+        use crate::global::{state, with_state_mut};
+
+        assert!(!lines.is_empty());
+        make_new_buffer();
+        let first = {
+            let editor = state();
+            editor.openfile.as_ref().unwrap().filetop.clone().unwrap()
+        };
+        first.borrow_mut().data = lines[0].to_string();
+        let mut nodes = vec![first.clone()];
+        let mut previous = first;
+        for (index, data) in lines.iter().enumerate().skip(1) {
+            let node = make_new_node(Some(previous.clone()));
+            node.borrow_mut().data = (*data).to_string();
+            node.borrow_mut().lineno = (index + 1) as isize;
+            previous.borrow_mut().next = Some(node.clone());
+            nodes.push(node.clone());
+            previous = node;
+        }
+        with_state_mut(|editor| {
+            let buffer = editor.openfile.as_mut().unwrap();
+            buffer.filebot = Some(previous);
+            buffer.current = Some(nodes[0].clone());
+            buffer.current_x = 0;
+            buffer.mark = None;
+        });
+        nodes
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    fn current_buffer_lines() -> Vec<String> {
+        use crate::global::state;
+
+        let mut line = {
+            let editor = state();
+            editor.openfile.as_ref().and_then(|buffer| buffer.filetop.clone())
+        };
+        let mut lines = Vec::new();
+        while let Some(node) = line {
+            let borrowed = node.borrow();
+            lines.push(borrowed.data.clone());
+            line = borrowed.next.clone();
+        }
+        lines
+    }
 
     #[test]
     fn encode_data_reports_invalid_utf8() {
@@ -3654,5 +5037,587 @@ mod tests {
     fn bare_filename_parent_is_current_directory() {
         assert_eq!(usable_parent(Path::new("nano.txt")), Path::new("."));
         assert_eq!(usable_parent(Path::new("./nano.txt")), Path::new("."));
+    }
+
+    #[test]
+    fn temporary_suffix_uses_only_the_final_path_component() {
+        assert_eq!(temporary_suffix("dir.with.dot/file"), "");
+        assert_eq!(temporary_suffix("archive.tar.gz"), ".gz");
+        assert_eq!(temporary_suffix(".nanorc"), "");
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn filename_completion_covers_zero_one_many_hidden_and_unicode_matches() {
+        use super::filename_completion;
+
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["alpha", "alpine", "solo", ".secret", "猫一", "猫二"] {
+            std::fs::write(directory.path().join(name), b"").unwrap();
+        }
+        crate::global::state_mut().present_path =
+            Some(directory.path().to_string_lossy().into_owned());
+
+        assert!(filename_completion("missing").is_empty());
+        assert_eq!(filename_completion("sol"), ["solo"]);
+
+        let mut many = filename_completion("al");
+        many.sort();
+        assert_eq!(many, ["alpha", "alpine"]);
+
+        assert_eq!(filename_completion("."), [".secret"]);
+
+        let mut unicode = filename_completion("猫");
+        unicode.sort();
+        assert_eq!(unicode, ["猫一", "猫二"]);
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn input_tab_appends_exact_directory_with_the_native_separator() {
+        use super::input_tab;
+
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("nested");
+        std::fs::create_dir_all(nested.join("folder")).unwrap();
+        crate::global::state_mut().present_path =
+            Some(directory.path().to_string_lossy().into_owned());
+
+        let separator = std::path::MAIN_SEPARATOR;
+        let morsel = format!("nested{separator}folder");
+        let mut place = morsel.len();
+        let mut listed = false;
+        let completed = input_tab(&morsel, &mut place, count_completion_refresh, &mut listed);
+
+        assert_eq!(completed, format!("nested{separator}folder{separator}"));
+        assert_eq!(place, completed.len());
+        assert!(!listed);
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn input_tab_lists_many_and_refreshes_a_stale_list_for_zero_or_one() {
+        use super::input_tab;
+
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["alpha", "alpine", "solo"] {
+            std::fs::write(directory.path().join(name), b"").unwrap();
+        }
+        crate::global::with_state_mut(|state| {
+            state.present_path = Some(directory.path().to_string_lossy().into_owned());
+            // A zero-height synthetic edit view keeps this behavior test from
+            // painting escape sequences; winio's pure tests verify geometry.
+            state.editwinrows = 0;
+            state.midwin.rows = 0;
+            state.midwin.cols = 20;
+        });
+
+        COMPLETION_REFRESHES.store(0, Ordering::SeqCst);
+        let mut place = 2;
+        let mut listed = false;
+        let common = input_tab("al", &mut place, count_completion_refresh, &mut listed);
+        assert_eq!(common, "alp");
+        assert_eq!(place, 3);
+        assert!(listed);
+        assert_eq!(COMPLETION_REFRESHES.load(Ordering::SeqCst), 0);
+
+        place = "missing".len();
+        let unchanged = input_tab("missing", &mut place, count_completion_refresh, &mut listed);
+        assert_eq!(unchanged, "missing");
+        assert!(!listed);
+        assert_eq!(COMPLETION_REFRESHES.load(Ordering::SeqCst), 1);
+
+        // A single completion also removes a previously displayed list.
+        listed = true;
+        place = 3;
+        let single = input_tab("sol", &mut place, count_completion_refresh, &mut listed);
+        assert_eq!(single, "solo");
+        assert!(!listed);
+        assert_eq!(COMPLETION_REFRESHES.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn backup_path_encoding_is_separator_free_and_collision_safe() {
+        use super::backup_path_key;
+
+        let nested = backup_path_key(Path::new("directory/file"));
+        let punctuation = backup_path_key(Path::new("directory!file"));
+        assert_ne!(nested, punctuation);
+        assert!(!nested.contains(['/','\\']));
+        assert!(!punctuation.contains(['/','\\']));
+    }
+
+    struct InterruptedOnce {
+        interrupted: bool,
+        bytes: Cursor<Vec<u8>>,
+    }
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.bytes.read(buffer)
+        }
+    }
+
+    #[test]
+    fn chunked_reader_retries_eintr_and_stops_on_cancel() {
+        let cancelled = AtomicBool::new(false);
+        let mut reader = InterruptedOnce {
+            interrupted: false,
+            bytes: Cursor::new(b"complete".to_vec()),
+        };
+        let (bytes, was_cancelled) = read_until_cancelled(&mut reader, &cancelled).unwrap();
+        assert_eq!(bytes, b"complete");
+        assert!(!was_cancelled);
+
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut unread = Cursor::new(b"must not be read".to_vec());
+        let (bytes, was_cancelled) = read_until_cancelled(&mut unread, &cancelled).unwrap();
+        assert!(bytes.is_empty());
+        assert!(was_cancelled);
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn cancelled_read_does_not_ingraft_its_partial_chunk() {
+        struct CancelAfterOneChunk(bool);
+
+        impl Read for CancelAfterOneChunk {
+            fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Ok(0);
+                }
+                self.0 = true;
+                let partial = b"partial\ncontent";
+                destination[..partial.len()].copy_from_slice(partial);
+                crate::nano::CONTROL_C_WAS_PRESSED.store(
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(partial.len())
+            }
+        }
+
+        install_test_buffer(&["original", ""]);
+        assert!(!super::read_file_impl(
+            CancelAfterOneChunk(false),
+            false,
+            "cancelled input",
+            true,
+        ));
+        assert_eq!(current_buffer_lines(), ["original", ""]);
+    }
+
+    #[cfg(all(unix, feature = "operatingdir"))]
+    #[test]
+    fn retained_root_rejects_parent_and_leaf_symlink_swaps_but_follows_inner_links() {
+        use super::{open_path, outside_of_confinement};
+        use std::io::Read as _;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = root.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::write(inside.join("document"), b"inside").unwrap();
+        std::fs::write(outside.path().join("document"), b"outside").unwrap();
+        let _guard = TestOperatingRoot::install(root.path());
+
+        let parent_link = root.path().join("parent");
+        symlink("inside", &parent_link).unwrap();
+        let through_parent = parent_link.join("document");
+        assert!(!outside_of_confinement(
+            through_parent.to_str().unwrap(),
+            false,
+        ));
+
+        // A normal relative symlink whose target remains beneath the root is
+        // supported and resolves to the intended object.
+        let mut file = open_path(&through_parent).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "inside");
+
+        // Replacing an already-approved parent with an outside symlink cannot
+        // redirect the subsequent authority-bearing open.
+        std::fs::remove_file(&parent_link).unwrap();
+        symlink(outside.path(), &parent_link).unwrap();
+        assert!(open_path(&through_parent).is_err());
+        assert_eq!(std::fs::read(outside.path().join("document")).unwrap(), b"outside");
+
+        let leaf_link = root.path().join("leaf");
+        symlink("inside/document", &leaf_link).unwrap();
+        assert!(!outside_of_confinement(leaf_link.to_str().unwrap(), false));
+        std::fs::remove_file(&leaf_link).unwrap();
+        symlink(outside.path().join("document"), &leaf_link).unwrap();
+        assert!(open_path(&leaf_link).is_err());
+        assert_eq!(std::fs::read(outside.path().join("document")).unwrap(), b"outside");
+    }
+
+    #[cfg(all(unix, feature = "operatingdir", not(feature = "tiny")))]
+    #[test]
+    fn writes_locks_directory_reads_and_staged_installs_cannot_cross_swapped_parent() {
+        use super::{
+            confined_read_dir, create_staging_file, open_lockfile_for_create,
+            open_path_with, outside_of_confinement, PathOpenOptions,
+        };
+        use std::io::Write as _;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = root.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::write(outside.path().join("victim"), b"untouched").unwrap();
+        let _guard = TestOperatingRoot::install(root.path());
+
+        let parent_link = root.path().join("parent");
+        symlink("inside", &parent_link).unwrap();
+        let target = parent_link.join("victim");
+        assert!(!outside_of_confinement(target.to_str().unwrap(), false));
+
+        // Create staging while the parent is legitimate, then exchange the
+        // parent before both the direct write and the final atomic rename.
+        let mut staging = create_staging_file(&parent_link, ".nano-test.").unwrap();
+        staging.as_file_mut().write_all(b"candidate").unwrap();
+        std::fs::remove_file(&parent_link).unwrap();
+        symlink(outside.path(), &parent_link).unwrap();
+
+        assert!(open_path_with(&target, PathOpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            mode: 0o666,
+            ..PathOpenOptions::default()
+        }).is_err());
+        assert!(open_lockfile_for_create(
+            parent_link.join(".victim.swp").to_str().unwrap()
+        ).is_err());
+        assert!(confined_read_dir(parent_link.to_str().unwrap()).is_err());
+        assert!(staging.persist(&target).is_err());
+
+        assert_eq!(std::fs::read(outside.path().join("victim")).unwrap(), b"untouched");
+        assert!(!outside.path().join(".victim.swp").exists());
+    }
+
+    #[cfg(all(windows, feature = "operatingdir"))]
+    #[test]
+    fn capability_staging_replaces_an_existing_windows_file() {
+        use super::create_staging_file;
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let nested = root_path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let target = nested.join("document");
+        std::fs::write(&target, b"old contents").unwrap();
+        let _guard = TestOperatingRoot::install(&root_path);
+
+        let mut staging = create_staging_file(&nested, ".nano-test.").unwrap();
+        staging.as_file_mut().write_all(b"new contents").unwrap();
+        staging.as_file().sync_all().unwrap();
+        staging.persist(&target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+    }
+
+    #[cfg(all(unix, feature = "operatingdir"))]
+    #[test]
+    fn replacing_the_operating_directory_name_does_not_replace_its_capability() {
+        use super::open_path;
+        use std::io::Read as _;
+
+        let holder = tempfile::tempdir().unwrap();
+        let named_root = holder.path().join("root");
+        let displaced_root = holder.path().join("displaced");
+        std::fs::create_dir(&named_root).unwrap();
+        std::fs::write(named_root.join("document"), b"original root").unwrap();
+        let _guard = TestOperatingRoot::install(&named_root);
+
+        std::fs::rename(&named_root, &displaced_root).unwrap();
+        std::fs::create_dir(&named_root).unwrap();
+        std::fs::write(named_root.join("document"), b"replacement root").unwrap();
+
+        let mut file = open_path(&named_root.join("document")).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "original root");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn lock_creation_is_exclusive_and_never_follows_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("existing.swp");
+        std::fs::write(&existing, b"owned by someone else").unwrap();
+        assert!(open_lockfile_for_create(existing.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"owned by someone else");
+
+        let victim = directory.path().join("victim");
+        let link = directory.path().join("link.swp");
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        symlink(&victim, &link).unwrap();
+        assert!(open_lockfile_for_create(link.to_str().unwrap()).is_err());
+        assert!(open_existing_lockfile(link.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn concurrent_lock_acquisition_has_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = Arc::new(directory.path().join("contended.swp"));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_lockfile_for_create(path.to_str().unwrap()).is_ok()
+                })
+            })
+            .collect();
+        let winners = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+    }
+
+    #[cfg(all(not(feature = "tiny"), any(unix, windows)))]
+    #[test]
+    fn retained_lock_descriptor_rejects_writes_and_unlinks_after_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.swp");
+        let displaced = directory.path().join("displaced.swp");
+        let mut held = create_lockfile(path.to_str().unwrap(), "document", false).unwrap();
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"racing editor").unwrap();
+
+        assert!(!write_lockfile(
+            &mut held,
+            path.to_str().unwrap(),
+            "document",
+            true,
+        ));
+        assert!(!delete_lockfile(path.to_str().unwrap(), Some(&held)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"racing editor");
+    }
+
+    #[cfg(all(not(feature = "tiny"), any(unix, windows)))]
+    #[test]
+    fn retained_lock_descriptor_allows_its_own_name_to_be_unlinked() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.swp");
+        let held = create_lockfile(path.to_str().unwrap(), "document", false).unwrap();
+
+        assert!(delete_lockfile(path.to_str().unwrap(), Some(&held)));
+        assert!(!path.exists());
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn backup_replacement_is_complete_and_does_not_follow_destination_symlink() {
+        use super::{make_backup_of, stat_with_alloc};
+        use crate::global::state_mut;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("document");
+        let backup = directory.path().join("document~");
+        let victim = directory.path().join("unrelated");
+        std::fs::write(&original, b"complete new backup").unwrap();
+        std::fs::write(&victim, b"must survive").unwrap();
+        symlink(&victim, &backup).unwrap();
+        state_mut().backup_dir = None;
+
+        let info = stat_with_alloc(original.to_str().unwrap()).unwrap();
+        assert!(make_backup_of(original.to_str().unwrap(), &info));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"complete new backup");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"must survive");
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn prepend_installs_only_the_complete_staged_result() {
+        use super::{make_new_buffer, make_new_node, write_file};
+        use crate::definitions::KindOfWritingType;
+        use crate::global::{state, state_mut, with_state_mut};
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document");
+        std::fs::write(&target, b"old contents\n").unwrap();
+
+        state_mut().flags = [0; 4];
+        make_new_buffer();
+        let first = state().openfile.as_ref().unwrap().filetop.clone().unwrap();
+        first.borrow_mut().data = "new contents".to_string();
+        let end = make_new_node(Some(first.clone()));
+        end.borrow_mut().lineno = 2;
+        first.borrow_mut().next = Some(end.clone());
+        with_state_mut(|editor| {
+            let buffer = editor.openfile.as_mut().unwrap();
+            buffer.filebot = Some(end);
+        });
+
+        assert!(write_file(
+            target.to_str().unwrap(),
+            None,
+            true,
+            KindOfWritingType::Prepend,
+            false,
+        ));
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new contents\nold contents\n"
+        );
+        assert!(std::fs::read_dir(directory.path())
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".nano-prepend.")));
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn command_session_restores_signal_termios_tracking_state() {
+        use super::{
+            cancel_command_trampoline, CommandSession, PID_OF_COMMAND, PID_OF_SENDER,
+            SHOULD_PIPE,
+        };
+        use std::sync::atomic::Ordering;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        let mut before: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut before) },
+            0
+        );
+
+        let session = CommandSession::start(false).unwrap();
+        let mut during: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut during) },
+            0
+        );
+        assert_eq!(
+            during.sa_sigaction,
+            cancel_command_trampoline as *const () as libc::sighandler_t
+        );
+        PID_OF_COMMAND.store(41, Ordering::SeqCst);
+        PID_OF_SENDER.store(42, Ordering::SeqCst);
+        SHOULD_PIPE.store(true, Ordering::SeqCst);
+        drop(session);
+
+        let mut after: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut after) },
+            0
+        );
+        assert_eq!(after.sa_sigaction, before.sa_sigaction);
+        assert_eq!(PID_OF_COMMAND.load(Ordering::SeqCst), -1);
+        assert_eq!(PID_OF_SENDER.load(Ordering::SeqCst), -1);
+        assert!(!SHOULD_PIPE.load(Ordering::SeqCst));
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn command_snapshot_uses_marked_region_or_full_buffer() {
+        use super::command_input_snapshot;
+        use crate::global::with_state_mut;
+
+        let nodes = install_test_buffer(&["alpha", "beta", ""]);
+        assert_eq!(command_input_snapshot(), b"alpha\nbeta\n");
+
+        with_state_mut(|editor| {
+            let buffer = editor.openfile.as_mut().unwrap();
+            buffer.mark = Some(nodes[0].clone());
+            buffer.mark_x = 2;
+            buffer.current = Some(nodes[1].clone());
+            buffer.current_x = 2;
+        });
+        assert_eq!(command_input_snapshot(), b"pha\nbe");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn successful_filter_replaces_once_and_undo_restores_source() {
+        use super::execute_command;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        install_test_buffer(&["hello", ""]);
+        execute_command("|tr a-z A-Z");
+        assert_eq!(current_buffer_lines(), ["HELLO", ""]);
+
+        crate::text::do_undo();
+        assert_eq!(current_buffer_lines(), ["hello", ""]);
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn failed_filter_leaves_source_unchanged() {
+        use super::execute_command;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        install_test_buffer(&["original", ""]);
+        execute_command("|sh -c 'printf changed; printf failure >&2; exit 7'");
+        assert_eq!(current_buffer_lines(), ["original", ""]);
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn ctrl_c_cancels_command_and_restores_tracking() {
+        use super::{execute_command, PID_OF_COMMAND, PID_OF_SENDER};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        install_test_buffer(&["unchanged", ""]);
+        let interrupter = std::thread::spawn(|| {
+            for _ in 0..200 {
+                if PID_OF_COMMAND.load(Ordering::SeqCst) > 0 {
+                    unsafe { libc::kill(libc::getpid(), libc::SIGINT) };
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("command PID was never published");
+        });
+
+        let started = Instant::now();
+        execute_command("|sleep 10");
+        interrupter.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(current_buffer_lines(), ["unchanged", ""]);
+        assert_eq!(PID_OF_COMMAND.load(Ordering::SeqCst), -1);
+        assert_eq!(PID_OF_SENDER.load(Ordering::SeqCst), -1);
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn filter_replaces_only_the_marked_region() {
+        use super::execute_command;
+        use crate::global::with_state_mut;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        let nodes = install_test_buffer(&["hello world", ""]);
+        with_state_mut(|editor| {
+            let buffer = editor.openfile.as_mut().unwrap();
+            buffer.mark = Some(nodes[0].clone());
+            buffer.mark_x = 6;
+            buffer.current = Some(nodes[0].clone());
+            buffer.current_x = 11;
+        });
+        execute_command("|tr a-z A-Z");
+        assert_eq!(current_buffer_lines(), ["hello WORLD", ""]);
     }
 }

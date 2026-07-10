@@ -48,7 +48,7 @@ cargo build --release                             # everything (default)
 | `linter` · `formatter` · `speller` | External lint/format/spell hooks |
 | `mouse` · `linenumbers` · `comment` | Mouse, line numbers, comment toggle |
 | `tabcomp` · `wordcomp` · `operatingdir` | Tab/word completion, `-o` confinement |
-| `libmagic` | Magic-bytes syntax fallback (off by default, +~35 KB) |
+| `libmagic` | Native libmagic syntax matching (off by default; requires system libmagic) |
 | `tiny` | Strip to the smallest editor (mirrors `--enable-tiny`) |
 
 Dependencies are deliberately few: `crossterm` (terminal I/O), `regex-lite`, `unicode-width`, and `libc`.

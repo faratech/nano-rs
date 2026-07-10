@@ -9,15 +9,19 @@ path = "src/main.rs"
 
 [dependencies]
 crossterm = "0.29"
+cap-std = "4.0.2"
 regex-lite = "0.1"
 libc = "0.2"
 unicode-width = "0.2"
-infer = { version = "0.19", optional = true }
+magic = { version = "0.16.7", optional = true }
 tempfile = "3"
+sha2 = "0.10"
+glob = "0.3"
+supports-color = "3.0.2"
 
 [features]
-# libmagic (the `infer` crate) is intentionally NOT in default — it adds ~35 KiB
-# for a magic-bytes syntax fallback; build with `--features libmagic` to include it.
+# Native libmagic integration is intentionally not in the default feature set;
+# build with `--features libmagic` when MIME/description matching is desired.
 default = ["color", "nanorc", "utf8", "browser", "help", "histories",
            "justify", "multibuffer", "wrapping", "mouse",
            "linenumbers", "linter", "formatter", "speller",
@@ -40,7 +44,7 @@ speller      = []
 tabcomp      = []
 wordcomp     = []
 comment      = []
-libmagic     = ["dep:infer"]
+libmagic     = ["dep:magic"]
 operatingdir = []
 extra        = []
 
@@ -49,6 +53,8 @@ extra        = []
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Networking_WinHttp",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
 ] }
 
 # Embeds Windows version metadata (media/nano.rc) via build.rs on Windows.

@@ -40,7 +40,7 @@ mod stubs {
     /// Set the data of the current line in the open buffer.
     pub fn set_current_line_data(data: &str) {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 if let Some(ref cur) = of.current.clone() {
                     cur.borrow_mut().data = data.to_string();
@@ -55,11 +55,21 @@ mod stubs {
     ///             openfile->current->data = copy_of("");
     pub fn append_new_line_after_current() {
         STATE.with(|s| {
-            let st = s.borrow_mut();
-            if let Some(ref mut of) = st.openfile {
-                if let Some(cur) = of.current.clone() {
-                    let new = crate::nano::make_new_node(Some(&cur));
-                    cur.borrow_mut().next = Some(new.clone());
+            let mut st = s.borrow_mut();
+            let current = st.openfile.as_ref().and_then(|of| of.current.clone());
+            if let Some(cur) = current {
+                let lineno = cur.borrow().lineno + 1;
+                let new = st.lines.alloc(crate::definitions::LineNode {
+                    data: String::new(),
+                    lineno,
+                    next: None,
+                    prev: Some(crate::definitions::LinePtr::downgrade(&cur)),
+                    #[cfg(feature = "color")]
+                    multidata: Vec::new(),
+                    has_anchor: false,
+                });
+                cur.borrow_mut().next = Some(new.clone());
+                if let Some(of) = st.openfile.as_mut() {
                     of.current = Some(new);
                 }
             }
@@ -69,7 +79,7 @@ mod stubs {
     /// Set filebot to current.
     pub fn set_filebot_to_current() {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.filebot = of.current.clone();
             }
@@ -79,7 +89,7 @@ mod stubs {
     /// Set current to filetop.
     pub fn set_current_to_filetop() {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.current = of.filetop.clone();
             }
@@ -97,7 +107,7 @@ mod stubs {
     /// Advance current to the next line.  Returns false if already at filebot.
     pub fn advance_current_to_next() -> bool {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 let next = of.current.as_ref().and_then(|c| c.borrow().next.clone());
                 if let Some(n) = next {
@@ -112,7 +122,7 @@ mod stubs {
     /// Set edittop to the current line.
     pub fn set_edittop_to_current() {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 of.edittop = of.current.clone();
             }
@@ -528,18 +538,18 @@ pub fn wrap_help_text_into_buffer() {
     let intro_end    = END_OF_INTRO_OFFSET.with(|e| *e.borrow());
     let location_val = LOCATION.with(|l| *l.borrow());
 
-    let (cols, rows, sidebar, minibar_set, empty_line_set, _editwinrows) =
+    let (cols, sidebar, minibar_set, empty_line_set, _editwinrows) =
         STATE.with(|s| {
             let st = s.borrow();
             (
                 st.midwin.cols as usize,
-                (st.topwin.rows + st.midwin.rows + st.footwin.rows) as usize, // LINES
                 st.sidebar as usize,
                 st.flag_isset(MINIBAR),
                 st.flag_isset(EMPTY_LINE),
                 st.editwinrows,
             )
         });
+    let rows = crate::winio::screen_rows() as usize;
 
     // Avoid overtight and overwide paragraphs in the introductory text.
     // wrapping_point = ((COLS < 40) ? 40 : (COLS > 74) ? 74 : COLS) - sidebar
@@ -635,6 +645,18 @@ pub fn wrap_help_text_into_buffer() {
     set_edittop_to_current();
 }
 
+/// Rewrap the active help document after the shared resize coordinator has
+/// rebuilt terminal geometry.  `make_new_buffer()` links an existing buffer
+/// into the multibuffer ring, so discard the old generated help buffer first.
+#[cfg(feature = "help")]
+fn rebuild_help_after_resize() {
+    crate::global::state_mut().openfile = None;
+    wrap_help_text_into_buffer();
+    crate::winio::titlebar(None);
+    crate::winio::bottombars(MHELP);
+    crate::winio::edit_refresh();
+}
+
 // ---------------------------------------------------------------------------
 // show_help
 // ---------------------------------------------------------------------------
@@ -683,7 +705,7 @@ pub fn show_help() {
     });
     if no_help_set || zero_set {
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             st.flags[flag_index(NO_HELP)] &= !flag_mask(NO_HELP);
             st.flags[flag_index(ZERO)]    &= !flag_mask(ZERO);
         });
@@ -694,7 +716,7 @@ pub fn show_help() {
 
     // When searching, do it forward, case insensitive, and without regexes.
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.flags[flag_index(BACKWARDS_SEARCH)]   &= !flag_mask(BACKWARDS_SEARCH);
         st.flags[flag_index(CASE_SENSITIVE)]      &= !flag_mask(CASE_SENSITIVE);
         st.flags[flag_index(USE_REGEXP)]          &= !flag_mask(USE_REGEXP);
@@ -703,7 +725,7 @@ pub fn show_help() {
 
     #[cfg(feature = "linenumbers")]
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         let cols = st.midwin.cols as i32;
         let sidebar = st.sidebar;
         st.editwincols = cols - sidebar;
@@ -725,7 +747,7 @@ pub fn show_help() {
     help_init();
 
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.inhelp = true;
     });
     LOCATION.with(|l| *l.borrow_mut() = 0);
@@ -748,7 +770,7 @@ pub fn show_help() {
     });
 
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.title = Some(title.clone());
     });
     titlebar(None);
@@ -772,11 +794,21 @@ pub fn show_help() {
 
     wrap_help_text_into_buffer();
     edit_refresh();
+    let mut seen_resize_generation = crate::winio::resize_generation();
 
     // Main help input loop.
     loop {
+        let consumed_pending_resize = crate::winio::consume_resize_request(None);
+        let current_resize_generation = crate::winio::resize_generation();
+        if consumed_pending_resize || current_resize_generation != seen_resize_generation {
+            seen_resize_generation = current_resize_generation;
+            STATE.with(|s| s.borrow_mut().didfind = 0);
+            rebuild_help_after_resize();
+            continue;
+        }
+
         STATE.with(|s| {
-            let st = s.borrow_mut();
+            let mut st = s.borrow_mut();
             st.lastmessage = MessageType::Vacuum;
             st.focusing = true;
         });
@@ -787,6 +819,13 @@ pub fn show_help() {
         });
 
         let kbinput = get_kbinput(show_cursor);
+
+        if crate::winio::consume_resize_request(Some(kbinput)) {
+            seen_resize_generation = crate::winio::resize_generation();
+            STATE.with(|s| s.borrow_mut().didfind = 0);
+            rebuild_help_after_resize();
+            continue;
+        }
 
         STATE.with(|s| s.borrow_mut().didfind = 0);
 
@@ -850,6 +889,16 @@ pub fn show_help() {
             handle_unrecognized_input(kbinput, function);
         }
 
+        // A search or other nested prompt may have consumed the resize while
+        // this loop was suspended.  Rewrap before painting the help buffer at
+        // the new geometry.
+        let current_resize_generation = crate::winio::resize_generation();
+        if current_resize_generation != seen_resize_generation {
+            seen_resize_generation = current_resize_generation;
+            rebuild_help_after_resize();
+            continue;
+        }
+
         edit_refresh();
 
         // Count how far (in bytes) edittop is into the file.
@@ -874,7 +923,7 @@ pub fn show_help() {
 
     #[cfg(feature = "linenumbers")]
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.margin = was_margin;
         let cols = st.midwin.cols as i32;
         let margin = st.margin;
@@ -886,13 +935,13 @@ pub fn show_help() {
 
     #[cfg(feature = "color")]
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.syntaxstr = was_syntax;
         st.have_palette = false;
     });
 
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.title = None;
     });
     STATE.with(|s| s.borrow_mut().answer = saved_answer);
@@ -950,8 +999,7 @@ fn handle_unrecognized_input(kbinput: i32, function: Option<FuncPtr>) {
             crate::winio::statusline(MessageType::Ahem, tr!("Paste is ignored"));
             return;
         }
-        #[cfg(not(feature = "tiny"))]
-        if kbinput == THE_WINDOW_RESIZED as i32 {
+        if crate::winio::consume_resize_request(Some(kbinput)) {
             return;
         }
 
@@ -986,5 +1034,51 @@ pub fn do_help() {
         } else {
             // beep — stub
         }
+    }
+}
+
+#[cfg(all(test, feature = "help"))]
+mod tests {
+    use super::stubs;
+    use crate::definitions::LinePtr;
+    use crate::global::{state, state_mut};
+
+    #[test]
+    fn help_line_append_uses_the_existing_appstate_borrow() {
+        let saved_openfile = state_mut().openfile.take();
+        crate::files::make_new_buffer();
+
+        let old_current = state()
+            .openfile
+            .as_ref()
+            .and_then(|file| file.current.clone())
+            .expect("new help buffer has a current line");
+        let old_lineno = old_current.borrow().lineno;
+
+        // This used to panic by re-borrowing AppState through
+        // nano::make_new_node() while help already held its mutable borrow.
+        stubs::append_new_line_after_current();
+
+        let new_current = state()
+            .openfile
+            .as_ref()
+            .and_then(|file| file.current.clone())
+            .expect("append advances the current line");
+        let linked_next = old_current
+            .borrow()
+            .next
+            .clone()
+            .expect("old current links to appended line");
+        assert!(LinePtr::ptr_eq(&linked_next, &new_current));
+        assert_eq!(new_current.borrow().lineno, old_lineno + 1);
+        let linked_prev = new_current
+            .borrow()
+            .prev
+            .as_ref()
+            .and_then(|previous| previous.upgrade())
+            .expect("appended line links back to old current");
+        assert!(LinePtr::ptr_eq(&linked_prev, &old_current));
+
+        state_mut().openfile = saved_openfile;
     }
 }

@@ -276,25 +276,25 @@ pub fn find_and_prime_applicable_syntax() {
                 s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
             });
             if !filename.is_empty() {
-                if let Ok(content) = std::fs::read(&filename) {
-                    let kind = infer::get(&content);
-                    if let Some(kind) = kind {
-                        let magicstring = format!("{}/{}", kind.mime_type(), kind.extension());
-                        let mut sntx = syntaxes_ptr;
-                        while !sntx.is_null() {
-                            let matches = unsafe {
-                                found_in_list((*sntx).magics.as_deref(), &magicstring)
-                            };
-                            if matches {
-                                found = sntx;
-                                break;
-                            }
-                            sntx = unsafe {
-                                (*sntx).next.as_deref_mut()
-                                    .map(|p| p as *mut SyntaxType)
-                                    .unwrap_or(std::ptr::null_mut())
-                            };
+                let description = magic::Cookie::open(Default::default())
+                    .ok()
+                    .and_then(|cookie| cookie.load(&Default::default()).ok())
+                    .and_then(|cookie| cookie.file(&filename).ok());
+                if let Some(magicstring) = description {
+                    let mut sntx = syntaxes_ptr;
+                    while !sntx.is_null() {
+                        let matches = unsafe {
+                            found_in_list((*sntx).magics.as_deref(), &magicstring)
+                        };
+                        if matches {
+                            found = sntx;
+                            break;
                         }
+                        sntx = unsafe {
+                            (*sntx).next.as_deref_mut()
+                                .map(|p| p as *mut SyntaxType)
+                                .unwrap_or(std::ptr::null_mut())
+                        };
                     }
                 }
             }

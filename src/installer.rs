@@ -10,8 +10,9 @@
 //! nano-linux-<arch> on Linux/Unix (arch is amd64 or arm64).
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 use windows::core::{w, PCWSTR, PWSTR};
@@ -19,7 +20,7 @@ use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest,
+    WinHttpSendRequest, WinHttpSetTimeouts,
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
     WINHTTP_FLAG_SECURE,
     URL_COMPONENTS,
@@ -77,6 +78,183 @@ fn update_temp_path() -> Option<PathBuf> {
     Some(cache_dir()?.join(name))
 }
 
+/// Metadata that binds a pending executable to the release and target for
+/// which it was downloaded.  It is deliberately a tiny line-based format so
+/// startup validation does not depend on a JSON parser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingManifest {
+    version: String,
+    target: String,
+    asset: String,
+    sha256: String,
+}
+
+fn update_manifest_path() -> Option<PathBuf> {
+    Some(cache_dir()?.join("nano-update.manifest"))
+}
+
+impl PendingManifest {
+    fn encode(&self) -> String {
+        format!(
+            "version={}\ntarget={}\nasset={}\nsha256={}\n",
+            self.version, self.target, self.asset, self.sha256
+        )
+    }
+
+    fn decode(text: &str) -> Option<Self> {
+        let mut version = None;
+        let mut target = None;
+        let mut asset = None;
+        let mut sha256 = None;
+        for line in text.lines() {
+            let (key, value) = line.split_once('=')?;
+            if value.is_empty() || value.contains(['\r', '\n']) {
+                return None;
+            }
+            match key {
+                "version" if version.is_none() => version = Some(value.to_string()),
+                "target" if target.is_none() => target = Some(value.to_string()),
+                "asset" if asset.is_none() => asset = Some(value.to_string()),
+                "sha256" if sha256.is_none() && value.len() == 64
+                    && value.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                {
+                    sha256 = Some(value.to_ascii_lowercase())
+                }
+                _ => return None,
+            }
+        }
+        Some(Self {
+            version: version?,
+            target: target?,
+            asset: asset?,
+            sha256: sha256?,
+        })
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn validate_artifact(bytes: &[u8], target: &str) -> bool {
+    match target {
+        "linux-x86_64" | "linux-aarch64" => {
+            if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
+                return false;
+            }
+            let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+            machine == if target == "linux-x86_64" { 62 } else { 183 }
+        }
+        "windows-x86_64" | "windows-aarch64" => {
+            if bytes.len() < 64 || &bytes[..2] != b"MZ" {
+                return false;
+            }
+            let pe_offset = u32::from_le_bytes([
+                bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f],
+            ]) as usize;
+            if pe_offset.checked_add(6).is_none_or(|end| end > bytes.len())
+                || &bytes[pe_offset..pe_offset + 4] != b"PE\0\0"
+            {
+                return false;
+            }
+            let machine = u16::from_le_bytes([bytes[pe_offset + 4], bytes[pe_offset + 5]]);
+            machine == if target == "windows-x86_64" { 0x8664 } else { 0xaa64 }
+        }
+        _ => false,
+    }
+}
+
+fn remove_pending_update() {
+    if let Some(path) = update_temp_path() {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = update_manifest_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn store_pending_update(
+    body: &[u8],
+    version: &str,
+    expected_sha256: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let target = target_id()?;
+    if !validate_artifact(body, target) {
+        return Err(format!("downloaded asset is not a valid executable for {target}").into());
+    }
+    let update_path = update_temp_path()
+        .ok_or("could not determine private update cache directory")?;
+    let manifest_path = update_manifest_path()
+        .ok_or("could not determine private update cache directory")?;
+    let actual_sha256 = sha256_bytes(body);
+    if actual_sha256 != expected_sha256.to_ascii_lowercase() {
+        return Err("downloaded asset does not match the published SHA-256 digest".into());
+    }
+    let manifest = PendingManifest {
+        version: version.to_string(),
+        target: target.to_string(),
+        asset: target_asset_name()?.to_string(),
+        sha256: actual_sha256,
+    };
+
+    // Publish the manifest last: a crash after the executable write leaves an
+    // untrusted orphan that startup will discard rather than apply.
+    write_bytes_atomic(&update_path, body)?;
+    if let Err(error) = write_bytes_atomic(&manifest_path, manifest.encode().as_bytes()) {
+        let _ = fs::remove_file(&update_path);
+        return Err(error);
+    }
+    Ok(update_path)
+}
+
+fn load_valid_pending_update() -> Result<(PathBuf, PendingManifest), Box<dyn std::error::Error>> {
+    let update_path = update_temp_path().ok_or("private update cache unavailable")?;
+    let manifest_path = update_manifest_path().ok_or("private update cache unavailable")?;
+    let manifest_text = fs::read_to_string(&manifest_path)?;
+    let manifest = PendingManifest::decode(&manifest_text).ok_or("invalid pending-update manifest")?;
+    let expected_target = target_id()?;
+    if manifest.target != expected_target
+        || manifest.asset != target_asset_name()?
+        || !is_newer_version(&manifest.version, env!("CARGO_PKG_VERSION"))
+    {
+        return Err("pending update does not match this version and target".into());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let myuid = unsafe { libc::geteuid() };
+        for path in [&update_path, &manifest_path] {
+            if fs::metadata(path)?.uid() != myuid {
+                return Err("pending update has unexpected owner".into());
+            }
+        }
+    }
+
+    let bytes = fs::read(&update_path)?;
+    if !validate_artifact(&bytes, expected_target)
+        || sha256_file(&update_path)? != manifest.sha256
+    {
+        return Err("pending update failed format or digest validation".into());
+    }
+    Ok((update_path, manifest))
+}
+
 /// Stamp file recording when the background check last ran (for throttling).
 fn last_check_path() -> Option<PathBuf> {
     cache_dir().map(|d| d.join("last-check"))
@@ -131,104 +309,52 @@ fn running_exe_replaceable() -> bool {
     }
 }
 
-/// Backup path for the rename trick: `<path>.old` (keeps any existing extension,
-/// e.g. nano.exe -> nano.exe.old, nano -> nano.old).
-fn backup_path_for(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".old");
-    PathBuf::from(name)
-}
-
-fn temp_sibling_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let parent = path.parent().ok_or("target path has no parent directory")?;
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("nano");
-    Ok(parent.join(format!(".{}.tmp-{}", name, std::process::id())))
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
-fn replace_with_prepared_file(prepared: &Path, target: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if target.exists() {
-        let backup_path = backup_path_for(target);
-        let _ = fs::remove_file(&backup_path);
-
-        fs::rename(target, &backup_path)?;
-
-        if let Err(e) = fs::rename(prepared, target) {
-            let _ = fs::rename(&backup_path, target);
-            let _ = fs::remove_file(prepared);
-            return Err(e.into());
-        }
-
-        let _ = fs::remove_file(&backup_path);
-    } else {
-        fs::rename(prepared, target)?;
-    }
-
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
 fn write_bytes_atomic(path: &Path, body: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let temp_path = temp_sibling_path(path)?;
-    let _ = fs::remove_file(&temp_path);
-
-    let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let mut file = fs::File::create(&temp_path)?;
-        file.write_all(body)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_result {
-        let _ = fs::remove_file(&temp_path);
-        return Err(e);
-    }
-
-    replace_with_prepared_file(&temp_path, path)
+    let parent = path.parent().ok_or("target path has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(body)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    sync_parent(path)
 }
 
 fn copy_file_atomic(source: &Path, target: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let temp_path = temp_sibling_path(target)?;
-    let _ = fs::remove_file(&temp_path);
-
-    if let Err(e) = fs::copy(source, &temp_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(e.into());
-    }
-
-    set_executable(&temp_path);
-
-    if let Err(e) = replace_with_prepared_file(&temp_path, target) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(e);
-    }
-
-    Ok(())
+    let parent = target.parent().ok_or("target path has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let mut source_file = fs::File::open(source)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut source_file, temp.as_file_mut())?;
+    set_executable(temp.as_file())?;
+    temp.as_file().sync_all()?;
+    temp.persist(target).map_err(|e| e.error)?;
+    sync_parent(target)
 }
 
 /// Mark a file executable on Unix (no-op on Windows).
-fn set_executable(path: &Path) {
+fn set_executable(file: &fs::File) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let mut perm = meta.permissions();
-            perm.set_mode(perm.mode() | 0o755);
-            let _ = fs::set_permissions(path, perm);
-        }
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        file.set_permissions(permissions)?;
     }
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = file;
+    Ok(())
 }
 
 /// Get the installation path for nano.
@@ -258,13 +384,64 @@ pub fn get_installed_version() -> Option<String> {
         return None;
     }
 
-    let output = std::process::Command::new(&install_path)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new(&install_path);
+    command.arg("--version");
+    let output = command_output_with_timeout(command, std::time::Duration::from_secs(5)).ok()?;
 
     let version_output = String::from_utf8_lossy(&output.stdout);
     parse_installed_version(&version_output)
+}
+
+fn command_output_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    // Do not use piped output here.  `wait_with_output()` waits for pipe EOF,
+    // which can remain open indefinitely when the probed program leaves a
+    // descendant running with inherited stdout/stderr.  Regular temporary
+    // files let us enforce the deadline on the direct child and then read the
+    // output without waiting for descendant-held pipe handles to close.
+    let mut stdout_file = tempfile::tempfile()?;
+    let mut stderr_file = tempfile::tempfile()?;
+    command
+        .stdout(Stdio::from(stdout_file.try_clone()?))
+        .stderr(Stdio::from(stderr_file.try_clone()?));
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            const MAX_PROBE_OUTPUT: u64 = 1024 * 1024;
+            let read_output = |file: &mut fs::File| -> std::io::Result<Vec<u8>> {
+                file.seek(SeekFrom::Start(0))?;
+                let mut bytes = Vec::new();
+                file.take(MAX_PROBE_OUTPUT + 1).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_PROBE_OUTPUT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "version probe produced too much output",
+                    ));
+                }
+                Ok(bytes)
+            };
+            return Ok(std::process::Output {
+                status,
+                stdout: read_output(&mut stdout_file)?,
+                stderr: read_output(&mut stderr_file)?,
+            });
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "version probe timed out",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// Parse nano-rs's own release version from its `--version` output.
@@ -398,6 +575,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             return Err(format!("WinHttpOpen failed: {:?}", GetLastError()).into());
         }
         let _session_guard = HandleGuard(session);
+        // Keep manual update/install operations bounded.  WinHTTP expresses
+        // these values in milliseconds (resolve, connect, send, receive).
+        WinHttpSetTimeouts(session, 10_000, 10_000, 60_000, 60_000)
+            .map_err(|e| format!("WinHttpSetTimeouts failed: {e:?}"))?;
 
         // 2. Crack URL
         let mut host_name = vec![0u16; 256];
@@ -533,9 +714,18 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use std::process::Command;
 
-    // curl -f (fail on HTTP error) -s (silent) -S (show error) -L (follow redirects)
+    // curl -f (fail on HTTP error) -s (silent) -S (show error) -L (follow redirects).
+    // Bound connection setup to 10 seconds and the whole transfer to 60.
     match Command::new("curl")
-        .args(["-fsSL", "-A", USER_AGENT, url])
+        .args([
+            "-fsSL",
+            "--connect-timeout", "10",
+            "--max-time", "60",
+            "--speed-limit", "1",
+            "--speed-time", "15",
+            "-A", USER_AGENT,
+            url,
+        ])
         .output()
     {
         Ok(out) if out.status.success() => return Ok(out.stdout),
@@ -545,7 +735,15 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
     // wget -q (quiet) -O - (stdout); non-zero exit on server error by default.
     match Command::new("wget")
-        .args(["-q", "-U", USER_AGENT, "-O", "-", url])
+        .args([
+            "-q",
+            "--connect-timeout=10",
+            "--timeout=60",
+            "--tries=1",
+            "-U", USER_AGENT,
+            "-O", "-",
+            url,
+        ])
         .output()
     {
         Ok(out) if out.status.success() => Ok(out.stdout),
@@ -554,31 +752,32 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     }
 }
 
-/// The release asset name to look for, for the current OS + architecture.
-/// Windows: nano-<arch>.exe   Unix: nano-linux-<arch>   (arch = amd64 | arm64)
-fn target_asset_name() -> String {
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
-    if cfg!(windows) {
-        format!("nano-{}.exe", arch)
-    } else {
-        format!("nano-linux-{}", arch)
+/// Exact release target supported by the updater.  Builds for any other
+/// OS/architecture may still run nano-rs, but must update through their package
+/// manager or a manually supplied binary instead of guessing an asset.
+fn target_id() -> Result<&'static str, Box<dyn std::error::Error>> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok("windows-x86_64"),
+        ("windows", "aarch64") => Ok("windows-aarch64"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
+        (os, arch) => Err(format!("self-update is unsupported on {os}/{arch}").into()),
     }
 }
 
-/// Whether `asset_url` is an acceptable fallback for this OS when the exact
-/// arch-specific asset is not present.
-fn is_os_asset_fallback(asset_url: &str) -> bool {
-    if cfg!(windows) {
-        asset_url.ends_with(".exe")
-    } else {
-        // Avoid grabbing a Windows .exe on Unix.
-        asset_url.contains("nano-linux") && !asset_url.ends_with(".exe")
+fn target_asset_name() -> Result<&'static str, Box<dyn std::error::Error>> {
+    match target_id()? {
+        "windows-x86_64" => Ok("nano-amd64.exe"),
+        "windows-aarch64" => Ok("nano-arm64.exe"),
+        "linux-x86_64" => Ok("nano-linux-amd64"),
+        "linux-aarch64" => Ok("nano-linux-arm64"),
+        _ => unreachable!("target_id only returns supported targets"),
     }
 }
 
 /// Get the latest version info from GitHub
 /// Returns (version, download_url) or None if check fails
-pub fn get_latest_release() -> Result<(String, String), Box<dyn std::error::Error>> {
+pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::error::Error>> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
 
     // Fetch JSON from GitHub API
@@ -596,12 +795,13 @@ pub fn get_latest_release() -> Result<(String, String), Box<dyn std::error::Erro
         .trim_start_matches('v')
         .to_string();
 
-    let target_suffix = target_asset_name();
+    let target_suffix = target_asset_name()?;
 
     // Find asset URL
     // Look for "browser_download_url": "..." that ends with target_suffix
     // Note: Can't split on ':' because URLs contain "https:"
     let mut download_url = String::new();
+    let mut checksums_url = String::new();
     for part in json_text.split("\"browser_download_url\"") {
         // Part starts with: ": "https://..." or similar
         // Extract the first quoted string after the colon-space separator
@@ -610,26 +810,10 @@ pub fn get_latest_release() -> Result<(String, String), Box<dyn std::error::Erro
             let rest = after_colon.1.trim();
             if rest.starts_with('"') {
                 if let Some(url) = rest[1..].split('"').next() {
-                    if url.ends_with(&target_suffix) {
+                    if url.ends_with(target_suffix) {
                         download_url = url.to_string();
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: if specific arch not found, try any OS-appropriate asset.
-    if download_url.is_empty() {
-        for part in json_text.split("\"browser_download_url\"") {
-            if let Some(after_colon) = part.split_once(':') {
-                let rest = after_colon.1.trim();
-                if rest.starts_with('"') {
-                    if let Some(url) = rest[1..].split('"').next() {
-                        if is_os_asset_fallback(url) {
-                            download_url = url.to_string();
-                            break;
-                        }
+                    } else if url.ends_with("nano-checksums.txt") {
+                        checksums_url = url.to_string();
                     }
                 }
             }
@@ -637,17 +821,53 @@ pub fn get_latest_release() -> Result<(String, String), Box<dyn std::error::Erro
     }
 
     if version.is_empty() || download_url.is_empty() {
-        return Err(format!("Could not find download URL for this platform (version={}, url_empty={})", version, download_url.is_empty()).into());
+        return Err(format!(
+            "release {version} has no exact asset {target_suffix} for {}",
+            target_id()?
+        ).into());
     }
 
-    Ok((version, download_url))
+    Ok((version, download_url, checksums_url))
+}
+
+fn published_checksum(text: &str, asset: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        let filename = fields.next()?;
+        if fields.next().is_none()
+            && filename.trim_start_matches('*') == asset
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Some(digest.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn download_verified_release(
+    download_url: &str,
+    checksums_url: &str,
+) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
+    if checksums_url.is_empty() {
+        return Err("release has no nano-checksums.txt; refusing an unverified update".into());
+    }
+    let checksum_body = native_http_get(checksums_url)?;
+    let checksum_text = String::from_utf8(checksum_body)
+        .map_err(|_| "release checksum manifest is not UTF-8")?;
+    let expected = published_checksum(&checksum_text, target_asset_name()?)
+        .ok_or("release checksum manifest has no valid entry for this target")?;
+    let body = native_http_get(download_url)?;
+    if body.is_empty() || sha256_bytes(&body) != expected {
+        return Err("downloaded release asset failed SHA-256 verification".into());
+    }
+    Ok((body, expected))
 }
 
 /// Clean up any leftover temp files from previous updates
 fn cleanup_temp_files() {
-    if let Some(p) = update_temp_path() {
-        let _ = fs::remove_file(p);
-    }
+    remove_pending_update();
 }
 
 /// Update nano-rs from GitHub releases (cross-platform).
@@ -657,7 +877,7 @@ pub fn update_from_github(force: bool) -> Result<(), Box<dyn std::error::Error>>
 
     println!("Checking for updates...");
 
-    let (latest_version, download_url) = match get_latest_release() {
+    let (latest_version, download_url, checksums_url) = match get_latest_release() {
         Ok(v) => v,
         Err(e) => return Err(format!("Failed to check for updates: {}", e).into()),
     };
@@ -681,9 +901,9 @@ pub fn update_from_github(force: bool) -> Result<(), Box<dyn std::error::Error>>
     let temp_file = update_temp_path()
         .ok_or("could not determine a private cache directory (is HOME set?)")?;
 
-    let body = native_http_get(&download_url)?;
-    if body.is_empty() {
-        return Err("Downloaded update file is empty".into());
+    let (body, _expected_sha256) = download_verified_release(&download_url, &checksums_url)?;
+    if !validate_artifact(&body, target_id()?) {
+        return Err("downloaded release asset has the wrong executable format or architecture".into());
     }
     write_bytes_atomic(&temp_file, &body)?;
 
@@ -747,8 +967,7 @@ pub fn check_and_download_update() -> UpdateStatus {
         Some(p) => p,
         None => return UpdateStatus::None,
     };
-    let pending = temp_file.exists()
-        && fs::metadata(&temp_file).map(|m| m.len() > 0).unwrap_or(false);
+    let pending = temp_file.exists() || update_manifest_path().is_some_and(|path| path.exists());
 
     // Throttle network checks to once per day, but always surface an
     // already-downloaded pending update immediately.
@@ -757,44 +976,23 @@ pub fn check_and_download_update() -> UpdateStatus {
     }
     stamp_check();
 
-    // If update already downloaded and pending, report it without re-downloading
-    if temp_file.exists() {
-        if let Ok(metadata) = fs::metadata(&temp_file) {
-            if metadata.len() > 0 {
-                // A non-empty pending update exists. Act only on a definitive answer
-                // from GitHub: report it if newer, delete it only if CONFIRMED stale.
-                // On a transient API failure, keep it — don't discard a valid,
-                // already-downloaded update just because the check momentarily failed.
-                match get_latest_release() {
-                    Ok((latest_version, _)) => {
-                        let current_version = env!("CARGO_PKG_VERSION");
-                        if is_newer_version(&latest_version, current_version) {
-                            return UpdateStatus::Downloaded {
-                                version: latest_version,
-                                path: temp_file,
-                            };
-                        }
-                        // Confirmed not newer than current -- the pending file is
-                        // stale.  GitHub just told us there is nothing newer, so
-                        // delete it and return rather than issuing a second,
-                        // redundant get_latest_release() request on the fall-through.
-                        let _ = fs::remove_file(&temp_file);
-                        return UpdateStatus::None;
-                    }
-                    Err(_) => {
-                        // Couldn't reach GitHub; preserve the pending update for retry.
-                        return UpdateStatus::None;
-                    }
-                }
-            } else {
-                let _ = fs::remove_file(&temp_file);
+    // A pending executable is usable only together with a valid manifest,
+    // target match, newer version, executable header, owner, and digest.
+    if pending {
+        match load_valid_pending_update() {
+            Ok((path, manifest)) => {
+                return UpdateStatus::Downloaded {
+                    version: manifest.version,
+                    path,
+                };
             }
+            Err(_) => remove_pending_update(),
         }
     }
 
     let current_version = env!("CARGO_PKG_VERSION");
 
-    let (latest_version, download_url) = match get_latest_release() {
+    let (latest_version, download_url, checksums_url) = match get_latest_release() {
         Ok(v) => v,
         Err(_) => return UpdateStatus::None,
     };
@@ -803,9 +1001,9 @@ pub fn check_and_download_update() -> UpdateStatus {
         return UpdateStatus::None;
     }
 
-    match native_http_get(&download_url) {
-        Ok(body) if !body.is_empty() => {
-            if write_bytes_atomic(&temp_file, &body).is_ok() {
+    match download_verified_release(&download_url, &checksums_url) {
+        Ok((body, expected_sha256)) => {
+            if store_pending_update(&body, &latest_version, &expected_sha256).is_ok() {
                 UpdateStatus::Downloaded {
                     version: latest_version,
                     path: temp_file,
@@ -835,76 +1033,144 @@ pub fn spawn_update_check() -> std::sync::mpsc::Receiver<UpdateStatus> {
 
 /// Check for and apply a pending update on startup (call before the UI starts).
 ///
-/// Cross-platform: replaces the currently-running executable using the rename
-/// trick (rename the running file to `.old`, copy the new file into place). On
-/// both Windows and Unix the running process keeps executing the old inode; the
-/// new binary takes effect on the next launch. Returns true if an update was
-/// applied or is pending.
+/// Cross-platform: atomically replaces the currently-running executable with a
+/// validated, target-specific pending update.  On Unix and Windows the running
+/// process keeps executing its already-open image; the new binary takes effect
+/// on the next launch. Returns true if an update was applied or remains pending.
 pub fn apply_pending_update() -> bool {
-    // Only ever trust a pending file from our private cache dir.
-    let update_file = match update_temp_path() {
-        Some(p) => p,
-        None => return false,
-    };
-
     // Get the currently running executable - this is what we need to update
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
     };
 
-    if !update_file.exists() {
-        // Clean up any old backup file from a previous update.
-        let _ = fs::remove_file(backup_path_for(&current_exe));
+    let any_pending = update_temp_path().is_some_and(|path| path.exists())
+        || update_manifest_path().is_some_and(|path| path.exists());
+    if !any_pending {
         return false;
     }
 
-    // Verify update file integrity
-    if let Ok(metadata) = fs::metadata(&update_file) {
-        if metadata.len() == 0 {
-            let _ = fs::remove_file(&update_file);
+    let (update_file, _manifest) = match load_valid_pending_update() {
+        Ok(valid) => valid,
+        Err(error) => {
+            eprintln!("Ignoring invalid pending update: {error}");
+            remove_pending_update();
             return false;
         }
-    } else {
-        return false;
-    }
-
-    // SECURITY (Unix): only trust an update file owned by the current user. The
-    // file lives in our 0700 cache dir, but verify ownership too so we never
-    // copy someone else's binary over our executable and mark it +x.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let Ok(md) = fs::metadata(&update_file) {
-            let myuid = unsafe { libc::geteuid() };
-            if md.uid() != myuid {
-                eprintln!("Ignoring pending update with unexpected owner.");
-                let _ = fs::remove_file(&update_file);
-                return false;
-            }
-        }
-    }
+    };
 
     let install_path = current_exe;
-
-    // If install path doesn't exist, just copy directly
-    if !install_path.exists() {
-        if copy_file_atomic(&update_file, &install_path).is_ok() {
-            let _ = fs::remove_file(&update_file);
-            eprintln!("Update installed successfully!");
-            return true;
-        }
-        return false;
-    }
 
     if let Err(e) = copy_file_atomic(&update_file, &install_path) {
         eprintln!("Update pending (cannot replace running executable: {})", e);
         return true; // Return true to skip re-download
     }
 
-    // Clean up update file ONLY on success
-    let _ = fs::remove_file(&update_file);
+    // Clean up the executable and its binding manifest only after replacement.
+    remove_pending_update();
 
     eprintln!("Update applied successfully!");
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_manifest_round_trips_and_rejects_extra_fields() {
+        let manifest = PendingManifest {
+            version: "1.2.3".to_string(),
+            target: "linux-x86_64".to_string(),
+            asset: "nano-linux-amd64".to_string(),
+            sha256: "ab".repeat(32),
+        };
+        assert_eq!(PendingManifest::decode(&manifest.encode()), Some(manifest));
+        assert!(PendingManifest::decode(
+            "version=1.2.3\ntarget=linux-x86_64\nasset=nano-linux-amd64\nsha256=bad\n"
+        ).is_none());
+        assert!(PendingManifest::decode(
+            &format!("{}unexpected=value\n", PendingManifest {
+                version: "1.2.3".to_string(),
+                target: "linux-x86_64".to_string(),
+                asset: "nano-linux-amd64".to_string(),
+                sha256: "ab".repeat(32),
+            }.encode())
+        ).is_none());
+    }
+
+    #[test]
+    fn artifact_validation_checks_format_and_architecture() {
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+        assert!(validate_artifact(&elf, "linux-x86_64"));
+        assert!(!validate_artifact(&elf, "linux-aarch64"));
+
+        let mut pe = vec![0u8; 128];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&64u32.to_le_bytes());
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        pe[68..70].copy_from_slice(&0xaa64u16.to_le_bytes());
+        assert!(validate_artifact(&pe, "windows-aarch64"));
+        assert!(!validate_artifact(&pe, "windows-x86_64"));
+    }
+
+    #[test]
+    fn atomic_copy_does_not_touch_adjacent_old_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = directory.path().join("nano");
+        let adjacent = directory.path().join("nano.old");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&target, b"old executable").unwrap();
+        fs::write(&adjacent, b"user data").unwrap();
+
+        copy_file_atomic(&source, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(fs::read(&adjacent).unwrap(), b"user data");
+    }
+
+    #[test]
+    fn sha256_is_stable() {
+        assert_eq!(
+            sha256_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn checksum_manifest_requires_exact_asset_and_digest() {
+        let digest = "12".repeat(32);
+        let text = format!(
+            "{digest}  nano-linux-amd64\n{}  nano-linux-arm64\n",
+            "34".repeat(32)
+        );
+        assert_eq!(
+            published_checksum(&text, "nano-linux-amd64"),
+            Some(digest)
+        );
+        assert_eq!(published_checksum(&text, "nano-amd64.exe"), None);
+        assert_eq!(published_checksum("not-a-digest  nano-linux-amd64", "nano-linux-amd64"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_does_not_wait_for_descendant_held_output() {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg("sleep 2 & printf 'nano-rs 1.2.3\\n'");
+        let started = std::time::Instant::now();
+
+        let output = command_output_with_timeout(
+            command,
+            std::time::Duration::from_millis(500),
+        ).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"nano-rs 1.2.3\n");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 }

@@ -449,181 +449,152 @@ pub const SOLO_SIDESCROLL:    u32 = 51;
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Line storage: a refcounted slab arena (custom Rc/Weak over a Vec).
+// Line storage: runtime-checked Rc/Weak handles.
 //
-// Replaces `Rc<RefCell<LineNode>>`.  Nodes live in a single contiguous arena
-// (`AppState.lines`) instead of scattered heap allocations: no per-line malloc on
-// load and better locality.  `LinePtr` keeps EXACT `Rc` semantics — clone bumps a
-// strong refcount, drop lowers it, and a node is freed only when its last strong
-// handle drops — so the buffer/cutbuffer/undo shared-ownership behaviour is
-// preserved bit-for-bit (full parity).  Back-links use `LineWeak` (non-owning) to
-// avoid refcount cycles, exactly as the old `Weak` did.  `borrow()`/`borrow_mut()`
-// return deref guards so the ~860 existing access sites are unchanged.
+// Each line owns its allocation, so growing the buffer cannot invalidate a live
+// borrow.  RefCell guards enforce shared/mutable exclusivity, while weak back-links
+// avoid reference cycles.  The small wrappers preserve the port's existing
+// pointer-identity helpers without exposing the inner Rc.
 // ---------------------------------------------------------------------------
 
-/// A strong, refcounted handle to a `LineNode` in the arena (was `Rc<RefCell<…>>`).
-#[derive(PartialEq, Eq, Hash, Debug)]
-pub struct LinePtr {
-    pub idx: u32,
-    pub generation: u32,
-}
-/// A weak (non-owning) handle (was `Weak<RefCell<…>>`); used for back-links.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct LineWeak {
-    pub idx: u32,
-    pub generation: u32,
-}
+/// A strong, refcounted handle to a `LineNode`.
+#[derive(Clone)]
+pub struct LinePtr(std::rc::Rc<std::cell::RefCell<LineNode>>);
+
+/// A weak (non-owning) handle used for back-links.
+#[derive(Clone)]
+pub struct LineWeak(std::rc::Weak<std::cell::RefCell<LineNode>>);
 
 impl LinePtr {
     #[inline(always)]
-    pub fn borrow(&self) -> LineRef { LineRef { idx: self.idx } }
+    pub fn borrow(&self) -> std::cell::Ref<'_, LineNode> { self.0.borrow() }
     #[inline(always)]
-    pub fn borrow_mut(&self) -> LineRefMut { LineRefMut { idx: self.idx } }
-    /// Stable identity (slot index) — replaces `Rc::ptr_eq` / `Rc::as_ptr`.
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, LineNode> { self.0.borrow_mut() }
+    /// Stable allocation identity, used only for pointer equality.
     #[inline(always)]
-    pub fn as_ptr(&self) -> u32 { self.idx }
-    /// Non-owning back-link handle (was `Rc::downgrade`).
+    pub fn as_ptr(&self) -> *const std::cell::RefCell<LineNode> {
+        std::rc::Rc::as_ptr(&self.0)
+    }
+    /// Create a non-owning back-link handle.
     #[inline(always)]
-    pub fn downgrade(this: &LinePtr) -> LineWeak { LineWeak { idx: this.idx, generation: this.generation } }
-    /// Two strong handles point at the same node? (was `Rc::ptr_eq`.)
+    pub fn downgrade(this: &LinePtr) -> LineWeak {
+        LineWeak(std::rc::Rc::downgrade(&this.0))
+    }
+    /// Whether two strong handles point at the same node.
     #[inline(always)]
-    pub fn ptr_eq(a: &LinePtr, b: &LinePtr) -> bool { a.idx == b.idx }
+    pub fn ptr_eq(a: &LinePtr, b: &LinePtr) -> bool { std::rc::Rc::ptr_eq(&a.0, &b.0) }
 }
 
-impl Clone for LinePtr {
-    #[inline(always)]
-    fn clone(&self) -> LinePtr {
-        crate::global::state_mut().lines.incref(self.idx);
-        LinePtr { idx: self.idx, generation: self.generation }
+impl PartialEq for LinePtr {
+    fn eq(&self, other: &Self) -> bool { Self::ptr_eq(self, other) }
+}
+impl Eq for LinePtr {}
+impl std::hash::Hash for LinePtr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_ptr().hash(state);
     }
 }
-impl Drop for LinePtr {
-    #[inline]
-    fn drop(&mut self) {
-        // During thread-local teardown at process exit, STATE is itself being
-        // destroyed; `try_with` returns Err — skip the decref (the whole arena is
-        // being freed wholesale, so refcount bookkeeping is moot, and skipping
-        // also avoids recursing the linked-list drop through a dying TLS).
-        let _ = crate::global::STATE.try_with(|s| {
-            unsafe { &mut *(s.borrow_mut() as *mut crate::global::AppState) }.lines.decref(self.idx);
-        });
+impl std::fmt::Debug for LinePtr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LinePtr").field(&self.as_ptr()).finish()
     }
 }
 
 impl LineWeak {
-    /// Try to obtain a strong handle (was `Weak::upgrade`); None if the node is gone.
+    /// Try to obtain a strong handle; returns None after the last owner drops.
     #[inline(always)]
     pub fn upgrade(&self) -> Option<LinePtr> {
-        crate::global::state_mut().lines.upgrade(self.idx, self.generation)
+        self.0.upgrade().map(LinePtr)
+    }
+}
+impl PartialEq for LineWeak {
+    fn eq(&self, other: &Self) -> bool { std::rc::Weak::ptr_eq(&self.0, &other.0) }
+}
+impl Eq for LineWeak {}
+impl std::hash::Hash for LineWeak {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.as_ptr().hash(state);
+    }
+}
+impl std::fmt::Debug for LineWeak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LineWeak").field(&self.0.as_ptr()).finish()
     }
 }
 
-/// Read-deref guard over the arena.  Holds only the slot index and re-resolves on
-/// every access, so the slab `Vec` reallocating (on insert) can't dangle it.
-pub struct LineRef { idx: u32 }
-impl std::ops::Deref for LineRef {
-    type Target = LineNode;
-    #[inline(always)]
-    fn deref(&self) -> &LineNode { crate::global::state().lines.node(self.idx) }
-}
-/// Write-deref guard; see `LineRef`.
-pub struct LineRefMut { idx: u32 }
-impl std::ops::Deref for LineRefMut {
-    type Target = LineNode;
-    #[inline(always)]
-    fn deref(&self) -> &LineNode { crate::global::state().lines.node(self.idx) }
-}
-impl std::ops::DerefMut for LineRefMut {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut LineNode { crate::global::state_mut().lines.node_mut(self.idx) }
-}
-
-struct LineSlot {
-    strong: u32,            // strong refcount; 0 == free slot
-    generation: u32,               // bumped on free — validates weak upgrades
-    node: Option<LineNode>, // Some while live
-}
-
-/// The refcounted slab holding every `LineNode` (all buffers, cutbuffer, undo
-/// snapshots, completion, histories).
-pub struct LineArena {
-    slots: Vec<LineSlot>,
-    free: Vec<u32>,
-}
+/// Allocation facade retained on AppState so existing construction sites stay
+/// centralized.  Ownership and borrow tracking live in each returned LinePtr.
+#[derive(Debug, Default)]
+pub struct LineArena;
 
 impl LineArena {
-    pub const fn new() -> Self { LineArena { slots: Vec::new(), free: Vec::new() } }
+    pub const fn new() -> Self { LineArena }
 
-    /// Allocate a node with strong refcount 1, returning an owning handle.
+    /// Allocate an independently owned, runtime-borrow-checked line.
     #[inline]
     pub fn alloc(&mut self, node: LineNode) -> LinePtr {
-        let idx = if let Some(i) = self.free.pop() {
-            let s = &mut self.slots[i as usize];
-            s.strong = 1;
-            s.node = Some(node);
-            i
-        } else {
-            let i = self.slots.len() as u32;
-            self.slots.push(LineSlot { strong: 1, generation: 0, node: Some(node) });
-            i
-        };
-        LinePtr { idx, generation: self.slots[idx as usize].generation }
+        LinePtr(std::rc::Rc::new(std::cell::RefCell::new(node)))
     }
 
+    /// Rc allocations are independent, so there is no backing Vec to reserve.
     #[inline(always)]
-    pub fn incref(&mut self, idx: u32) {
-        self.slots[idx as usize].strong += 1;
-    }
-
-    #[inline(always)]
-    pub fn decref(&mut self, idx: u32) {
-        let s = &mut self.slots[idx as usize];
-        s.strong -= 1;
-        if s.strong == 0 {
-            s.generation = s.generation.wrapping_add(1);
-            // Take the node out and free the slot BEFORE dropping the node, so the
-            // node's own next/prev handles drop against a consistent arena.
-            let node = s.node.take();
-            self.free.push(idx);
-            drop(node);
-        }
-    }
-
-    #[inline(always)]
-    pub fn upgrade(&mut self, idx: u32, generation: u32) -> Option<LinePtr> {
-        let s = self.slots.get_mut(idx as usize)?;
-        if s.strong > 0 && s.generation == generation {
-            s.strong += 1;
-            Some(LinePtr { idx, generation })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn node(&self, idx: u32) -> &LineNode {
-        self.slots[idx as usize].node.as_ref().expect("live line node")
-    }
-    #[inline(always)]
-    pub fn node_mut(&mut self, idx: u32) -> &mut LineNode {
-        self.slots[idx as usize].node.as_mut().expect("live line node")
-    }
-
-    /// Pre-grow the slab so a bulk insert (e.g. a file read) doesn't repeatedly
-    /// reallocate and memcpy the backing Vec. Approximate; the arena still grows
-    /// on demand if the estimate is low.
-    pub fn reserve(&mut self, additional: usize) {
-        self.slots.reserve(additional);
-    }
-
-    /// Count of live nodes — for debug invariants.
-    pub fn live_count(&self) -> usize {
-        self.slots.iter().filter(|s| s.strong > 0).count()
-    }
+    pub fn reserve(&mut self, _additional: usize) {}
 }
 
-impl Default for LineArena {
-    fn default() -> Self { Self::new() }
+#[cfg(test)]
+mod line_handle_tests {
+    use super::{LineArena, LineNode, LinePtr};
+
+    fn node(data: &str) -> LineNode {
+        LineNode {
+            data: data.to_owned(),
+            lineno: 1,
+            next: None,
+            prev: None,
+            #[cfg(feature = "color")]
+            multidata: Vec::new(),
+            has_anchor: false,
+        }
+    }
+
+    #[test]
+    fn allocation_cannot_invalidate_a_live_line_borrow() {
+        let mut arena = LineArena::new();
+        let first = arena.alloc(node("stable"));
+        let held = first.borrow();
+        let data = held.data.as_str();
+
+        for index in 0..256 {
+            let _ = arena.alloc(node(&index.to_string()));
+        }
+
+        assert_eq!(data, "stable");
+    }
+
+    #[test]
+    fn duplicate_mutable_line_borrows_are_rejected() {
+        let mut arena = LineArena::new();
+        let line = arena.alloc(node("before"));
+        let mut first = line.borrow_mut();
+
+        let overlap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = line.borrow_mut();
+        }));
+        assert!(overlap.is_err(), "overlapping line mutation must be rejected");
+
+        first.data = "after".to_owned();
+        drop(first);
+        assert_eq!(line.borrow().data, "after");
+    }
+
+    #[test]
+    fn weak_line_handle_expires_with_the_last_owner() {
+        let mut arena = LineArena::new();
+        let line = arena.alloc(node("temporary"));
+        let weak = LinePtr::downgrade(&line);
+        drop(line);
+        assert!(weak.upgrade().is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -989,8 +960,11 @@ pub struct FileStat {
 /// C: typedef struct openfilestruct { … } openfilestruct;
 #[derive(Debug)]
 pub struct OpenFileStruct {
-    /// The file's name (may be empty for a new unsaved buffer).
+    /// Lossy, printable form of the file's name (empty for an unsaved buffer).
     pub filename: String,
+    /// Authoritative operating-system path.  Filesystem operations must use
+    /// this value; `filename` is only for prompts and diagnostics.
+    pub filename_path: std::path::PathBuf,
     /// The first line of the buffer.
     pub filetop: Option<LinePtr>,
     /// The last line of the buffer.
@@ -1026,11 +1000,25 @@ pub struct OpenFileStruct {
     pub fmt: FormatType,
     /// Path of the lockfile we created for this buffer (if any).
     pub lock_filename: Option<String>,
+    /// Authoritative lockfile path corresponding to `lock_filename`.
+    pub lock_path: Option<std::path::PathBuf>,
+    /// The exclusively acquired lock descriptor.  Keeping it open makes later
+    /// modified-state updates target the same object instead of reopening a
+    /// potentially replaced pathname.
+    #[cfg(not(feature = "tiny"))]
+    pub lock_file: Option<std::fs::File>,
     /// The top of the undo list for this buffer.
     pub undotop: Option<Box<UndoStruct>>,
     /// The current (next available) undo level.
+    ///
+    /// This is an identity cursor into `undotop`'s Box chain.  Any cursor that
+    /// will be used for mutation must be obtained through `as_deref_mut()` (or
+    /// through an existing cursor with mutable provenance), never by casting a
+    /// shared `&UndoStruct`.  Removing records must re-resolve the retained
+    /// cursor through the owned mutable chain before storing it here.
     pub current_undo: *mut UndoStruct,
-    /// The undo item at which the buffer was last saved.
+    /// The undo item at which the buffer was last saved (identity comparison
+    /// only; this pointer is never dereferenced).
     pub last_saved: *mut UndoStruct,
     /// The type of the last action performed by the user.
     pub last_action: UndoType,
@@ -1055,6 +1043,7 @@ impl Default for OpenFileStruct {
     fn default() -> Self {
         OpenFileStruct {
             filename: String::new(),
+            filename_path: std::path::PathBuf::new(),
             filetop: None,
             filebot: None,
             edittop: None,
@@ -1073,6 +1062,9 @@ impl Default for OpenFileStruct {
             softmark: false,
             fmt: FormatType::Unspecified,
             lock_filename: None,
+            lock_path: None,
+            #[cfg(not(feature = "tiny"))]
+            lock_file: None,
             undotop: None,
             current_undo: std::ptr::null_mut(),
             last_saved: std::ptr::null_mut(),

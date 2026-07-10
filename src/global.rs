@@ -3,21 +3,22 @@
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
 
-use std::cell::UnsafeCell;
+use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
 use crate::definitions::*;
 
 // ---------------------------------------------------------------------------
-// Re-entrant global cell — mimics C global variable semantics.
-// Unlike RefCell, this does NOT panic on nested borrow/borrow_mut calls.
-// This is safe because nano is single-threaded: one thread, one AppState.
+// Runtime-checked global state cell.
+//
+// Nano remains single-threaded, but Rust's reference-aliasing rules still apply.
+// RefCell makes every safe access carry a borrow guard, so overlapping shared and
+// mutable access is rejected instead of manufacturing aliased references.
 // ---------------------------------------------------------------------------
-pub struct NanoCell(UnsafeCell<AppState>);
-// SAFETY: nano is strictly single-threaded; no concurrent access ever occurs.
-unsafe impl Sync for NanoCell {}
+pub struct NanoCell(RefCell<AppState>);
 impl NanoCell {
-    const fn new(val: AppState) -> Self { Self(UnsafeCell::new(val)) }
-    #[inline] pub fn borrow(&self)     -> &AppState     { unsafe { &*self.0.get() } }
-    #[inline] pub fn borrow_mut(&self) -> &mut AppState { unsafe { &mut *self.0.get() } }
+    const fn new(val: AppState) -> Self { Self(RefCell::new(val)) }
+    #[inline] pub fn borrow(&self) -> Ref<'_, AppState> { self.0.borrow() }
+    #[inline] pub fn borrow_mut(&self) -> RefMut<'_, AppState> { self.0.borrow_mut() }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,8 +136,8 @@ impl NanoWindow {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
-    /// Backing storage for every line node (all buffers, cutbuffer, undo
-    /// snapshots, completion, histories).  LinePtr/LineWeak index into this.
+    /// Centralized allocator facade for line nodes.  Each returned LinePtr owns
+    /// its allocation and enforces borrowing independently.
     pub lines: crate::definitions::LineArena,
     // --- Signal flags (volatile sig_atomic_t in C) ---
     /// Set to true whenever SIGWINCH occurs (not NANO_TINY only).
@@ -226,6 +227,8 @@ pub struct AppState {
 
     /// The current browser directory when trying to do tab completion.
     pub present_path: Option<String>,
+    /// Authoritative operating-system path corresponding to `present_path`.
+    pub present_path_raw: Option<std::path::PathBuf>,
 
     // --- Feature flags array ---
     /// Our flags array, containing the states of all global options.
@@ -385,9 +388,15 @@ pub struct AppState {
     #[cfg(not(feature = "tiny"))]
     /// The directory where backup files are stored.
     pub backup_dir: Option<String>,
+    #[cfg(not(feature = "tiny"))]
+    /// Authoritative backup directory path.
+    pub backup_dir_raw: Option<std::path::PathBuf>,
     #[cfg(feature = "operatingdir")]
     /// The path to the confining "operating" directory.
     pub operating_dir: Option<String>,
+    #[cfg(feature = "operatingdir")]
+    /// Authoritative operating-directory path.
+    pub operating_dir_raw: Option<std::path::PathBuf>,
 
     // --- Spell checker ---
     #[cfg(feature = "speller")]
@@ -487,14 +496,21 @@ pub struct AppState {
     // --- Paths ---
     /// The user's home directory.
     pub homedir: Option<String>,
+    /// Authoritative home-directory path.
+    pub homedir_raw: Option<std::path::PathBuf>,
     /// The directory for nano's history files.
     pub statedir: Option<String>,
+    /// Authoritative history-directory path.
+    pub statedir_raw: Option<std::path::PathBuf>,
     #[cfg(any(feature = "nanorc", feature = "histories"))]
     /// An error message about nanorc/history files.
     pub startup_problem: Option<String>,
     #[cfg(feature = "nanorc")]
     /// The argument of the --rcfile option.
     pub custom_nanorc: Option<String>,
+    #[cfg(feature = "nanorc")]
+    /// Authoritative custom nanorc path.
+    pub custom_nanorc_raw: Option<std::path::PathBuf>,
     #[cfg(feature = "nanorc")]
     /// The name of a function between braces in a string bind.
     pub commandname: Option<String>,
@@ -568,6 +584,7 @@ impl AppState {
             didfind: 0,
 
             present_path: None,
+            present_path_raw: None,
 
             flags: [0u32; 4],
 
@@ -682,8 +699,12 @@ impl AppState {
 
             #[cfg(not(feature = "tiny"))]
             backup_dir: None,
+            #[cfg(not(feature = "tiny"))]
+            backup_dir_raw: None,
             #[cfg(feature = "operatingdir")]
             operating_dir: None,
+            #[cfg(feature = "operatingdir")]
+            operating_dir_raw: None,
 
             #[cfg(feature = "speller")]
             alt_speller: None,
@@ -745,11 +766,15 @@ impl AppState {
             interface_color_rgb: [(-1i16, -1i16); NUMBER_OF_ELEMENTS + 1],
 
             homedir: None,
+            homedir_raw: None,
             statedir: None,
+            statedir_raw: None,
             #[cfg(any(feature = "nanorc", feature = "histories"))]
             startup_problem: None,
             #[cfg(feature = "nanorc")]
             custom_nanorc: None,
+            #[cfg(feature = "nanorc")]
+            custom_nanorc_raw: None,
             #[cfg(feature = "nanorc")]
             commandname: None,
             #[cfg(feature = "nanorc")]
@@ -806,7 +831,7 @@ impl AppState {
         // Create a new empty line and append it to filebot.
         let lineno = self.openfile.as_ref()
             .and_then(|f| f.filebot.as_ref())
-            .map(|lb| self.lines.node(lb.idx).lineno + 1)
+            .map(|lb| lb.borrow().lineno + 1)
             .unwrap_or(1);
         let new_line = self.lines.alloc(LineNode {
             data: String::new(),
@@ -919,51 +944,114 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    // const-init: with a const initializer the thread_local! macro drops the
-    // per-access lazy-initialization guard that a runtime initializer requires.
-    pub static STATE: NanoCell = const { NanoCell::new(AppState::new()) };
+    pub static STATE: Rc<NanoCell> = Rc::new(NanoCell::new(AppState::new()));
 }
 
-/// Direct read access to the global `AppState`.
+/// Owning shared-borrow guard for the thread's AppState.  The Rc keeps the
+/// RefCell allocation alive even if a guard is retained during TLS teardown.
+pub struct StateRef {
+    // Fields drop in declaration order: release the borrow before its owner.
+    borrow: Ref<'static, AppState>,
+    _owner: Rc<NanoCell>,
+}
+
+impl std::ops::Deref for StateRef {
+    type Target = AppState;
+    fn deref(&self) -> &Self::Target { &self.borrow }
+}
+
+/// Owning exclusive-borrow guard for the thread's AppState.
+pub struct StateRefMut {
+    // Fields drop in declaration order: release the borrow before its owner.
+    borrow: RefMut<'static, AppState>,
+    _owner: Rc<NanoCell>,
+}
+
+impl std::ops::Deref for StateRefMut {
+    type Target = AppState;
+    fn deref(&self) -> &Self::Target { &self.borrow }
+}
+
+impl std::ops::DerefMut for StateRefMut {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.borrow }
+}
+
+/// Direct read access to the current thread's global `AppState`.
 ///
-/// SAFETY: nano edits strictly single-threaded.  This returns a `&'static
-/// AppState` derived from the thread-local `STATE`'s `UnsafeCell` — a deliberate
-/// lifetime extension that is valid for the main thread's lifetime.  The returned
-/// reference must NEVER be moved into the background update thread (installer.rs),
-/// which has its own `STATE` and never touches `AppState`.  Overlapping
-/// `state()` / `state_mut()` views follow the same aliasing contract as the
-/// original `with_state` closures (C-style global access), NOT Rust's `&mut`
-/// uniqueness rule.
+/// The returned guard keeps a runtime shared borrow active until it is dropped.
+/// `Ref` is not `Send`, so the guard cannot escape to the updater thread.  The
+/// guard owns the state cell, so it cannot outlive the allocation it borrows.
 #[inline(always)]
-pub fn state() -> &'static AppState {
-    STATE.with(|s| unsafe { &*(s.borrow() as *const AppState) })
+pub fn state() -> StateRef {
+    STATE.with(|s| {
+        let owner = Rc::clone(s);
+        let borrow = owner.borrow();
+        // SAFETY: the returned StateRef owns `owner`, keeping the RefCell at a
+        // stable address until after `borrow` is dropped.  Ref is !Send, and the
+        // private field prevents the extended lifetime from escaping the guard.
+        let borrow = unsafe {
+            std::mem::transmute::<Ref<'_, AppState>, Ref<'static, AppState>>(borrow)
+        };
+        StateRef { borrow, _owner: owner }
+    })
 }
 
-/// Direct mutable access to the global `AppState`.  See `state()` for the safety
-/// contract; treat overlapping mutable views like overlapping C global writes.
+/// Direct mutable access to the current thread's global `AppState`.
+/// Overlapping access is rejected by `RefCell`'s runtime borrow checking.
 #[inline(always)]
-#[allow(clippy::mut_from_ref)]
-pub fn state_mut() -> &'static mut AppState {
-    STATE.with(|s| unsafe { &mut *(s.borrow_mut() as *mut AppState) })
+pub fn state_mut() -> StateRefMut {
+    STATE.with(|s| {
+        let owner = Rc::clone(s);
+        let borrow = owner.borrow_mut();
+        // SAFETY: as in state(), the private owning guard keeps the borrowed
+        // allocation alive and drops the RefMut before its final Rc.
+        let borrow = unsafe {
+            std::mem::transmute::<RefMut<'_, AppState>, RefMut<'static, AppState>>(borrow)
+        };
+        StateRefMut { borrow, _owner: owner }
+    })
 }
 
-/// Read access to AppState — thin shim over `state()`, kept so the migration to
-/// direct accessors can stay incremental.  Re-entrant safe.
+/// Scoped read access to AppState.
 #[inline(always)]
 pub fn with_state<F, R>(f: F) -> R
 where
     F: FnOnce(&AppState) -> R,
 {
-    f(state())
+    STATE.with(|s| f(&s.borrow()))
 }
 
-/// Write access to AppState — thin shim over `state_mut()`.  Re-entrant safe.
+/// Scoped mutable access to AppState.
 #[inline(always)]
 pub fn with_state_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut AppState) -> R,
 {
-    f(state_mut())
+    STATE.with(|s| f(&mut s.borrow_mut()))
+}
+
+#[cfg(test)]
+mod appstate_access_tests {
+    use super::{state, state_mut};
+
+    /// Safe global access must not allow a shared view to remain usable across
+    /// a mutation of the same `AppState`.
+    #[test]
+    fn shared_access_cannot_alias_mutable_access() {
+        let shared = state();
+        let original = shared.final_status;
+        let overlap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state_mut().final_status = original.wrapping_add(1);
+        }));
+        assert!(overlap.is_err(), "overlapping mutation must be rejected");
+        assert_eq!(shared.final_status, original);
+        drop(shared);
+
+        let changed = original.wrapping_add(1);
+        state_mut().final_status = changed;
+        assert_eq!(state().final_status, changed);
+        state_mut().final_status = original;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +1587,11 @@ pub fn shortcut_init() {
         s.exitfunc = None;
         s.tailsc_toggle_counter = 0;
         s.tailsc_last_toggle = 0;
+        #[cfg(feature = "nanorc")]
+        {
+            s.commandname = None;
+            s.planted_shortcut = None;
+        }
     });
 
     // ---- Help descriptions ----

@@ -6,12 +6,21 @@ on:
   pull_request:
     branches: [master, rust-port]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  default:
+    name: Default tests, Clippy, and release build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -19,27 +28,138 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
-      - name: Build (default features)
-        run: cargo build --verbose
+      - name: Cache Cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-default-${{ hashFiles('Cargo.toml') }}
 
-      - name: Build (no default features — feature-flag hygiene)
-        run: cargo build --no-default-features --verbose
+      - name: Check default production build
+        run: cargo check --all-targets --verbose
 
-      - name: Build (release)
+      - name: Run default-feature tests
+        run: cargo test --all-targets --verbose
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build release binary
         run: cargo build --release --verbose
 
-  windows-check:
+  feature-matrix:
+    name: Feature tests (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-default-features
+            cargo_args: --no-default-features
+          - name: tiny
+            cargo_args: --no-default-features --features tiny
+          - name: browser
+            cargo_args: --no-default-features --features browser
+          - name: libmagic
+            cargo_args: --features libmagic
+            needs_libmagic: true
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust (with Windows MSVC target)
+      - name: Install libmagic development files
+        if: matrix.needs_libmagic == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libmagic-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.name }}-${{ hashFiles('Cargo.toml') }}
+
+      - name: Check feature configuration
+        run: cargo check --all-targets ${{ matrix.cargo_args }} --verbose
+
+      - name: Test feature configuration
+        run: cargo test --all-targets ${{ matrix.cargo_args }} --verbose
+
+  windows-msvc:
+    name: Windows MSVC native tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Type-check Windows target
-        run: cargo check --target x86_64-pc-windows-msvc
+      - name: Cache Cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msvc-${{ hashFiles('Cargo.toml') }}
+
+      - name: Check native Windows build
+        run: cargo check --all-targets --target x86_64-pc-windows-msvc --verbose
+
+      - name: Run native Windows tests
+        run: cargo test --all-targets --target x86_64-pc-windows-msvc --verbose
+
+      - name: Check minimal Windows build
+        run: cargo check --all-targets --target x86_64-pc-windows-msvc --no-default-features --verbose
+
+  miri:
+    name: Miri state, text, rendering, and input soundness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install nightly Rust and Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Prepare Miri sysroot
+        run: cargo miri setup
+
+      - name: Check AppState access under Miri
+        run: cargo miri test global::appstate_access_tests -- --test-threads=1
+
+      - name: Check line handles under Miri
+        run: cargo miri test definitions::line_handle_tests -- --test-threads=1
+
+      - name: Check nested help borrows under Miri
+        run: cargo miri test help::tests -- --test-threads=1
+
+      - name: Run rendering and input regression tests under Miri
+        run: cargo miri test winio::tests -- --test-threads=1
+
+      # The real-filesystem replacement test is ignored under Miri in the
+      # source; the equivalent in-memory undo/redo test remains in this suite.
+      - name: Run text and undo regression tests under Miri
+        run: cargo miri test text::tests -- --test-threads=1

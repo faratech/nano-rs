@@ -18,8 +18,9 @@ use crate::global::STATE;
 use crate::UNSET;
 
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write as IoWrite};
+use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
 use std::time::SystemTime;
+use sha2::{Digest, Sha256};
 
 const SEARCH_HISTORY: &str = "search_history";
 const POSITION_HISTORY: &str = "filepos_history";
@@ -33,12 +34,109 @@ thread_local! {
     /// The name of the positions-register file.
     static REGISTERNAME: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
 
-    /// The last time the positions-register file was written (Unix seconds).
-    static LATEST_TIMESTAMP: std::cell::RefCell<i64> = std::cell::RefCell::new(942_927_132);
+    /// Identity of the positions-register snapshot currently in memory.
+    /// Timestamp and length make the common check cheap to understand, while
+    /// the digest catches rewrites on coarse-timestamp filesystems and
+    /// same-length updates by another nano process.
+    static LATEST_STAMP: std::cell::RefCell<Option<PositionFileStamp>> = const {
+        std::cell::RefCell::new(None)
+    };
 
     /// A list of recently opened files with their last cursor position.
     static POSITIONS_REGISTER: std::cell::RefCell<Vec<PositionRecord>> =
         std::cell::RefCell::new(Vec::new());
+}
+
+const MAX_POSITION_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PositionFileStamp {
+    modified: Option<SystemTime>,
+    metadata_len: u64,
+    digest: [u8; 32],
+}
+
+struct PositionFileSnapshot {
+    bytes: Vec<u8>,
+    stamp: PositionFileStamp,
+}
+
+fn stamp_position_bytes(
+    modified: Option<SystemTime>,
+    metadata_len: u64,
+    bytes: &[u8],
+) -> PositionFileStamp {
+    PositionFileStamp {
+        modified,
+        metadata_len,
+        digest: Sha256::digest(bytes).into(),
+    }
+}
+
+fn read_position_snapshot(path: &str) -> io::Result<PositionFileSnapshot> {
+    let file = File::open(path)?;
+    let initial_len = file.metadata()?.len();
+    if initial_len > MAX_POSITION_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "positions register is unreasonably large",
+        ));
+    }
+
+    // Read one extra byte so growth after the metadata check cannot silently
+    // bypass the bound.
+    let mut bytes = Vec::with_capacity(initial_len as usize);
+    (&file)
+        .take(MAX_POSITION_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_POSITION_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "positions register is unreasonably large",
+        ));
+    }
+
+    // Read metadata from the same open file description after consuming the
+    // snapshot, avoiding a pathname replacement race between data and stamp.
+    // The digest remains decisive if an in-place writer leaves timestamp and
+    // length unchanged.
+    let metadata = file.metadata()?;
+    let stamp = stamp_position_bytes(metadata.modified().ok(), metadata.len(), &bytes);
+    Ok(PositionFileSnapshot { bytes, stamp })
+}
+
+fn records_from_position_bytes(bytes: &[u8]) -> Vec<PositionRecord> {
+    let mut reader = BufReader::new(io::Cursor::new(bytes));
+    let mut records = Vec::new();
+    let mut buf = Vec::new();
+    let mut count = 0;
+
+    loop {
+        if count >= 200 {
+            break;
+        }
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf).unwrap_or(0);
+        if n <= 1 {
+            break;
+        }
+        count += 1;
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+
+        if let Some(record) = parse_position_record(&buf) {
+            records.push(record);
+        }
+    }
+
+    records
+}
+
+fn install_position_snapshot(snapshot: PositionFileSnapshot) {
+    let records = records_from_position_bytes(&snapshot.bytes);
+    POSITIONS_REGISTER.with(|register| *register.borrow_mut() = records);
+    LATEST_STAMP.with(|latest| *latest.borrow_mut() = Some(snapshot.stamp));
 }
 
 /// Rust equivalent of positionstruct.
@@ -64,7 +162,7 @@ pub struct PositionRecord {
 /// and the list of historical executed commands.
 pub fn history_init() {
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         // Each list is a Vec<String> with the current position index.
         // In the C code, each list is a doubly-linked list ending with an
         // empty sentinel node; the "current position" pointer starts at the
@@ -89,13 +187,75 @@ pub fn history_init() {
 /// Reset the pointer into the history list that contains item to the bottom.
 pub fn reset_history_pointer_for(which: HistoryKind) {
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         match which {
             HistoryKind::Search  => st.search_history_pos  = st.search_history_items.len(),
             HistoryKind::Replace => st.replace_history_pos = st.replace_history_items.len(),
             HistoryKind::Execute => st.execute_history_pos = st.execute_history_items.len(),
         }
     });
+}
+
+/// Return whether the selected history cursor is at its conceptual empty
+/// bottom entry.
+pub fn history_is_at_bottom(which: HistoryKind) -> bool {
+    STATE.with(|s| {
+        let st = s.borrow();
+        match which {
+            HistoryKind::Search => st.search_history_pos >= st.search_history_items.len(),
+            HistoryKind::Replace => st.replace_history_pos >= st.replace_history_items.len(),
+            HistoryKind::Execute => st.execute_history_pos >= st.execute_history_items.len(),
+        }
+    })
+}
+
+/// Move one entry toward the oldest item and return its text.  A stale cursor
+/// is first clamped to the bottom so history replacement cannot cause an
+/// out-of-bounds access.
+pub fn older_history_item(which: HistoryKind) -> Option<String> {
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let st = &mut *st;
+        let (items, pos) = match which {
+            HistoryKind::Search => (&st.search_history_items, &mut st.search_history_pos),
+            HistoryKind::Replace => (&st.replace_history_items, &mut st.replace_history_pos),
+            HistoryKind::Execute => (&st.execute_history_items, &mut st.execute_history_pos),
+        };
+
+        *pos = (*pos).min(items.len());
+        if *pos == 0 {
+            return None;
+        }
+
+        *pos -= 1;
+        Some(items[*pos].clone())
+    })
+}
+
+/// Move one entry toward the conceptual empty bottom and return its text.
+/// Reaching the bottom returns `None`; the prompt layer can then restore the
+/// draft that preceded history navigation.
+pub fn newer_history_item(which: HistoryKind) -> Option<String> {
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        let st = &mut *st;
+        let (items, pos) = match which {
+            HistoryKind::Search => (&st.search_history_items, &mut st.search_history_pos),
+            HistoryKind::Replace => (&st.replace_history_items, &mut st.replace_history_pos),
+            HistoryKind::Execute => (&st.execute_history_items, &mut st.execute_history_pos),
+        };
+
+        *pos = (*pos).min(items.len());
+        if *pos < items.len() {
+            *pos += 1;
+        }
+
+        if *pos < items.len() {
+            Some(items[*pos].clone())
+        } else {
+            None
+        }
+    })
 }
 
 // HistoryKind is defined at the outer module level (above mod inner).
@@ -111,7 +271,7 @@ use super::HistoryKind;
 /// is reset to the bottom (most recent).
 pub fn update_history(which: HistoryKind, text: &str, avoid_duplicates: bool) {
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         let items: &mut Vec<String> = match which {
             HistoryKind::Search  => &mut st.search_history_items,
             HistoryKind::Replace => &mut st.replace_history_items,
@@ -179,7 +339,7 @@ pub fn get_history_completion(which: HistoryKind, string: &str, len: usize) -> S
             if items[idx].starts_with(prefix) && items[idx] != string {
                 // Update position (separate mutable borrow).
                 STATE.with(|s| {
-                    let st = s.borrow_mut();
+                    let mut st = s.borrow_mut();
                     match which {
                         HistoryKind::Search  => st.search_history_pos  = idx,
                         HistoryKind::Replace => st.replace_history_pos = idx,
@@ -201,7 +361,7 @@ pub fn get_history_completion(which: HistoryKind, string: &str, len: usize) -> S
             if idx == here { break; }
             if items[idx].starts_with(prefix) && items[idx] != string {
                 STATE.with(|s| {
-                    let st = s.borrow_mut();
+                    let mut st = s.borrow_mut();
                     match which {
                         HistoryKind::Search  => st.search_history_pos  = idx,
                         HistoryKind::Replace => st.replace_history_pos = idx,
@@ -604,56 +764,20 @@ pub fn load_positions_register() {
         None => return,
     };
 
-    let file = match File::open(&regname) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+    let snapshot = match read_position_snapshot(&regname) {
+        Ok(snapshot) => snapshot,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            POSITIONS_REGISTER.with(|register| register.borrow_mut().clear());
+            LATEST_STAMP.with(|latest| *latest.borrow_mut() = None);
+            return;
+        }
         Err(e) => {
             eprintln!("Error reading {}: {}", regname, e);
             UNSET!(POSITIONLOG);
             return;
         }
     };
-
-    let mut reader = BufReader::new(file);
-    let mut records: Vec<PositionRecord> = Vec::new();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut count = 0;
-
-    loop {
-        if count >= 200 {
-            break;
-        }
-        buf.clear();
-        let n = reader.read_until(b'\n', &mut buf).unwrap_or(0);
-        if n <= 1 {
-            // 0 = EOF, 1 = only a newline (empty line)
-            break;
-        }
-        // Count every physical line toward the 200-record cap (C bumps the counter
-        // per read, before any skip), not just the successfully-parsed ones.
-        count += 1;
-        // Strip trailing newline.
-        if buf.last() == Some(&b'\n') {
-            buf.pop();
-        }
-
-        if let Some(record) = parse_position_record(&buf) {
-            records.push(record);
-        }
-    }
-
-    POSITIONS_REGISTER.with(|pr| *pr.borrow_mut() = records);
-
-    // Record the file's mtime.
-    if let Ok(meta) = fs::metadata(&regname) {
-        if let Ok(modified) = meta.modified() {
-            let secs = modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            LATEST_TIMESTAMP.with(|lt| *lt.borrow_mut() = secs);
-        }
-    }
+    install_position_snapshot(snapshot);
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +793,32 @@ pub fn save_positions_register() {
         None => return,
     };
 
+    let records = POSITIONS_REGISTER.with(|pr| pr.borrow().clone());
+    let mut bytes = Vec::new();
+
+    for (idx, item) in records.iter().enumerate() {
+        if idx >= 200 {
+            break;
+        }
+
+        if let Some(ref anchors) = item.anchors {
+            if !anchors.is_empty() {
+                bytes.extend_from_slice(anchors.as_bytes());
+            }
+        }
+
+        let path_and_place = format!(
+            "{} {} {}\n",
+            item.filename, item.linenumber, item.columnnumber
+        );
+        let start = bytes.len();
+        bytes.extend_from_slice(path_and_place.as_bytes());
+        let length = recode_lf_to_nul(&mut bytes[start..]);
+        if length > 0 {
+            bytes[start + length - 1] = b'\n';
+        }
+    }
+
     let mut file = match File::create(&regname) {
         Ok(f) => f,
         Err(e) => {
@@ -681,57 +831,19 @@ pub fn save_positions_register() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(&regname,
-                fs::Permissions::from_mode(0o600)) {
+        if let Err(e) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
             eprintln!("Cannot limit permissions on {}: {}", regname, e);
         }
     }
 
-    let records = POSITIONS_REGISTER.with(|pr| pr.borrow().clone());
-
-    for (idx, item) in records.iter().enumerate() {
-        if idx >= 200 {
-            break;
-        }
-
-        // First write the string of line numbers with anchors, if any.
-        if let Some(ref anchors) = item.anchors {
-            if !anchors.is_empty() {
-                let anchor_bytes = anchors.as_bytes();
-                if file.write_all(anchor_bytes).is_err() {
-                    eprintln!("Error writing {}", regname);
-                }
-            }
-        }
-
-        // Build the path-and-place string.
-        let path_and_place = format!(
-            "{} {} {}\n",
-            item.filename, item.linenumber, item.columnnumber
-        );
-        let mut bytes = path_and_place.into_bytes();
-
-        // Encode newlines in filenames as NULs.
-        let length = recode_lf_to_nul(&mut bytes);
-        // Restore the terminating newline.
-        if length > 0 {
-            bytes[length - 1] = b'\n';
-        }
-
-        if file.write_all(&bytes[..length]).is_err() {
-            eprintln!("Error writing {}", regname);
-        }
+    if let Err(error) = file.write_all(&bytes).and_then(|()| file.flush()) {
+        eprintln!("Error writing {}: {}", regname, error);
+        return;
     }
 
-    // Record the new mtime.
-    if let Ok(meta) = fs::metadata(&regname) {
-        if let Ok(modified) = meta.modified() {
-            let secs = modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            LATEST_TIMESTAMP.with(|lt| *lt.borrow_mut() = secs);
-        }
+    if let Ok(metadata) = file.metadata() {
+        let stamp = stamp_position_bytes(metadata.modified().ok(), metadata.len(), &bytes);
+        LATEST_STAMP.with(|latest| *latest.borrow_mut() = Some(stamp));
     }
 }
 
@@ -748,27 +860,27 @@ pub fn reload_positions_if_needed() {
         None => return,
     };
 
-    let mtime = match fs::metadata(&regname) {
-        Ok(meta) => match meta.modified() {
-            Ok(t) => t
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            Err(_) => return,
-        },
+    let snapshot = match read_position_snapshot(&regname) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let had_snapshot = LATEST_STAMP.with(|latest| latest.borrow().is_some());
+            if had_snapshot {
+                POSITIONS_REGISTER.with(|register| register.borrow_mut().clear());
+                LATEST_STAMP.with(|latest| *latest.borrow_mut() = None);
+            }
+            return;
+        }
         Err(_) => return,
     };
 
-    let latest = LATEST_TIMESTAMP.with(|lt| *lt.borrow());
-    if mtime == latest {
+    let unchanged = LATEST_STAMP.with(|latest| {
+        latest.borrow().as_ref() == Some(&snapshot.stamp)
+    });
+    if unchanged {
         return;
     }
 
-    // Clear the in-memory list.
-    POSITIONS_REGISTER.with(|pr| pr.borrow_mut().clear());
-
-    // Reload.
-    load_positions_register();
+    install_position_snapshot(snapshot);
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +971,46 @@ pub fn restore_cursor_position_if_any() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_prompt_histories_navigate_to_and_from_the_bottom() {
+        history_init();
+
+        for kind in [HistoryKind::Search, HistoryKind::Replace, HistoryKind::Execute] {
+            update_history(kind, "older", false);
+            update_history(kind, "newer — 草稿", false);
+
+            assert!(history_is_at_bottom(kind));
+            assert_eq!(older_history_item(kind).as_deref(), Some("newer — 草稿"));
+            assert_eq!(older_history_item(kind).as_deref(), Some("older"));
+            assert_eq!(older_history_item(kind), None);
+            assert_eq!(newer_history_item(kind).as_deref(), Some("newer — 草稿"));
+            assert_eq!(newer_history_item(kind), None);
+            assert!(history_is_at_bottom(kind));
+        }
+    }
+
+    #[test]
+    fn stale_history_cursor_is_clamped_before_navigation() {
+        history_init();
+        update_history(HistoryKind::Search, "latest", false);
+        STATE.with(|state| state.borrow_mut().search_history_pos = usize::MAX);
+
+        assert_eq!(older_history_item(HistoryKind::Search).as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn position_stamp_detects_equal_metadata_rewrites() {
+        let modified = Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(42));
+        let old_bytes = b"/tmp/a 10 20\n";
+        let new_bytes = b"/tmp/b 10 20\n";
+        assert_eq!(old_bytes.len(), new_bytes.len());
+
+        let old_stamp = stamp_position_bytes(modified, old_bytes.len() as u64, old_bytes);
+        let new_stamp = stamp_position_bytes(modified, new_bytes.len() as u64, new_bytes);
+
+        assert_ne!(old_stamp, new_stamp);
+    }
 
     #[test]
     fn parses_unix_position_record_with_anchors() {

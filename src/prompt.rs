@@ -610,6 +610,8 @@ fn acquire_an_answer(
     history_kind: Option<crate::history::HistoryKind>,
     refresh_func: Option<fn()>,
     listed: &mut bool,
+    menu: u32,
+    prompt_message: &str,
 ) -> (Option<FuncPtr>, i32) {
     #[cfg(all(feature = "histories", feature = "tabcomp"))]
     let mut previous_was_tab = false;
@@ -632,24 +634,28 @@ fn acquire_an_answer(
 
     let mut input: i32;
     let mut function: Option<FuncPtr>;
+    let mut seen_resize_generation = crate::winio::resize_generation();
 
     loop {
+        if crate::winio::consume_resize_request(None) {
+            seen_resize_generation = crate::winio::resize_generation();
+            repaint_prompt_for_current_geometry(menu, prompt_message, refresh_func);
+        }
         draw_the_promptbar();
+
+        #[cfg(feature = "histories")]
+        let answer_before_input = state().answer.clone();
 
         /* Read in one keystroke. */
         input = crate::winio::get_kbinput(VISIBLE);
 
+        if repaint_prompt_after_resize(input, menu, prompt_message, refresh_func) {
+            seen_resize_generation = crate::winio::resize_generation();
+            continue;
+        }
+
         #[cfg(not(feature = "tiny"))]
         {
-            /* If the window size changed, go reformat the prompt string. */
-            if input == THE_WINDOW_RESIZED as i32 {
-                // Cleanup stored_string
-                #[cfg(feature = "histories")]
-                {
-                    // stored_string dropped automatically
-                }
-                return (None, THE_WINDOW_RESIZED as i32);
-            }
             if input == START_OF_PASTE as i32 || input == END_OF_PASTE as i32 {
                 bracketed_paste = input == START_OF_PASTE as i32;
             }
@@ -661,6 +667,10 @@ fn acquire_an_answer(
             if input == crate::winio::KEY_MOUSE_CODE {
                 if process_prompt_click() == 1 {
                     input = crate::winio::get_kbinput(BLIND);
+                }
+                if repaint_prompt_after_resize(input, menu, prompt_message, refresh_func) {
+                    seen_resize_generation = crate::winio::resize_generation();
+                    continue;
                 }
                 if input == crate::winio::KEY_MOUSE_CODE {
                     continue;
@@ -683,6 +693,15 @@ fn acquire_an_answer(
         let func_copy = function;
         absorb_character(input, func_copy);
 
+        if repaint_prompt_after_nested_resize(
+            &mut seen_resize_generation,
+            menu,
+            prompt_message,
+            refresh_func,
+        ) {
+            continue;
+        }
+
         #[cfg(not(feature = "tiny"))]
         {
             /* Ignore any commands inside an external paste. */
@@ -692,6 +711,12 @@ fn acquire_an_answer(
                         crate::winio::beep();
                     }
                 }
+                #[cfg(feature = "histories")]
+                abandon_history_navigation_after_edit(
+                    history_kind,
+                    &answer_before_input,
+                    &mut stored_string,
+                );
                 continue;
             }
         }
@@ -716,9 +741,10 @@ fn acquire_an_answer(
                         }
 
                         if fragment_length > 0 {
+                            let answer = state().answer.clone();
                             let new_answer = crate::history::get_history_completion(
                                 kind,
-                                &state().answer.clone(),
+                                &answer,
                                 fragment_length,
                             );
                             let new_len = new_answer.len();
@@ -758,13 +784,13 @@ fn acquire_an_answer(
                 }
 
                 /* When moving up from the bottom, remember the current answer. */
-                let at_bottom = is_history_at_bottom(kind);
+                let at_bottom = crate::history::history_is_at_bottom(kind);
                 if at_bottom {
                     stored_string = Some(state().answer.clone());
                 }
 
                 /* If there is an older item, move to it and copy its string. */
-                if let Some(older) = get_older_history_item(kind) {
+                if let Some(older) = crate::history::older_history_item(kind) {
                     let len = older.len();
                     state_mut().answer = older;
                     set_typing_x(len);
@@ -773,37 +799,47 @@ fn acquire_an_answer(
                 let kind = history_kind.unwrap();
 
                 /* If there is a newer item, move to it and copy its string. */
-                if let Some(newer) = get_newer_history_item(kind) {
+                if let Some(newer) = crate::history::newer_history_item(kind) {
                     let len = newer.len();
                     state_mut().answer = newer;
                     set_typing_x(len);
                 }
 
                 /* When at the bottom of the history list, restore the old answer. */
-                if is_history_at_bottom(kind) {
-                    if let Some(ref stored) = stored_string {
-                        if state().answer.is_empty() {
-                            let s2 = stored.clone();
-                            let len = s2.len();
-                            state_mut().answer = s2;
-                            set_typing_x(len);
-                        }
-                    }
-                }
+                restore_history_draft_at_bottom(kind, stored_string.as_deref());
             } else {
                 // fall through to other checks
-                history_handle_other(function, input, refresh_func);
+                let prompt_finished = history_handle_other(function, input, refresh_func);
+                abandon_history_navigation_after_edit(
+                    history_kind,
+                    &answer_before_input,
+                    &mut stored_string,
+                );
+                if prompt_finished {
+                    break;
+                }
             }
         }
 
         #[cfg(not(feature = "histories"))]
         {
-            history_handle_other(function, input, refresh_func);
+            if history_handle_other(function, input, refresh_func) {
+                break;
+            }
         }
 
         #[cfg(all(feature = "histories", feature = "tabcomp"))]
         {
             previous_was_tab = function.map_or(false, |f| f == crate::global::do_tab as FuncPtr);
+        }
+
+        if repaint_prompt_after_nested_resize(
+            &mut seen_resize_generation,
+            menu,
+            prompt_message,
+            refresh_func,
+        ) {
+            continue;
         }
     }
 
@@ -824,21 +860,63 @@ fn acquire_an_answer(
 
     #[cfg(feature = "histories")]
     {
-        /* If the history pointer was moved, point it at the bottom again. */
-        if stored_string.is_some() {
-            if let Some(kind) = history_kind {
-                crate::history::reset_history_pointer_for(kind);
-            }
+        /* A prompt never leaks its navigation cursor into the next prompt. */
+        if let Some(kind) = history_kind {
+            crate::history::reset_history_pointer_for(kind);
         }
     }
 
     (function, input)
 }
 
-/// Handle do_help / full_refresh / do_toggle / do_nothing / implant and
-/// non-editing shortcuts.  Factored out so it can be called from both the
-/// histories branch and the no-histories branch.
-fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Option<fn()>) {
+/// Consume and repaint a prompt resize without unwinding the acquisition
+/// loop, preserving history navigation, paste state, the answer, and cursor.
+fn repaint_prompt_after_resize(
+    input: i32,
+    menu: u32,
+    prompt_message: &str,
+    refresh_func: Option<fn()>,
+) -> bool {
+    if !crate::winio::consume_resize_request(Some(input)) {
+        return false;
+    }
+
+    repaint_prompt_for_current_geometry(menu, prompt_message, refresh_func);
+    true
+}
+
+fn repaint_prompt_after_nested_resize(
+    seen_generation: &mut usize,
+    menu: u32,
+    prompt_message: &str,
+    refresh_func: Option<fn()>,
+) -> bool {
+    let current_generation = crate::winio::resize_generation();
+    if current_generation == *seen_generation {
+        return false;
+    }
+
+    *seen_generation = current_generation;
+    repaint_prompt_for_current_geometry(menu, prompt_message, refresh_func);
+    true
+}
+
+fn repaint_prompt_for_current_geometry(
+    menu: u32,
+    prompt_message: &str,
+    refresh_func: Option<fn()>,
+) {
+    set_prompt(prompt_for_width(prompt_message, crate::winio::get_cols()));
+    if let Some(refresh) = refresh_func {
+        refresh();
+    }
+    crate::winio::bottombars(menu);
+}
+
+/// Handle a non-history key.  Return true when a permissible shortcut was
+/// executed and the prompt should return that shortcut to its caller.  Help,
+/// refresh, prompt editing, and prompt-local toggles keep the prompt active.
+fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Option<fn()>) -> bool {
     let is_help      = function.map_or(false, |f| f == crate::global::do_help         as FuncPtr);
     let is_refresh   = function.map_or(false, |f| f == crate::global::full_refresh     as FuncPtr);
 
@@ -846,7 +924,7 @@ fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Opt
         if let Some(f) = function {
             f();
         }
-        return;
+        return false;
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -871,14 +949,15 @@ fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Opt
                 if let Some(rf) = refresh_func {
                     rf();
                 }
-                crate::winio::bottombars(state().currmenu);
-                return;
+                let currmenu = state().currmenu;
+                crate::winio::bottombars(currmenu);
+                return false;
             }
         }
 
         let is_nothing = function.map_or(false, |f| f == crate::global::do_nothing as FuncPtr);
         if is_nothing {
-            return;
+            return false;
         }
     }
 
@@ -901,7 +980,7 @@ fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Opt
             } else {
                 crate::winio::beep();
             }
-            return;
+            return false;
         }
     }
 
@@ -923,83 +1002,51 @@ fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Opt
                     }
                 }
                 f();
+                return true;
             } else {
                 crate::winio::beep();
             }
         }
     }
+
+    false
 }
 
 // ---------------------------------------------------------------------------
-// History helpers (Vec-based, since we ported history.rs that way)
+// History helpers
 // ---------------------------------------------------------------------------
 
+/// Ordinary answer editing starts a fresh history-navigation session.  This
+/// prevents a stale draft from overwriting text edited after recalling a
+/// history item, and makes a later Older action start from the bottom again.
 #[cfg(feature = "histories")]
-fn is_history_at_bottom(kind: crate::history::HistoryKind) -> bool {
-    with_state(|s| {
-        match kind {
-            crate::history::HistoryKind::Search  =>
-                s.search_history_pos  >= s.search_history_items.len(),
-            crate::history::HistoryKind::Replace =>
-                s.replace_history_pos >= s.replace_history_items.len(),
-            crate::history::HistoryKind::Execute =>
-                s.execute_history_pos >= s.execute_history_items.len(),
-        }
-    })
+fn abandon_history_navigation_after_edit(
+    history_kind: Option<crate::history::HistoryKind>,
+    answer_before_input: &str,
+    stored_string: &mut Option<String>,
+) {
+    if state().answer == answer_before_input {
+        return;
+    }
+
+    *stored_string = None;
+    if let Some(kind) = history_kind {
+        crate::history::reset_history_pointer_for(kind);
+    }
 }
 
-/// Move the history pointer one step older (upward).
-/// Returns the string at the new position, or None if already at the top.
+/// Restore the text that was present before history navigation when the
+/// history pointer reaches its conceptual empty bottom entry.
 #[cfg(feature = "histories")]
-fn get_older_history_item(kind: crate::history::HistoryKind) -> Option<String> {
-    with_state_mut(|s| {
-        let (items, pos) = match kind {
-            crate::history::HistoryKind::Search  =>
-                (&s.search_history_items,  &mut s.search_history_pos  as *mut usize),
-            crate::history::HistoryKind::Replace =>
-                (&s.replace_history_items, &mut s.replace_history_pos as *mut usize),
-            crate::history::HistoryKind::Execute =>
-                (&s.execute_history_items, &mut s.execute_history_pos as *mut usize),
-        };
-        // Safety: we hold a mutable borrow; the pointer is valid for the duration.
-        let pos_ref: &mut usize = unsafe { &mut *pos };
-        if *pos_ref > 0 {
-            *pos_ref -= 1;
-            Some(items[*pos_ref].clone())
-        } else {
-            None
-        }
-    })
-}
+fn restore_history_draft_at_bottom(kind: crate::history::HistoryKind, stored_string: Option<&str>) {
+    if !crate::history::history_is_at_bottom(kind) {
+        return;
+    }
 
-/// Move the history pointer one step newer (downward).
-/// Returns the string at the new position, or None if already at the bottom.
-#[cfg(feature = "histories")]
-fn get_newer_history_item(kind: crate::history::HistoryKind) -> Option<String> {
-    with_state_mut(|s| {
-        let (items_len, pos) = match kind {
-            crate::history::HistoryKind::Search  =>
-                (s.search_history_items.len(),  &mut s.search_history_pos  as *mut usize),
-            crate::history::HistoryKind::Replace =>
-                (s.replace_history_items.len(), &mut s.replace_history_pos as *mut usize),
-            crate::history::HistoryKind::Execute =>
-                (s.execute_history_items.len(), &mut s.execute_history_pos as *mut usize),
-        };
-        let pos_ref: &mut usize = unsafe { &mut *pos };
-        if *pos_ref < items_len {
-            *pos_ref += 1;
-        }
-        if *pos_ref < items_len {
-            let items = match kind {
-                crate::history::HistoryKind::Search  => &s.search_history_items,
-                crate::history::HistoryKind::Replace => &s.replace_history_items,
-                crate::history::HistoryKind::Execute => &s.execute_history_items,
-            };
-            Some(items[*pos_ref].clone())
-        } else {
-            None
-        }
-    })
+    if let Some(stored) = stored_string {
+        state_mut().answer = stored.to_string();
+        set_typing_x(stored.len());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1074,14 @@ fn do_tab_complete(refresh_func: Option<fn()>, listed: &mut bool) {
 // ---------------------------------------------------------------------------
 // Public do_prompt
 // ---------------------------------------------------------------------------
+
+/// Format a prompt for the current screen width, reserving room for the
+/// delimiter, overflow markers, and at least two answer columns.
+fn prompt_for_width(msg: &str, cols: usize) -> String {
+    let mut prompt = msg.to_string();
+    prompt.truncate(actual_x(&prompt, cols.saturating_sub(5)));
+    prompt
+}
 
 /* C: int do_prompt(int menu, const char *provided,
  *     linestruct **history_list, void (*refresh_func)(void),
@@ -1068,31 +1123,21 @@ pub fn do_prompt(
         }
     }
 
-    let cols = crate::winio::get_cols();
-    let _maxcharlen = MAXCHARLEN;
-
     // redo_theprompt label → we use a loop for the resize-retry.
     let result;
     loop {
         /* Build the prompt string truncated to fit on screen. */
-        let mut prompt_buf = msg.to_string();
-        /* Reserve five columns for colon plus angles plus answer, ":<aa>". */
-        let max_prompt_bytes = if cols < 5 { 0 } else { cols - 5 };
-        let trunc_x = actual_x(&prompt_buf, max_prompt_bytes);
-        prompt_buf.truncate(trunc_x);
-        set_prompt(prompt_buf);
+        set_prompt(prompt_for_width(msg, crate::winio::get_cols()));
 
         state_mut().lastmessage = MessageType::Vacuum;
 
-        let (function, retval_raw) = acquire_an_answer(history_kind, refresh_func, &mut listed);
-
-        #[cfg(not(feature = "tiny"))]
-        {
-            if retval_raw == THE_WINDOW_RESIZED as i32 {
-                // Redo the prompt after resize.
-                continue;
-            }
-        }
+        let (function, retval_raw) = acquire_an_answer(
+            history_kind,
+            refresh_func,
+            &mut listed,
+            menu,
+            msg,
+        );
 
         /* Restore a possible previous prompt and maybe the typing position. */
         set_prompt(saved_prompt.clone());
@@ -1159,7 +1204,7 @@ const UNDECIDED: i32 = -2;
 /// and return the choice — either YES or NO or ALL or CANCEL.
 pub fn ask_user(withall: bool, question: &str) -> i32 {
     let mut choice = UNDECIDED;
-    let mut width: usize = 16;
+    let mut width: usize;
 
     /* TRANSLATORS: For the next three strings, specify the starting letters
      * of the translations for "Yes"/"No"/"All".  The first letter of each of
@@ -1174,13 +1219,13 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
     while choice == UNDECIDED {
         let mut kbinput: i32;
 
+        // A SIGWINCH can be published without replacing the next real key.
+        // Consume it before calculating prompt columns or blocking again.
+        crate::winio::consume_resize_request(None);
+        width = yesno_choice_width(crate::winio::get_cols());
+
         // Draw shortcut keys when help lines are shown.
         if !ISSET!(NO_HELP) {
-            let cols = crate::winio::get_cols();
-            if cols < 32 {
-                width = cols / 2;
-            }
-
             /* Clear the shortcut list from the bottom of the screen. */
             crate::winio::blank_bottombars();
 
@@ -1223,12 +1268,12 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
         /* When not replacing, show the cursor while waiting for a key. */
         kbinput = crate::winio::get_kbinput(!withall);
 
+        if crate::winio::consume_resize_request(Some(kbinput)) {
+            continue;
+        }
+
         #[cfg(not(feature = "tiny"))]
         {
-            if kbinput == THE_WINDOW_RESIZED as i32 {
-                continue;
-            }
-
             /* Accept first character of an external paste and ignore the rest. */
             if kbinput == START_OF_PASTE as i32 {
                 kbinput = crate::winio::get_kbinput(BLIND);
@@ -1346,6 +1391,10 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
     choice
 }
 
+fn yesno_choice_width(cols: usize) -> usize {
+    if cols < 32 { (cols / 2).max(1) } else { 16 }
+}
+
 // ---------------------------------------------------------------------------
 // Stub wrappers for functions referenced but defined in other modules
 // ---------------------------------------------------------------------------
@@ -1417,4 +1466,117 @@ fn display_string(s: &str, start_col: usize, span: usize, isdata: bool, isprompt
 #[inline]
 fn changes_something(f: FuncPtr) -> bool {
     crate::nano::changes_something(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static GENERIC_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn generic_prompt_action() {
+        GENERIC_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn permissible_generic_action_terminates_prompt_acquisition() {
+        GENERIC_CALLS.store(0, Ordering::SeqCst);
+        assert!(history_handle_other(
+            Some(generic_prompt_action as FuncPtr), 0, None));
+        assert_eq!(GENERIC_CALLS.load(Ordering::SeqCst), 1);
+
+        #[cfg(not(feature = "tiny"))]
+        assert!(!history_handle_other(
+            Some(crate::global::do_nothing as FuncPtr), 0, None));
+    }
+
+    #[cfg(feature = "histories")]
+    #[test]
+    fn reaching_each_history_bottom_restores_the_unicode_draft() {
+        use crate::history::HistoryKind;
+
+        for kind in [HistoryKind::Search, HistoryKind::Replace, HistoryKind::Execute] {
+            crate::history::history_init();
+            crate::history::update_history(kind, "older", false);
+            state_mut().answer = "older".into();
+
+            restore_history_draft_at_bottom(kind, Some("unfinished 草稿"));
+
+            assert_eq!(state().answer, "unfinished 草稿");
+            assert_eq!(get_typing_x(), "unfinished 草稿".len());
+        }
+    }
+
+    #[cfg(feature = "histories")]
+    #[test]
+    fn editing_a_recalled_item_abandons_the_old_draft() {
+        use crate::history::HistoryKind;
+
+        crate::history::history_init();
+        crate::history::update_history(HistoryKind::Search, "recalled", false);
+        assert_eq!(
+            crate::history::older_history_item(HistoryKind::Search).as_deref(),
+            Some("recalled"),
+        );
+
+        let mut stored = Some("original draft".to_string());
+        state_mut().answer = "recalled + edit".into();
+        abandon_history_navigation_after_edit(
+            Some(HistoryKind::Search),
+            "recalled",
+            &mut stored,
+        );
+
+        assert_eq!(stored, None);
+        assert_eq!(state().answer, "recalled + edit");
+        assert!(crate::history::history_is_at_bottom(HistoryKind::Search));
+    }
+
+    #[cfg(feature = "nanorc")]
+    #[test]
+    fn prompt_string_bind_queues_its_literal_utf8_bytes() {
+        let keycode = 4242;
+        let expansion = "草稿";
+        let mut binding = KeyStruct::default();
+        binding.keycode = keycode;
+        binding.menus = MWHEREIS as i32;
+        binding.func = Some(crate::rcfile::implant_sentinel as FuncPtr);
+        binding.expansion = Some(expansion.to_string());
+        with_state_mut(|state| {
+            state.currmenu = MWHEREIS;
+            state.sclist.clear();
+            state.sclist.push(binding);
+        });
+
+        assert!(!history_handle_other(
+            Some(crate::rcfile::implant_sentinel as FuncPtr),
+            keycode,
+            None,
+        ));
+
+        let queued: Vec<u8> = (0..expansion.len())
+            .map(|_| crate::winio::get_input(None) as u8)
+            .collect();
+        assert_eq!(queued, expansion.as_bytes());
+    }
+
+    #[test]
+    fn prompt_fitting_uses_the_supplied_width_each_time() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
+        assert_eq!(prompt_for_width("abcdefgh", 8), "abc");
+        assert_eq!(prompt_for_width("abcdefgh", 12), "abcdefg");
+        assert_eq!(prompt_for_width("ééé", 7), "éé");
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
+    }
+
+    #[test]
+    fn yesno_width_recovers_after_resize_and_never_becomes_zero() {
+        assert_eq!(yesno_choice_width(1), 1);
+        assert_eq!(yesno_choice_width(20), 10);
+        assert_eq!(yesno_choice_width(80), 16);
+    }
 }

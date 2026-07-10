@@ -5,7 +5,7 @@
 
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::global::{state, state_mut, with_state, with_state_mut, KEY_ENTER};
+use crate::global::{state, state_mut, with_state, KEY_ENTER};
 
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ pub fn read_the_list(_path: &str, entries: Vec<String>) {
     let cols = state().midwin.cols as i32;
     let editwinrows = state().editwinrows;
     let zero = state().flag_isset(ZERO);
-    let lines = with_state(|s| (s.midwin.rows + s.topwin.rows + s.footwin.rows) as i32);
+    let lines = crate::winio::screen_rows() as i32;
 
     // Find the width of the widest filename in the current folder.
     let mut widest: usize = 0;
@@ -79,7 +79,8 @@ pub fn read_the_list(_path: &str, entries: Vec<String>) {
     let piles = if gauge + 2 > 0 { (cols + 2) / (gauge + 2) } else { 1 };
     bl_set!(PILES, piles.max(1));
 
-    let usable = (editwinrows - if zero && lines > 1 { 1 } else { 0 }) as usize;
+    let usable = editwinrows
+        .saturating_sub(if zero && lines > 1 { 1 } else { 0 }) as usize;
     bl_set!(USABLE_ROWS, usable.max(1));
 }
 
@@ -140,7 +141,7 @@ pub fn browser_refresh() {
 
     let filelist_snapshot: Vec<String> = FILELIST.with(|fl| fl.borrow().clone());
 
-    let stdout = crate::winio::out();
+    let mut stdout = crate::winio::out();
 
     let mut index = start_index;
     while index < list_length && row < usable_rows {
@@ -484,7 +485,7 @@ fn shortcut_toggle_for(kbinput: i32) -> i32 {
 
 #[cfg(feature = "browser")]
 pub fn browse(initial_path: String) -> Option<String> {
-    use crate::global::{with_state, with_state_mut, interpret};
+    use crate::global::{with_state, interpret};
     use crate::global::{
         do_help, full_refresh, do_search_backward, do_search_forward,
         do_findprevious, do_findnext, do_left, do_right, to_prev_word, to_next_word,
@@ -492,9 +493,12 @@ pub fn browse(initial_path: String) -> Option<String> {
         do_enter, do_exit, goto_dir,
     };
     use crate::winio::{statusline, statusbar, bottombars, titlebar, edit_refresh, get_kbinput};
-    use crate::files::{get_full_path, outside_of_confinement, expand_leading_tilde};
+    use crate::files::{
+        confined_is_dir, confined_read_dir, expand_leading_tilde, get_full_path,
+        outside_of_confinement,
+    };
     use crate::utils::tail;
-    use std::{fs, path::Path};
+    use std::path::Path;
 
     let mut path = initial_path;
     let mut present_name: Option<String> = None;
@@ -511,10 +515,9 @@ pub fn browse(initial_path: String) -> Option<String> {
         let dir_entries: Result<Vec<String>, std::io::Error> = (|| {
             let mut v: Vec<String> = Vec::new();
             v.push(path_join_display(&path, ".."));
-            let rd = fs::read_dir(&path)?;
+            let rd = confined_read_dir(&path)?;
             for entry in rd {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.to_string_lossy().to_string();
                 // Skip the useless "." item.
                 if name == "." { continue; }
                 v.push(path_join_display(&path, &name));
@@ -552,9 +555,6 @@ pub fn browse(initial_path: String) -> Option<String> {
             }
         }
 
-        #[cfg(not(feature = "tiny"))]
-        with_state_mut(|s| s.resized_for_browser = false);
-
         // Reselect or reset selection.
         if let Some(ref name) = present_name {
             reselect(name);
@@ -576,8 +576,22 @@ pub fn browse(initial_path: String) -> Option<String> {
             break 'reload;
         }
 
+        // A nested prompt or help viewer can consume the resize while this
+        // loop is suspended.  Comparing the shared generation on return tells
+        // us to rebuild the browser grid without a browser-only global flag.
+        let seen_resize_generation = crate::winio::resize_generation();
+
         // Inner loop: handle keystrokes until a file is selected or user exits.
         loop {
+            if crate::winio::consume_resize_request(None)
+                || crate::winio::resize_generation() != seen_resize_generation
+            {
+                present_name = FILELIST.with(|fl| {
+                    fl.borrow().get(bl_get!(SELECTED)).cloned()
+                });
+                continue 'reload;
+            }
+
             state_mut().lastmessage = MessageType::Vacuum;
 
             bottombars(MBROWSER);
@@ -595,6 +609,13 @@ pub fn browse(initial_path: String) -> Option<String> {
             #[cfg(not(feature = "mouse"))]
             let kbinput = get_kbinput(show_cursor);
 
+            if crate::winio::consume_resize_request(Some(kbinput)) {
+                present_name = FILELIST.with(|fl| {
+                    fl.borrow().get(bl_get!(SELECTED)).cloned()
+                });
+                continue 'reload;
+            }
+
             #[cfg(feature = "mouse")]
             {
                 use crate::winio::{get_mouseinput, KEY_MOUSE_CODE};
@@ -609,23 +630,22 @@ pub fn browse(initial_path: String) -> Option<String> {
                             let piles = bl_get!(PILES) as usize;
                             let gauge = bl_get!(GAUGE) as usize;
                             let list_length = bl_get!(LIST_LENGTH);
-                            let base = selected - selected % (usable_rows * piles);
-                            let row = (mouse_y - mid_y) as usize;
-                            let col_idx = mouse_x as usize / (gauge + 2);
-                            let mut new_sel = base + row * piles + col_idx;
-                            // Beyond end-of-row.
-                            if mouse_x as usize > piles * (gauge + 2) {
-                                new_sel = new_sel.saturating_sub(1);
-                            }
-                            // Beyond end-of-list.
-                            if new_sel >= list_length {
-                                new_sel = list_length - 1;
-                            }
-                            bl_set!(SELECTED, new_sel);
+                            let row = mouse_y - mid_y;
+                            if let Some(new_sel) = browser_index_for_click(
+                                selected,
+                                usable_rows,
+                                piles,
+                                gauge,
+                                list_length,
+                                mouse_x,
+                                row,
+                            ) {
+                                bl_set!(SELECTED, new_sel);
 
-                            // Double-click: choose the file.
-                            if old_selected == new_sel {
-                                kbinput = KEY_ENTER;
+                                // Double-click: choose the file.
+                                if old_selected == new_sel {
+                                    kbinput = KEY_ENTER;
+                                }
                             }
                         }
                     }
@@ -768,22 +788,19 @@ pub fn browse(initial_path: String) -> Option<String> {
 
                     #[cfg(feature = "operatingdir")]
                     {
-                        if let Some(ref opdir) = state().operating_dir.clone() {
+                        let operating_dir = state().operating_dir.clone();
+                        if let Some(ref opdir) = operating_dir {
                             if outside_of_confinement(&new_path, false) {
                                 let msg = format!("Can't go outside of {}", opdir);
                                 statusline(MessageType::Alert, &msg);
                                 path = state().present_path.clone()
                                     .unwrap_or_else(|| ".".to_string());
                                 // goto testresize — fall through
-                                #[cfg(not(feature = "tiny"))]
-                                {
-                                    let resized = state().resized_for_browser;
-                                    if kbinput == THE_WINDOW_RESIZED as i32 || resized {
-                                        present_name = FILELIST.with(|fl| {
-                                            fl.borrow().get(bl_get!(SELECTED)).cloned()
-                                        });
-                                        continue 'reload;
-                                    }
+                                if crate::winio::resize_generation() != seen_resize_generation {
+                                    present_name = FILELIST.with(|fl| {
+                                        fl.borrow().get(bl_get!(SELECTED)).cloned()
+                                    });
+                                    continue 'reload;
                                 }
                                 continue;
                             }
@@ -819,7 +836,8 @@ pub fn browse(initial_path: String) -> Option<String> {
 
                 #[cfg(feature = "operatingdir")]
                 {
-                    if let Some(ref opdir) = state().operating_dir.clone() {
+                    let operating_dir = state().operating_dir.clone();
+                    if let Some(ref opdir) = operating_dir {
                         if outside_of_confinement(&selected_file, false) {
                             let msg = format!("Can't go outside of {}", opdir);
                             statusline(MessageType::Alert, &msg);
@@ -829,15 +847,14 @@ pub fn browse(initial_path: String) -> Option<String> {
                 }
 
                 // If for some reason the file is inaccessible, complain.
-                let meta = fs::metadata(&selected_file);
-                match meta {
+                match confined_is_dir(&selected_file) {
                     Err(e) => {
                         let msg = format!("Error reading {}: {}", selected_file, e);
                         statusline(MessageType::Alert, &msg);
                         continue;
                     }
-                    Ok(m) => {
-                        if !m.is_dir() {
+                    Ok(is_directory) => {
+                        if !is_directory {
                             // A file was selected — we're done.
                             chosen = Some(selected_file);
                             break 'reload;
@@ -896,15 +913,11 @@ pub fn browse(initial_path: String) -> Option<String> {
             }
 
             // testresize: handle terminal resize.
-            #[cfg(not(feature = "tiny"))]
-            {
-                let resized = state().resized_for_browser;
-                if kbinput == THE_WINDOW_RESIZED as i32 || resized {
-                    present_name = FILELIST.with(|fl| {
-                        fl.borrow().get(bl_get!(SELECTED)).cloned()
-                    });
-                    continue 'reload;
-                }
+            if crate::winio::resize_generation() != seen_resize_generation {
+                present_name = FILELIST.with(|fl| {
+                    fl.borrow().get(bl_get!(SELECTED)).cloned()
+                });
+                continue 'reload;
             }
         } // inner loop
     } // 'reload loop
@@ -919,27 +932,67 @@ pub fn browse(initial_path: String) -> Option<String> {
     chosen
 }
 
+/// Translate a browser-relative click into an entry index.
+///
+/// Coordinates stay signed until their bounds have been checked, preventing a
+/// click to the left of the list from wrapping into a huge `usize`.
+#[cfg(feature = "browser")]
+fn browser_index_for_click(
+    selected: usize,
+    usable_rows: usize,
+    piles: usize,
+    gauge: usize,
+    list_length: usize,
+    mouse_x: i32,
+    mouse_y: i32,
+) -> Option<usize> {
+    if mouse_x < 0 || mouse_y < 0 || usable_rows == 0 || piles == 0 || list_length == 0 {
+        return None;
+    }
+
+    let row = mouse_y as usize;
+    if row >= usable_rows {
+        return None;
+    }
+
+    let page_size = usable_rows.checked_mul(piles)?;
+    let cell_width = gauge.checked_add(2)?;
+    let x = mouse_x as usize;
+    let base = selected - selected % page_size;
+    let col = x / cell_width;
+    let mut new_selected = base
+        .checked_add(row.checked_mul(piles)?)?
+        .checked_add(col)?;
+
+    // Preserve nano's behavior in the padding beyond the final pile: select
+    // the preceding entry rather than jumping to the next logical row.
+    if x > piles.saturating_mul(cell_width) {
+        new_selected = new_selected.saturating_sub(1);
+    }
+
+    Some(new_selected.min(list_length - 1))
+}
+
 // ---------------------------------------------------------------------------
 // browse_in — prepare to start browsing at the given path
 // C: char *browse_in(const char *inpath)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn browse_in(inpath: &str) -> Option<String> {
-    use crate::files::{outside_of_confinement, expand_leading_tilde};
-    use std::fs;
+    use crate::files::{confined_is_dir, outside_of_confinement, expand_leading_tilde};
 
     let mut path = expand_leading_tilde(inpath);
 
     // If path is not a directory, try to strip a filename from it.
-    let needs_strip = fs::metadata(&path)
-        .map(|m| !m.is_dir())
+    let needs_strip = confined_is_dir(&path)
+        .map(|is_directory| !is_directory)
         .unwrap_or(true);
 
     if needs_strip {
         path = strip_last_component(&path);
 
-        let still_not_dir = fs::metadata(&path)
-            .map(|m| !m.is_dir())
+        let still_not_dir = confined_is_dir(&path)
+            .map(|is_directory| !is_directory)
             .unwrap_or(true);
 
         if still_not_dir {
@@ -987,4 +1040,29 @@ fn unbound_key_stub(kbinput: i32) {
     // In C: unbound_key(kbinput) — just show a message
     let msg = format!("Unknown command: {:#x}", kbinput);
     statusline(MessageType::Ahem, &msg);
+}
+
+#[cfg(all(test, feature = "browser"))]
+mod tests {
+    use super::browser_index_for_click;
+
+    #[test]
+    fn browser_click_rejects_negative_and_out_of_view_coordinates() {
+        assert_eq!(browser_index_for_click(0, 3, 2, 10, 20, -1, 0), None);
+        assert_eq!(browser_index_for_click(0, 3, 2, 10, 20, 0, -1), None);
+        assert_eq!(browser_index_for_click(0, 3, 2, 10, 20, 0, 3), None);
+    }
+
+    #[test]
+    fn browser_click_uses_window_relative_x_without_editor_margin() {
+        // The current selection is on the second page (six entries per page).
+        // A click at raw x=5, row=1 selects the first pile on that row.
+        assert_eq!(browser_index_for_click(7, 3, 2, 10, 20, 5, 1), Some(8));
+    }
+
+    #[test]
+    fn browser_click_clamps_to_last_entry() {
+        assert_eq!(browser_index_for_click(7, 3, 2, 10, 9, 12, 1), Some(8));
+        assert_eq!(browser_index_for_click(7, 3, 2, 10, 9, 1000, 2), Some(8));
+    }
 }

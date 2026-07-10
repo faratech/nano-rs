@@ -24,10 +24,13 @@ use crossterm::{
         MouseEvent, MouseEventKind, MouseButton,
     },
 };
-use std::io::{self, Write, stdout};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{self, BufWriter, Stdout, Write, stdout};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::Once;
 use std::time::Duration;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use crate::definitions::*;
 use crate::global::{
     with_state, with_state_mut, state, state_mut, NanoWindow,
@@ -66,30 +69,53 @@ use crate::utils::{
 // otherwise the last painted frame would sit buffered and the screen would look
 // stale until the next keypress — the very symptom the poll fix removed.
 //
-// Re-entrancy: nano's draw functions call one another while "holding" the
-// writer, exactly like they do with AppState. We therefore use the same
-// UnsafeCell-in-a-Sync-static idiom as `NanoCell`; this is sound only because
-// nano is strictly single-threaded.
+// Re-entrancy: nano's draw functions call one another while a local output
+// handle is alive.  The handle therefore cannot itself be a reference into
+// the shared writer.  `TerminalOutput` is an owned proxy that borrows the
+// thread-local writer for one `Write` operation at a time, so nested painters
+// never create aliased mutable references and still share one frame buffer.
 // ---------------------------------------------------------------------------
-struct OutCell(std::cell::UnsafeCell<Option<std::io::BufWriter<std::io::Stdout>>>);
-// SAFETY: nano is strictly single-threaded; no concurrent access ever occurs.
-unsafe impl Sync for OutCell {}
-static OUT: OutCell = OutCell(std::cell::UnsafeCell::new(None));
+/// An owned handle to nano's shared terminal output.
+///
+/// The `Rc` marker keeps the handle on the editor thread.  It contains no
+/// reference to the writer, so several handles may safely coexist while each
+/// individual write is serialized through the thread-local `RefCell`.
+pub struct TerminalOutput(PhantomData<Rc<()>>);
 
-/// Return the shared buffered writer, initialising it on first use.
-#[inline]
-pub fn out() -> &'static mut std::io::BufWriter<std::io::Stdout> {
-    // SAFETY: single-threaded; matches the NanoCell re-entrant-access pattern.
-    unsafe {
-        let slot = &mut *OUT.0.get();
-        slot.get_or_insert_with(|| std::io::BufWriter::with_capacity(64 * 1024, stdout()))
+impl Write for TerminalOutput {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        with_out(|writer| writer.write(buffer))
     }
+
+    fn flush(&mut self) -> io::Result<()> {
+        with_out(Write::flush)
+    }
+
+    fn write_vectored(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        with_out(|writer| writer.write_vectored(buffers))
+    }
+}
+
+/// Run one operation with the shared buffered writer.
+///
+/// The reference cannot escape the callback.  Most rendering code uses
+/// `out()` instead so that it cannot accidentally hold this borrow while
+/// calling another painter.
+#[inline]
+pub fn with_out<R>(operation: impl FnOnce(&mut BufWriter<Stdout>) -> R) -> R {
+    OUT.with(|slot| operation(&mut slot.borrow_mut()))
+}
+
+/// Return an owned output proxy.  No reference to the shared writer escapes.
+#[inline]
+pub fn out() -> TerminalOutput {
+    TerminalOutput(PhantomData)
 }
 
 /// Flush the shared buffered writer to the real terminal.
 #[inline]
 pub fn flush_out() {
-    let _ = out().flush();
+    let _ = with_out(Write::flush);
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +123,15 @@ pub fn flush_out() {
 // ---------------------------------------------------------------------------
 
 thread_local! {
+    /// The one buffered terminal writer used by every output proxy.
+    static OUT: RefCell<BufWriter<Stdout>> =
+        RefCell::new(BufWriter::with_capacity(64 * 1024, stdout()));
+
+    /// Only the thread that installs the process-wide panic hook owns the UI
+    /// terminal.  A recoverable panic on a worker thread must not tear down
+    /// the editor's raw mode or alternate screen.
+    static IS_TERMINAL_UI_THREAD: Cell<bool> = const { Cell::new(false) };
+
     /// A buffer for keystrokes that haven't been handled yet.
     static KEY_BUFFER: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(32));
     /// Index into KEY_BUFFER of the next code to consume.
@@ -130,6 +165,12 @@ thread_local! {
     /// The buffer where recorded key codes are stored.
     #[cfg(not(feature = "tiny"))]
     static MACRO_BUFFER: RefCell<Vec<i32>> = RefCell::new(Vec::new());
+    /// The macro that was active before a new recording began.
+    ///
+    /// Keeping this separate makes starting a recording transactional: when
+    /// the user immediately stops again, the previous macro can be restored.
+    #[cfg(not(feature = "tiny"))]
+    static PREVIOUS_MACRO: RefCell<Option<Vec<i32>>> = RefCell::new(None);
     /// Where the last burst of recorded keystrokes started.
     #[cfg(not(feature = "tiny"))]
     static MILESTONE: RefCell<usize> = RefCell::new(0);
@@ -178,11 +219,135 @@ const ESC: i32 = 0x1B;
 const DEL: i32 = 0x7F;
 const ERR_CODE: i32 = -1;
 
+// Crossterm exposes Shift+Left/Right as modifiers on the base key.  Keep them
+// in the same private range as nano's other dedicated shifted key codes so the
+// modifier remains attached while several events wait in KEY_BUFFER.
+const SHIFT_LEFT_CODE: i32 = 0x451;
+const SHIFT_RIGHT_CODE: i32 = 0x452;
+
 // A sentinel used in assemble_byte_code / assemble_unicode
 const PROCEED: i64 = -44;
 const INVALID_DIGIT: i64 = -77;
 
-static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+const RAW_MODE_ACTIVE: u8 = 1 << 0;
+const ALTERNATE_SCREEN_ACTIVE: u8 = 1 << 1;
+const CURSOR_HIDDEN: u8 = 1 << 2;
+const TERMINAL_READY: u8 = RAW_MODE_ACTIVE | ALTERNATE_SCREEN_ACTIVE | CURSOR_HIDDEN;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalCleanupPlan {
+    show_cursor: bool,
+    leave_alternate_screen: bool,
+    disable_raw_mode: bool,
+}
+
+fn cleanup_plan(active_state: u8) -> TerminalCleanupPlan {
+    TerminalCleanupPlan {
+        show_cursor: active_state & CURSOR_HIDDEN != 0,
+        leave_alternate_screen: active_state & ALTERNATE_SCREEN_ACTIVE != 0,
+        disable_raw_mode: active_state & RAW_MODE_ACTIVE != 0,
+    }
+}
+
+/// A bitset instead of a single "active" boolean lets teardown unwind an
+/// initialization that failed after changing only part of the terminal state.
+static TERMINAL_STATE: AtomicU8 = AtomicU8::new(0);
+static RESIZE_GENERATION: AtomicUsize = AtomicUsize::new(0);
+static INSTALL_PANIC_HOOK: Once = Once::new();
+
+#[cfg(unix)]
+static SAVED_TERMIOS_VALID: AtomicU8 = AtomicU8::new(0);
+#[cfg(unix)]
+static SAVED_TERMIOS: [AtomicU8; std::mem::size_of::<libc::termios>()] =
+    [const { AtomicU8::new(0) }; std::mem::size_of::<libc::termios>()];
+#[cfg(windows)]
+static SAVED_CONSOLE_MODE_VALID: AtomicU8 = AtomicU8::new(0);
+#[cfg(windows)]
+static SAVED_CONSOLE_MODE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Retain an exact, lock-free copy of the pre-raw terminal attributes.  The
+/// bytewise atomic representation is intentional: a fatal signal cannot lock
+/// crossterm's internal saved-mode mutex, but it can safely reconstruct this
+/// snapshot for `tcsetattr`.
+#[cfg(unix)]
+fn remember_pre_raw_termios() {
+    const TTY: &[u8] = b"/dev/tty\0";
+    let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+    let mut fd = libc::STDIN_FILENO;
+    let mut close_fd = false;
+    let mut succeeded = unsafe { libc::tcgetattr(fd, &mut settings) == 0 };
+    if !succeeded {
+        fd = unsafe { libc::open(TTY.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY) };
+        if fd >= 0 {
+            close_fd = true;
+            succeeded = unsafe { libc::tcgetattr(fd, &mut settings) == 0 };
+        }
+    }
+    if close_fd {
+        unsafe { libc::close(fd) };
+    }
+    if !succeeded {
+        SAVED_TERMIOS_VALID.store(0, Ordering::Release);
+        return;
+    }
+
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&settings as *const libc::termios).cast::<u8>(),
+            std::mem::size_of::<libc::termios>(),
+        )
+    };
+    for (slot, byte) in SAVED_TERMIOS.iter().zip(bytes) {
+        slot.store(*byte, Ordering::Relaxed);
+    }
+    SAVED_TERMIOS_VALID.store(1, Ordering::Release);
+}
+
+#[cfg(unix)]
+fn forget_pre_raw_termios() {
+    SAVED_TERMIOS_VALID.store(0, Ordering::Release);
+}
+
+#[cfg(windows)]
+fn remember_pre_raw_console_mode() {
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+    };
+
+    let Ok(input) = (unsafe { GetStdHandle(STD_INPUT_HANDLE) }) else {
+        SAVED_CONSOLE_MODE_VALID.store(0, Ordering::Release);
+        return;
+    };
+    let mut mode = CONSOLE_MODE(0);
+    if unsafe { GetConsoleMode(input, &mut mode) }.is_ok() {
+        SAVED_CONSOLE_MODE.store(mode.0, Ordering::Relaxed);
+        SAVED_CONSOLE_MODE_VALID.store(1, Ordering::Release);
+    } else {
+        SAVED_CONSOLE_MODE_VALID.store(0, Ordering::Release);
+    }
+}
+
+#[cfg(windows)]
+fn restore_pre_raw_console_mode() -> bool {
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE,
+    };
+
+    if SAVED_CONSOLE_MODE_VALID.swap(0, Ordering::AcqRel) == 0 {
+        return false;
+    }
+    let Ok(input) = (unsafe { GetStdHandle(STD_INPUT_HANDLE) }) else {
+        return false;
+    };
+    let mode = SAVED_CONSOLE_MODE.load(Ordering::Relaxed);
+    unsafe { SetConsoleMode(input, CONSOLE_MODE(mode)) }.is_ok()
+}
+
+#[cfg(windows)]
+fn forget_pre_raw_console_mode() {
+    SAVED_CONSOLE_MODE_VALID.store(0, Ordering::Release);
+}
 
 // ---------------------------------------------------------------------------
 // Terminal initialisation / teardown
@@ -190,41 +355,251 @@ static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /* C: (new in Rust port) terminal_init: replaces initscr() + refresh() */
 pub fn terminal_init() -> io::Result<()> {
-    if TERMINAL_ACTIVE.load(Ordering::SeqCst) {
+    if TERMINAL_STATE.load(Ordering::SeqCst) == TERMINAL_READY {
         return Ok(());
     }
 
-    terminal::enable_raw_mode()?;
-    if let Err(e) = execute!(out(), EnterAlternateScreen, Hide) {
-        let _ = terminal::disable_raw_mode();
+    // A previous partial initialization should have cleaned itself up.  Be
+    // defensive if a backend returned an error while doing so.
+    if TERMINAL_STATE.load(Ordering::SeqCst) != 0 {
+        terminal_exit()?;
+    }
+
+    #[cfg(unix)]
+    remember_pre_raw_termios();
+    #[cfg(windows)]
+    remember_pre_raw_console_mode();
+    // Publish the intended transition before calling into the backend.  A
+    // fatal signal or panic immediately after the kernel switches modes must
+    // already know that raw-mode restoration is required.
+    TERMINAL_STATE.fetch_or(RAW_MODE_ACTIVE, Ordering::SeqCst);
+    if let Err(error) = terminal::enable_raw_mode() {
+        #[cfg(unix)]
+        signal_safe_terminal_restore();
+        #[cfg(not(unix))]
+        emergency_terminal_restore();
+        return Err(error);
+    }
+
+    // Mark each transition before issuing it.  A write or flush can report an
+    // error after the terminal consumed the escape sequence, so cleanup must
+    // conservatively issue the inverse operation on every error path.
+    TERMINAL_STATE.fetch_or(ALTERNATE_SCREEN_ACTIVE, Ordering::SeqCst);
+    if let Err(e) = execute!(out(), EnterAlternateScreen) {
+        let _ = terminal_exit();
         return Err(e);
     }
-    TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
+
+    TERMINAL_STATE.fetch_or(CURSOR_HIDDEN, Ordering::SeqCst);
+    if let Err(e) = execute!(out(), Hide) {
+        let _ = terminal_exit();
+        return Err(e);
+    }
+
     Ok(())
 }
 
 /* C: (new in Rust port) terminal_exit: replaces endwin() */
 pub fn terminal_exit() -> io::Result<()> {
-    if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
+    // Keep the bits published until teardown finishes.  If any operation
+    // panics unexpectedly, the panic hook still sees the original state and
+    // can run the direct-output fallback.
+    let active_state = TERMINAL_STATE.load(Ordering::SeqCst);
+    if active_state == 0 {
         return Ok(());
     }
+    let plan = cleanup_plan(active_state);
+    let mut remaining_state = active_state;
 
     let mut first_error: Option<io::Error> = None;
 
-    if let Err(e) = execute!(out(), Show, LeaveAlternateScreen) {
-        first_error = Some(e);
-    }
-
-    if let Err(e) = terminal::disable_raw_mode() {
-        if first_error.is_none() {
+    // Do not combine these commands: if showing the cursor fails, leaving the
+    // alternate screen must still be attempted.
+    if plan.show_cursor {
+        if let Err(e) = execute!(out(), Show) {
             first_error = Some(e);
+        } else {
+            remaining_state &= !CURSOR_HIDDEN;
         }
     }
+
+    if plan.leave_alternate_screen {
+        if let Err(e) = execute!(out(), LeaveAlternateScreen) {
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        } else {
+            remaining_state &= !ALTERNATE_SCREEN_ACTIVE;
+        }
+    }
+
+    if plan.disable_raw_mode {
+        if let Err(e) = terminal::disable_raw_mode() {
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        } else {
+            remaining_state &= !RAW_MODE_ACTIVE;
+            #[cfg(unix)]
+            forget_pre_raw_termios();
+            #[cfg(windows)]
+            forget_pre_raw_console_mode();
+        }
+    }
+
+    TERMINAL_STATE.store(remaining_state, Ordering::SeqCst);
 
     match first_error {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Whether terminal initialization changed any process-visible terminal state.
+/// This includes partial initialization, which callers must treat as active so
+/// that bracketed paste and other modes are unwound conservatively.
+pub fn terminal_is_active() -> bool {
+    TERMINAL_STATE.load(Ordering::SeqCst) != 0
+}
+
+/// Best-effort terminal restoration that does not borrow the shared painter.
+///
+/// A panic can occur while `OUT` is mutably borrowed, so the ordinary teardown
+/// path could itself panic with a `RefCell` borrow error.  This fallback writes
+/// through a fresh stdout handle, then restores raw mode.  All operations are
+/// deliberately fallible and ignored: a panic hook must never panic again.
+pub fn emergency_terminal_restore() {
+    let active_state = TERMINAL_STATE.swap(0, Ordering::SeqCst);
+    if active_state == 0 {
+        return;
+    }
+    let plan = cleanup_plan(active_state);
+
+    let mut output = stdout();
+    // Bracketed paste is enabled by nano after winio initialization.  Sending
+    // its disable sequence is harmless if initialization failed before then.
+    let _ = output.write_all(b"\x1B[?2004l");
+
+    if plan.show_cursor {
+        let _ = execute!(output, Show);
+    }
+    if plan.leave_alternate_screen {
+        let _ = execute!(output, LeaveAlternateScreen);
+    }
+    let _ = output.flush();
+
+    if plan.disable_raw_mode {
+        #[cfg(windows)]
+        let restored_directly = restore_pre_raw_console_mode();
+        #[cfg(not(windows))]
+        let restored_directly = false;
+
+        if !restored_directly {
+            let _ = terminal::disable_raw_mode();
+        }
+        #[cfg(unix)]
+        forget_pre_raw_termios();
+    }
+}
+
+/// Restore terminal state from a fatal Unix signal without allocation, locks,
+/// buffered Rust I/O, or access to editor state.
+///
+/// `write`, `open`, `tcgetattr`, `tcsetattr`, and `close` are specified as
+/// async-signal-safe by POSIX.  The exact pre-raw termios snapshot is published
+/// through atomics before signal handlers are installed.
+#[cfg(unix)]
+pub fn signal_safe_terminal_restore() {
+    let active_state = TERMINAL_STATE.swap(0, Ordering::SeqCst);
+    if active_state == 0 {
+        return;
+    }
+
+    const RESTORE_DISPLAY: &[u8] = b"\x1B[?2004l\x1B[?25h\x1B[?1049l";
+    unsafe {
+        let _ = libc::write(
+            libc::STDOUT_FILENO,
+            RESTORE_DISPLAY.as_ptr().cast(),
+            RESTORE_DISPLAY.len(),
+        );
+    }
+
+    if active_state & RAW_MODE_ACTIVE == 0 {
+        return;
+    }
+
+    const TTY: &[u8] = b"/dev/tty\0";
+    let mut fd = libc::STDIN_FILENO;
+    let mut close_fd = false;
+    let mut current: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut current) != 0 } {
+        fd = unsafe { libc::open(TTY.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY) };
+        if fd < 0 {
+            return;
+        }
+        close_fd = true;
+        if unsafe { libc::tcgetattr(fd, &mut current) != 0 } {
+            unsafe { libc::close(fd) };
+            return;
+        }
+    }
+
+    if SAVED_TERMIOS_VALID.swap(0, Ordering::AcqRel) != 0 {
+        let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                (&mut settings as *mut libc::termios).cast::<u8>(),
+                std::mem::size_of::<libc::termios>(),
+            )
+        };
+        for (byte, slot) in bytes.iter_mut().zip(SAVED_TERMIOS.iter()) {
+            *byte = slot.load(Ordering::Relaxed);
+        }
+        unsafe {
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &settings);
+        }
+    } else {
+        // If the exact snapshot could not be captured, reverse the flags
+        // crossterm clears for raw mode so the user still gets a usable tty.
+        current.c_iflag |= libc::BRKINT | libc::ICRNL | libc::IXON;
+        current.c_oflag |= libc::OPOST;
+        current.c_lflag |= libc::ECHO | libc::ICANON | libc::IEXTEN | libc::ISIG;
+        unsafe {
+            let _ = libc::tcsetattr(fd, libc::TCSANOW, &current);
+        }
+    }
+
+    if close_fd {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
+/// Install one process-wide panic fallback while preserving Rust's existing
+/// panic reporter.  Calling this repeatedly is safe.
+pub fn install_terminal_panic_hook() {
+    INSTALL_PANIC_HOOK.call_once(|| {
+        IS_TERMINAL_UI_THREAD.with(|is_ui_thread| is_ui_thread.set(true));
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let is_ui_thread = IS_TERMINAL_UI_THREAD.with(Cell::get);
+            if panic_should_restore_terminal(is_ui_thread) {
+                #[cfg(unix)]
+                signal_safe_terminal_restore();
+                #[cfg(not(unix))]
+                emergency_terminal_restore();
+            }
+            previous_hook(panic_info);
+        }));
+    });
+}
+
+#[inline]
+fn panic_should_restore_terminal(is_ui_thread: bool) -> bool {
+    // In abort builds every panic terminates the process, regardless of which
+    // thread panicked, so leaving the user's terminal altered is never safe.
+    is_ui_thread || cfg!(panic = "abort")
 }
 
 /* C: (new in Rust port) terminal_size() -> (cols, rows) */
@@ -236,21 +611,149 @@ pub fn terminal_size() -> (u16, u16) {
 pub fn recalculate_screensize() {
     let (cols, rows) = terminal_size();
     with_state_mut(|s| {
-        // Update the three windows
-        s.topwin = NanoWindow { rows: 1, cols, y: 0, x: 0 };
-        // footwin height depends on NO_HELP and LINES
-        let foot_rows = if s.flag_isset(NO_HELP) || (rows as i32) < 5 { 1 } else { 3 };
-        let mid_rows = (rows as i32 - 1 - foot_rows).max(0) as u16;
-        s.midwin = NanoWindow { rows: mid_rows, cols, y: 1, x: 0 };
-        s.footwin = NanoWindow { rows: foot_rows as u16, cols, y: 1 + mid_rows, x: 0 };
-        s.editwinrows = mid_rows as i32;
-        s.editwincols = (cols as i32 - s.margin - s.sidebar).max(1);
+        let layout = calculate_window_layout(
+            cols,
+            rows,
+            s.flag_isset(NO_HELP),
+            s.flag_isset(ZERO),
+            s.flag_isset(MINIBAR),
+            s.flag_isset(EMPTY_LINE),
+        );
+
+        s.topwin = NanoWindow {
+            rows: layout.top_rows,
+            cols,
+            y: 0,
+            x: 0,
+        };
+        s.midwin = NanoWindow {
+            rows: layout.mid_rows,
+            cols,
+            y: layout.mid_y,
+            x: 0,
+        };
+        s.footwin = NanoWindow {
+            rows: layout.foot_rows,
+            cols,
+            y: layout.foot_y,
+            x: 0,
+        };
+        s.editwinrows = layout.mid_rows as i32;
+
+        let decorations = s.margin.max(0) as u16 + s.sidebar.max(0) as u16;
+        s.editwincols = cols.saturating_sub(decorations).max(1) as i32;
     });
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowLayout {
+    top_rows: u16,
+    mid_rows: u16,
+    mid_y: u16,
+    foot_rows: u16,
+    foot_y: u16,
+}
+
+/// Compute nano's three-window geometry without touching the terminal.
+///
+/// This mirrors GNU nano's `window_init()`, including the overlapping
+/// one-line layout and the ZERO/MINIBAR/EMPTY_LINE height rules.  Keeping the
+/// arithmetic in `u16` with saturating operations also makes one-column and
+/// very short synthetic terminals safe to exercise in tests.
+fn calculate_window_layout(
+    _cols: u16,
+    rows: u16,
+    no_help: bool,
+    zero: bool,
+    minibar: bool,
+    empty_line: bool,
+) -> WindowLayout {
+    if rows < 3 {
+        let mid_rows = if zero { rows } else { rows.min(1) };
+        return WindowLayout {
+            top_rows: 0,
+            mid_rows,
+            mid_y: 0,
+            foot_rows: rows.min(1),
+            foot_y: rows.saturating_sub(1),
+        };
+    }
+
+    let minimum = if zero { 3 } else if minibar { 4 } else { 5 };
+    let mut top_rows = if empty_line && rows > minimum { 2 } else { 1 };
+    let foot_rows = if no_help || rows < minimum { 1 } else { 3 };
+
+    if minibar || zero {
+        top_rows = 0;
+    }
+
+    let mid_rows = rows
+        .saturating_sub(top_rows)
+        .saturating_sub(foot_rows)
+        .saturating_add(u16::from(zero));
+
+    WindowLayout {
+        top_rows,
+        mid_rows,
+        mid_y: top_rows,
+        foot_rows,
+        foot_y: rows.saturating_sub(foot_rows),
+    }
 }
 
 /* C: window_init() in nano.c — set up topwin/midwin/footwin from terminal size */
 pub fn window_init() {
     recalculate_screensize();
+}
+
+/// Return the physical screen height represented by the current windows.
+/// ZERO mode intentionally overlaps the edit window and status bar by one
+/// row, so summing window heights would overcount.
+pub fn screen_rows() -> u16 {
+    with_state(|s| {
+        let top = s.topwin.y.saturating_add(s.topwin.rows);
+        let middle = s.midwin.y.saturating_add(s.midwin.rows);
+        let footer = s.footwin.y.saturating_add(s.footwin.rows);
+        top.max(middle).max(footer)
+    })
+}
+
+/// Complete the terminal-wide part of a resize at an input-loop safe point.
+///
+/// The signal/event handlers only publish a request.  Every interactive view
+/// calls this coordinator after it regains control, so terminal dimensions and
+/// window geometry are rebuilt exactly once before that view recalculates its
+/// own derived layout (prompt width, help wrapping, or browser piles).
+pub fn consume_resize_request(input: Option<i32>) -> bool {
+    let pending = crate::nano::THE_WINDOW_RESIZED.load(Ordering::SeqCst);
+    if !resize_was_requested(input, pending) {
+        return false;
+    }
+
+    // `regenerate_screen()` clears the request before rebuilding.  A second
+    // SIGWINCH that arrives during the rebuild therefore remains pending for
+    // the next safe point instead of being lost.
+    crate::nano::regenerate_screen();
+    RESIZE_GENERATION.fetch_add(1, Ordering::SeqCst);
+
+    true
+}
+
+/// Monotonic token used by an outer view to notice a resize consumed by a
+/// nested prompt or help screen.
+pub fn resize_generation() -> usize {
+    RESIZE_GENERATION.load(Ordering::SeqCst)
+}
+
+#[inline]
+fn resize_was_requested(input: Option<i32>, pending: bool) -> bool {
+    match input {
+        // Never discard a real keystroke merely because a signal became
+        // pending at the same time.  Its resize event (or the next explicit
+        // safe-point check) will consume the request without losing input.
+        Some(keycode) => keycode == THE_WINDOW_RESIZED as i32,
+        None => pending,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,31 +763,51 @@ pub fn window_init() {
 /* C: void record_macro(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn record_macro() {
-    RECORDING.with(|r| {
-        let was_recording = *r.borrow();
-        let now_recording = !was_recording;
-        *r.borrow_mut() = now_recording;
-
-        if now_recording {
-            // Save old macro, start fresh
-            MACRO_BUFFER.with(|mb| mb.borrow_mut().clear());
-            MILESTONE.with(|m| *m.borrow_mut() = 0);
-            statusline(MessageType::Remark, "Recording a macro...");
-        } else {
-            let milestone = tl_get!(MILESTONE);
-            if milestone == 0 {
-                // No keystrokes recorded; restore would have done nothing
-                statusline(MessageType::Remark, "Cancelled");
-            } else {
-                // Snip the invoke keystroke
-                MACRO_BUFFER.with(|mb| mb.borrow_mut().truncate(milestone));
-                statusline(MessageType::Remark, "Stopped recording");
-            }
-        }
+    let outcome = toggle_macro_recording();
+    statusline(MessageType::Remark, match outcome {
+        MacroRecordingOutcome::Started => "Recording a macro...",
+        MacroRecordingOutcome::Cancelled => "Cancelled",
+        MacroRecordingOutcome::Stopped => "Stopped recording",
     });
 
     if state().flag_isset(STATEFLAGS) {
         titlebar(None);
+    }
+}
+
+#[cfg(not(feature = "tiny"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacroRecordingOutcome {
+    Started,
+    Cancelled,
+    Stopped,
+}
+
+#[cfg(not(feature = "tiny"))]
+fn toggle_macro_recording() -> MacroRecordingOutcome {
+    if !tl_get!(RECORDING) {
+        let old_macro = MACRO_BUFFER.with(|mb| std::mem::take(&mut *mb.borrow_mut()));
+        PREVIOUS_MACRO.with(|previous| *previous.borrow_mut() = Some(old_macro));
+        tl_set!(MILESTONE, 0);
+        tl_set!(RECORDING, true);
+        return MacroRecordingOutcome::Started;
+    }
+
+    tl_set!(RECORDING, false);
+    let milestone = tl_get!(MILESTONE);
+
+    if milestone == 0 {
+        let previous = PREVIOUS_MACRO
+            .with(|saved| saved.borrow_mut().take())
+            .unwrap_or_default();
+        MACRO_BUFFER.with(|mb| *mb.borrow_mut() = previous);
+        MacroRecordingOutcome::Cancelled
+    } else {
+        MACRO_BUFFER.with(|mb| mb.borrow_mut().truncate(milestone));
+        PREVIOUS_MACRO.with(|saved| {
+            saved.borrow_mut().take();
+        });
+        MacroRecordingOutcome::Stopped
     }
 }
 
@@ -300,8 +823,8 @@ pub fn run_macro() {
     let is_rec = tl_get!(RECORDING);
     if is_rec {
         statusline(MessageType::Ahem, "Cannot run macro while recording");
-        let ml = MACRO_BUFFER.with(|mb| mb.borrow().len());
-        MILESTONE.with(|m| *m.borrow_mut() = ml);
+        let milestone = tl_get!(MILESTONE);
+        MACRO_BUFFER.with(|mb| mb.borrow_mut().truncate(milestone));
         return;
     }
     let mac_len = MACRO_BUFFER.with(|mb| mb.borrow().len());
@@ -388,33 +911,59 @@ pub fn get_code_from_plantation() -> i32 {
             }
 
             if bytes[*pos] == b'{' {
+                // Handle the documented literal-brace spellings first.  In
+                // particular, `{}}` has an empty substring before the first
+                // closing brace, so deriving this from `inner` would miss it.
+                if matches!(bytes.get(*pos + 1), Some(b'{') | Some(b'}')) {
+                    if bytes.get(*pos + 2) != Some(&b'}') {
+                        return MISSING_BRACE as i32;
+                    }
+                    let ch = bytes[*pos + 1] as i32;
+                    *pos += 3;
+                    if *pos < bytes.len() {
+                        put_back(MORE_PLANTS as i32);
+                    }
+                    return ch;
+                }
+
                 // Find closing brace
                 let rest = &s[*pos + 1..];
                 if let Some(close_idx) = rest.find('}') {
                     let inner = &rest[..close_idx];
-                    // Handle {{} and {}}: literal { or }
-                    if inner == "{" || inner == "}" {
-                        let ch = inner.as_bytes()[0] as i32;
-                        *pos += 3; // skip {X}
-                        if *pos < bytes.len() {
-                            put_back(MORE_PLANTS as i32);
-                        }
-                        return ch;
-                    }
                     // It's a command name
                     let cmd = inner.to_string();
                     *pos += 2 + close_idx; // skip {inner}
                     if *pos < bytes.len() {
                         put_back(MORE_PLANTS as i32);
                     }
-                    // Store commandname and resolve shortcut
+
+                    // Resolve the command name exactly as a normal nanorc
+                    // function bind does.  Key labels ("^B", "Left", ...)
+                    // are display strings, not function identifiers, and
+                    // matching against them made expansions such as `{left}`
+                    // fail at runtime.
+                    let planted = crate::rcfile::strtosc(&cmd);
                     with_state_mut(|st| {
                         st.commandname = Some(cmd.clone());
-                        // strtosc equivalent: find shortcut index
-                        let found = st.sclist.iter().position(|sc| {
-                            sc.keystr == cmd.as_str() || sc.keystr.eq_ignore_ascii_case(&cmd)
+                        st.planted_shortcut = planted.map(|mut shortcut| {
+                            // Keep one hidden transient entry so the existing
+                            // command dispatcher can retrieve both the function
+                            // and toggle metadata for PLANTED_A_COMMAND.
+                            shortcut.keystr = "";
+                            shortcut.keycode = PLANTED_A_COMMAND as i32;
+                            shortcut.menus = st.currmenu as i32;
+
+                            if let Some(index) = st.sclist.iter().position(|entry| {
+                                entry.keystr.is_empty()
+                                    && entry.keycode == PLANTED_A_COMMAND as i32
+                            }) {
+                                st.sclist[index] = shortcut;
+                                index
+                            } else {
+                                st.sclist.push(shortcut);
+                                st.sclist.len() - 1
+                            }
                         });
-                        st.planted_shortcut = found;
                     });
                     if with_state(|st| st.planted_shortcut.is_none()) {
                         return NO_SUCH_FUNCTION as i32;
@@ -469,26 +1018,29 @@ pub fn get_input(frame: Option<()>) -> i32 {
 
     let waiting = tl_get!(WAITING_CODES);
     if waiting > 0 {
-        KEY_BUFFER.with(|kb| {
+        let code = KEY_BUFFER.with(|kb| {
             NEXTCODES_IDX.with(|ni| {
                 WAITING_CODES.with(|wc| {
                     let buf = kb.borrow();
                     let mut idx = ni.borrow_mut();
                     let mut w = wc.borrow_mut();
                     *w -= 1;
-
-                    #[cfg(feature = "nanorc")]
-                    if buf[*idx] == MORE_PLANTS as i32 {
-                        *idx += 1;
-                        return get_code_from_plantation();
-                    }
-
                     let code = buf[*idx];
                     *idx += 1;
                     code
                 })
             })
-        })
+        });
+
+        // Expanding a plantation can put additional bytes back into the key
+        // buffer.  Do it only after the buffer/index/count borrow guards above
+        // have been dropped.
+        #[cfg(feature = "nanorc")]
+        if code == MORE_PLANTS as i32 {
+            return get_code_from_plantation();
+        }
+
+        code
     } else {
         ERR_CODE
     }
@@ -502,7 +1054,7 @@ pub fn get_input(frame: Option<()>) -> i32 {
 
 /* C: void read_keys_from(WINDOW *frame) */
 pub fn read_keys_from() {
-    let stdout = out();
+    let mut stdout = out();
 
     // Flush any pending output before blocking
     let _ = stdout.flush();
@@ -513,7 +1065,7 @@ pub fn read_keys_from() {
     let show_cursor_flag = state().flag_isset(SHOW_CURSOR);
     let currmenu = state().currmenu;
     let lastmessage = state().lastmessage;
-    let lines = with_state(|s| s.midwin.rows + s.topwin.rows + s.footwin.rows);
+    let lines = screen_rows();
 
     if reveal && (!spotlight || show_cursor_flag || currmenu == MSPELL)
         && (lines > 1 || lastmessage <= MessageType::Hush)
@@ -539,19 +1091,16 @@ pub fn read_keys_from() {
     NEXTCODES_IDX.with(|ni| *ni.borrow_mut() = 0);
     WAITING_CODES.with(|wc| *wc.borrow_mut() = 0);
 
-    // Translate the first event and push codes
-    translate_event(first_event);
-
     #[cfg(not(feature = "tiny"))]
     {
-        let waiting = tl_get!(WAITING_CODES);
-        if waiting > 0 {
-            KEY_BUFFER.with(|kb| {
-                let _buf = kb.borrow();
-                MILESTONE.with(|m| *m.borrow_mut() = MACRO_BUFFER.with(|mb| mb.borrow().len()));
-            });
-        }
+        // Remember where this terminal burst began.  If it contains the key
+        // that stops recording, record_macro() truncates back to this point.
+        let macro_len = MACRO_BUFFER.with(|mb| mb.borrow().len());
+        tl_set!(MILESTONE, macro_len);
     }
+
+    // Translate the first event and push codes.
+    translate_event(first_event);
 
     // Drain only the events that are already buffered; do NOT wait for new
     // input. A non-zero timeout here is a "wait for the next keystroke" that
@@ -575,6 +1124,10 @@ pub fn read_keys_from() {
 
 /// Push one i32 keycode into the key buffer.
 fn push_keycode(code: i32) {
+    push_keycode_impl(code, true);
+}
+
+fn push_keycode_impl(code: i32, _record: bool) {
     KEY_BUFFER.with(|kb| {
         WAITING_CODES.with(|wc| {
             let mut buf = kb.borrow_mut();
@@ -589,6 +1142,16 @@ fn push_keycode(code: i32) {
             *wc.borrow_mut() += 1;
         });
     });
+
+    #[cfg(not(feature = "tiny"))]
+    if _record && tl_get!(RECORDING) {
+        add_to_macrobuffer(code);
+    }
+}
+
+/// Push a synthetic editor event that must not become part of a macro.
+fn push_unrecorded_keycode(code: i32) {
+    push_keycode_impl(code, false);
 }
 
 /// Translate a crossterm Event into nano key code(s) and push them.
@@ -610,9 +1173,7 @@ fn translate_event(ev: Event) {
         }
         Event::Resize(_w, _h) => {
             crate::nano::THE_WINDOW_RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
-            push_keycode(THE_WINDOW_RESIZED as i32);
-            #[cfg(feature = "tiny")]
-            push_keycode(KEY_FRESH as i32);
+            push_unrecorded_keycode(THE_WINDOW_RESIZED as i32);
         }
         Event::FocusGained => {
             push_keycode(FOCUS_IN as i32);
@@ -630,20 +1191,19 @@ fn translate_key_event(ke: KeyEvent) {
     let alt  = ke.modifiers.contains(KeyModifiers::ALT);
     let shift = ke.modifiers.contains(KeyModifiers::SHIFT);
 
-    // For meta-prefixed keys, nano traditionally expects ESC then the key.
-    // However, when crossterm delivers ALT already decoded, we set meta_key
-    // and push only the underlying code — matching how parse_kbinput handles
-    // single-escape sequences.
-    if alt {
-        state_mut().meta_key = true;
-    }
-
     match ke.code {
         KeyCode::Char(c) => {
             if ctrl {
-                // Ctrl+letter → control code
-                let code = (c as i32) & 0x1F;
-                push_keycode(code);
+                // Use nano's canonical mapping for letters, digits, space,
+                // slash, brackets, underscore and question mark.
+                if c.is_ascii() {
+                    push_keycode(convert_to_control(c as i32));
+                } else {
+                    let mut buf = [0u8; 4];
+                    for &byte in c.encode_utf8(&mut buf).as_bytes() {
+                        push_keycode(byte as i32);
+                    }
+                }
             } else if alt {
                 // Push ESC + character (standard nano escape-sequence convention)
                 // For lowercase letters with shift, or uppercase without shift-metas,
@@ -714,16 +1274,13 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Up => {
             if ctrl && shift {
-                state_mut().shift_held = true;
-                push_keycode(CONTROL_UP as i32);
+                push_keycode(SHIFT_CONTROL_UP as i32);
             } else if ctrl {
                 push_keycode(CONTROL_UP as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_PPAGE);
+                push_keycode(SHIFT_ALT_UP as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_UP);
+                push_keycode(SHIFT_UP as i32);
             } else if alt {
                 push_keycode(ALT_UP as i32);
             } else {
@@ -732,16 +1289,13 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Down => {
             if ctrl && shift {
-                state_mut().shift_held = true;
-                push_keycode(CONTROL_DOWN as i32);
+                push_keycode(SHIFT_CONTROL_DOWN as i32);
             } else if ctrl {
                 push_keycode(CONTROL_DOWN as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_NPAGE);
+                push_keycode(SHIFT_ALT_DOWN as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_DOWN);
+                push_keycode(SHIFT_DOWN as i32);
             } else if alt {
                 push_keycode(ALT_DOWN as i32);
             } else {
@@ -750,16 +1304,13 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Left => {
             if ctrl && shift {
-                state_mut().shift_held = true;
-                push_keycode(CONTROL_LEFT as i32);
+                push_keycode(SHIFT_CONTROL_LEFT as i32);
             } else if ctrl {
                 push_keycode(CONTROL_LEFT as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_HOME);
+                push_keycode(SHIFT_ALT_LEFT as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_LEFT);
+                push_keycode(SHIFT_LEFT_CODE);
             } else if alt {
                 push_keycode(ALT_LEFT as i32);
             } else {
@@ -768,16 +1319,13 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::Right => {
             if ctrl && shift {
-                state_mut().shift_held = true;
-                push_keycode(CONTROL_RIGHT as i32);
+                push_keycode(SHIFT_CONTROL_RIGHT as i32);
             } else if ctrl {
                 push_keycode(CONTROL_RIGHT as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_END);
+                push_keycode(SHIFT_ALT_RIGHT as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_RIGHT);
+                push_keycode(SHIFT_RIGHT_CODE);
             } else if alt {
                 push_keycode(ALT_RIGHT as i32);
             } else {
@@ -785,14 +1333,14 @@ fn translate_key_event(ke: KeyEvent) {
             }
         }
         KeyCode::Home => {
-            if ctrl {
+            if ctrl && shift {
+                push_keycode(SHIFT_CONTROL_HOME as i32);
+            } else if ctrl {
                 push_keycode(CONTROL_HOME as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_HOME);
+                push_keycode(SHIFT_HOME as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_HOME);
+                push_keycode(SHIFT_HOME as i32);
             } else if alt {
                 push_keycode(ALT_HOME as i32);
             } else {
@@ -800,14 +1348,14 @@ fn translate_key_event(ke: KeyEvent) {
             }
         }
         KeyCode::End => {
-            if ctrl {
+            if ctrl && shift {
+                push_keycode(SHIFT_CONTROL_END as i32);
+            } else if ctrl {
                 push_keycode(CONTROL_END as i32);
             } else if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_END);
+                push_keycode(SHIFT_END as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_END);
+                push_keycode(SHIFT_END as i32);
             } else if alt {
                 push_keycode(ALT_END as i32);
             } else {
@@ -816,11 +1364,9 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::PageUp => {
             if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_PPAGE);
+                push_keycode(SHIFT_PAGEUP as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_PPAGE);
+                push_keycode(SHIFT_PAGEUP as i32);
             } else if alt {
                 push_keycode(ALT_PAGEUP as i32);
             } else {
@@ -829,11 +1375,9 @@ fn translate_key_event(ke: KeyEvent) {
         }
         KeyCode::PageDown => {
             if shift && alt {
-                state_mut().shift_held = true;
-                push_keycode(KEY_NPAGE);
+                push_keycode(SHIFT_PAGEDOWN as i32);
             } else if shift {
-                state_mut().shift_held = true;
-                push_keycode(KEY_NPAGE);
+                push_keycode(SHIFT_PAGEDOWN as i32);
             } else if alt {
                 push_keycode(ALT_PAGEDOWN as i32);
             } else {
@@ -1404,8 +1948,7 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
 
     let keycode = get_input(Some(()));
 
-    #[cfg(not(feature = "tiny"))]
-    if keycode == THE_WINDOW_RESIZED as i32 {
+    if consume_resize_request(Some(keycode)) {
         *count = 999;
         return Vec::new();
     }
@@ -1426,8 +1969,7 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
                 unicode = assemble_unicode(k);
             }
 
-            #[cfg(not(feature = "tiny"))]
-            if last_keycode == THE_WINDOW_RESIZED as i32 {
+            if consume_resize_request(Some(last_keycode)) {
                 *count = 999;
                 return Vec::new();
             }
@@ -1723,6 +2265,36 @@ pub fn parse_kbinput() -> i32 {
 
 /// Apply configured key remappings (controlleft, controlright, etc.)
 fn apply_custom_keycode(keycode: i32) -> i32 {
+    // Crossterm can deliver many events in one burst.  Decode dedicated
+    // shifted codes only when each event is consumed so `shift_held` cannot be
+    // reset or leaked by a neighboring queued event.
+    let shifted_navigation = match keycode {
+            SHIFT_LEFT_CODE => Some(KEY_LEFT),
+            SHIFT_RIGHT_CODE => Some(KEY_RIGHT),
+            k if k == SHIFT_UP as i32 => Some(KEY_UP),
+            k if k == SHIFT_DOWN as i32 => Some(KEY_DOWN),
+            k if k == SHIFT_HOME as i32 => Some(KEY_HOME),
+            k if k == SHIFT_END as i32 => Some(KEY_END),
+            k if k == SHIFT_PAGEUP as i32 => Some(KEY_PPAGE),
+            k if k == SHIFT_PAGEDOWN as i32 => Some(KEY_NPAGE),
+            k if k == SHIFT_CONTROL_LEFT as i32 => Some(CONTROL_LEFT as i32),
+            k if k == SHIFT_CONTROL_RIGHT as i32 => Some(CONTROL_RIGHT as i32),
+            k if k == SHIFT_CONTROL_UP as i32 => Some(CONTROL_UP as i32),
+            k if k == SHIFT_CONTROL_DOWN as i32 => Some(CONTROL_DOWN as i32),
+            k if k == SHIFT_CONTROL_HOME as i32 => Some(CONTROL_HOME as i32),
+            k if k == SHIFT_CONTROL_END as i32 => Some(CONTROL_END as i32),
+            k if k == SHIFT_ALT_LEFT as i32 => Some(KEY_HOME),
+            k if k == SHIFT_ALT_RIGHT as i32 => Some(KEY_END),
+            k if k == SHIFT_ALT_UP as i32 => Some(KEY_PPAGE),
+            k if k == SHIFT_ALT_DOWN as i32 => Some(KEY_NPAGE),
+            _ => None,
+    };
+
+    if let Some(navigation) = shifted_navigation {
+        state_mut().shift_held = true;
+        return navigation;
+    }
+
     let (cl, cr, cu, cd, ch, ce) = with_state(|s| (
         s.controlleft, s.controlright, s.controlup, s.controldown,
         s.controlhome, s.controlend,
@@ -1847,16 +2419,17 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
         && event.x >= mid_x && event.x < mid_x + mid_cols;
     let in_footer = event.y >= foot_y && event.y < foot_y + foot_rows;
 
-    let margin = state().margin;
-    *mouse_x = event.x as i32 - if in_middle { margin } else { 0 };
+    let (margin, currmenu) = with_state(|s| (s.margin, s.currmenu));
+    // Only the main editor's middle window is expressed relative to the text
+    // area after the line-number margin.  Browser/help layouts start at the
+    // window origin and must receive the raw x coordinate.
+    *mouse_x = event.x as i32 - if in_middle && currmenu == MMAIN { margin } else { 0 };
     *mouse_y = event.y as i32;
 
     let bstate = event.bstate;
 
     if bstate & (BUTTON1_RELEASED | BUTTON1_CLICKED) != 0 {
         let sidebar = state().sidebar;
-        let currmenu = state().currmenu;
-
         if in_middle && sidebar != 0 && event.x == cols - 1 && currmenu == MMAIN {
             // Clicking in the "scrollbar" goes to the roughly corresponding line.
             let editwinrows = state().editwinrows as isize;
@@ -1954,7 +2527,7 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
 
 /* C: void blank_row(WINDOW *window, int row) */
 pub fn blank_row(win: &NanoWindow, row: u16) {
-    let stdout = out();
+    let mut stdout = out();
     let _cols = win.cols;
     let abs_y = win.y + row;
     let _ = queue!(stdout,
@@ -1977,7 +2550,7 @@ pub fn blank_edit() {
     let (editwinrows, midwin_y, midwin_x, _midwin_cols) = with_state(|s| {
         (s.editwinrows, s.midwin.y, s.midwin.x, s.midwin.cols)
     });
-    let stdout = out();
+    let mut stdout = out();
     for row in 0..editwinrows {
         let _ = queue!(stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
@@ -1986,10 +2559,144 @@ pub fn blank_edit() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Filename-completion candidate grid
+// ---------------------------------------------------------------------------
+
+/// One cell in the filename-completion grid.  A `None` index is the overflow
+/// marker that replaces the final visible candidate when more names exist.
+#[cfg(feature = "tabcomp")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompletionCell {
+    row: usize,
+    column: usize,
+    match_index: Option<usize>,
+}
+
+/// Terminal-independent geometry for the filename-completion list.
+///
+/// Keeping this calculation separate from painting makes the boundary cases
+/// (one-column terminals, wide Unicode names, and lists taller than the edit
+/// window) testable without a PTY.
+#[cfg(feature = "tabcomp")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompletionGrid {
+    name_width: usize,
+    cells: Vec<CompletionCell>,
+}
+
+#[cfg(feature = "tabcomp")]
+fn completion_grid(
+    matches: &[String],
+    cols: usize,
+    edit_rows: usize,
+    reserve_bottom_row: bool,
+) -> CompletionGrid {
+    if matches.len() < 2 || cols == 0 || edit_rows == 0 {
+        return CompletionGrid { name_width: 0, cells: Vec::new() };
+    }
+
+    let available_rows = edit_rows.saturating_sub(usize::from(reserve_bottom_row));
+    if available_rows == 0 {
+        return CompletionGrid { name_width: 0, cells: Vec::new() };
+    }
+
+    // GNU nano leaves one terminal column unused when possible.  On a truly
+    // one-column terminal, however, retaining a width of one is more useful
+    // than producing an entirely invisible list.
+    let width_limit = cols.saturating_sub(1).max(1);
+    let name_width = matches
+        .iter()
+        .map(|name| breadth(name))
+        .max()
+        .unwrap_or(0)
+        .min(width_limit);
+    let column_span = name_width.saturating_add(2).max(1);
+    let ncols = (cols.saturating_add(1) / column_span).max(1);
+    let nrows = matches.len().div_ceil(ncols);
+    let last_row = available_rows - 1;
+
+    // Match nano's established placement: keep one blank row between a short
+    // list and the prompt, while a tall list starts at the top and uses its
+    // final row for an overflow marker.
+    let first_row = if nrows < last_row { last_row - nrows } else { 0 };
+
+    let mut cells = Vec::new();
+    for match_index in 0..matches.len() {
+        let row = first_row + match_index / ncols;
+        if row > last_row {
+            break;
+        }
+        let column_in_grid = match_index % ncols;
+        let column = column_span.saturating_mul(column_in_grid);
+
+        // When another complete row would not fit, reserve the bottom-right
+        // cell for the same `(more)` indicator used by GNU nano.
+        if row == last_row
+            && column_in_grid + 1 == ncols
+            && match_index + 1 < matches.len()
+        {
+            cells.push(CompletionCell { row, column, match_index: None });
+            break;
+        }
+
+        cells.push(CompletionCell {
+            row,
+            column,
+            match_index: Some(match_index),
+        });
+    }
+
+    CompletionGrid { name_width, cells }
+}
+
+/// Blank the edit area and paint a sorted set of filename completions there.
+/// The caller owns list lifetime: its existing refresh callback redraws the
+/// edit view when completion ends or the resize coordinator rebuilds windows.
+#[cfg(feature = "tabcomp")]
+pub fn show_completion_candidates(matches: &[String]) {
+    let (cols, edit_rows, reserve_bottom_row, midwin_x, midwin_y) = with_state(|s| {
+        (
+            s.midwin.cols as usize,
+            s.editwinrows.max(0) as usize,
+            s.flag_isset(ZERO) && screen_rows() > 1,
+            s.midwin.x,
+            s.midwin.y,
+        )
+    });
+    let grid = completion_grid(matches, cols, edit_rows, reserve_bottom_row);
+    if grid.cells.is_empty() {
+        return;
+    }
+
+    blank_edit();
+    let mut stdout = out();
+    let _ = queue!(stdout, Hide);
+
+    for cell in grid.cells {
+        let text = match cell.match_index {
+            Some(index) => display_string(&matches[index], 0, grid.name_width, false, false),
+            None => display_string("(more)", 0, grid.name_width, false, false),
+        };
+        let remaining = cols.saturating_sub(cell.column);
+        let visible = display_string(&text, 0, remaining, false, false);
+        let _ = queue!(
+            stdout,
+            MoveTo(
+                midwin_x.saturating_add(cell.column as u16),
+                midwin_y.saturating_add(cell.row as u16),
+            ),
+            Print(visible),
+        );
+    }
+
+    let _ = stdout.flush();
+}
+
 /* C: void blank_statusbar(void) */
 pub fn blank_statusbar() {
     let (footwin_x, footwin_y) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let stdout = out();
+    let mut stdout = out();
     let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Clear(ClearType::UntilNewLine));
 }
 
@@ -1997,12 +2704,12 @@ pub fn blank_statusbar() {
 pub fn wipe_statusbar() {
     state_mut().lastmessage = MessageType::Vacuum;
 
-    let (zero, minibar, lines, currmenu) = with_state(|s| (
+    let (zero, minibar, currmenu) = with_state(|s| (
         s.flag_isset(ZERO),
         s.flag_isset(MINIBAR),
-        s.midwin.rows + s.topwin.rows + s.footwin.rows,
         s.currmenu,
     ));
+    let lines = screen_rows();
 
     if (zero || minibar || lines == 1) && currmenu == MMAIN {
         return;
@@ -2014,15 +2721,15 @@ pub fn wipe_statusbar() {
 
 /* C: void blank_bottombars(void) */
 pub fn blank_bottombars() {
-    let (no_help, lines, footwin_y, footwin_x) = with_state(|s| (
+    let (no_help, footwin_y, footwin_x) = with_state(|s| (
         s.flag_isset(NO_HELP),
-        s.midwin.rows + s.topwin.rows + s.footwin.rows,
         s.footwin.y,
         s.footwin.x,
     ));
+    let lines = screen_rows();
 
     if !no_help && lines > 5 {
-        let stdout = out();
+        let mut stdout = out();
         let _ = queue!(stdout,
             MoveTo(footwin_x, footwin_y + 1),
             Clear(ClearType::UntilNewLine),
@@ -2045,7 +2752,8 @@ pub fn blank_it_when_expired() {
         wipe_statusbar();
     }
 
-    let (currmenu, zero, lines) = with_state(|s| (s.currmenu, s.flag_isset(ZERO), s.midwin.rows + s.topwin.rows + s.footwin.rows));
+    let (currmenu, zero) = with_state(|s| (s.currmenu, s.flag_isset(ZERO)));
+    let lines = screen_rows();
     if currmenu == MMAIN && (zero || lines == 1) {
         // Redraw last row of edit window
         let _ = out().flush();
@@ -2340,7 +3048,7 @@ pub fn buffer_count() -> i32 {
 /* C: void show_states_at(WINDOW *window) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn show_states_at_win(win: &NanoWindow, cur_y: u16, cur_x: u16) {
-    let stdout = out();
+    let mut stdout = out();
     let (autoindent, has_mark, break_long, _recording, softwrap) = with_state(|s| (
         s.flag_isset(AUTOINDENT),
         s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some(),
@@ -2420,7 +3128,7 @@ pub fn reset_color() {
 /* C: void set_color(const colortype *varnish) — for syntax highlighting */
 #[cfg(feature = "color")]
 pub fn set_color(varnish: &ColorType) {
-    let stdout = out();
+    let mut stdout = out();
     // Apply foreground color
     if varnish.fg >= 0 {
         let color = ncurses_color_to_crossterm(varnish.fg);
@@ -2506,60 +3214,47 @@ pub fn titlebar(path: Option<&str>) {
 
     let (upperleft, prefix, state, caption) = compute_titlebar_strings(path, currmenu, inhelp);
 
-    let verlen = breadth(&upperleft) + 3;
-    let prefixlen = if !prefix.is_empty() { breadth(&prefix) + 1 } else { 0 };
-    let pathlen = breadth(&caption);
-    let statelen = if !state.is_empty() { breadth(&state) + 2 } else { 0 };
     let cols = cols as usize;
-
-    let pluglen: usize = 0; // placeholder for "Modified" space reservation
-
-    let mut ver_use = verlen;
-    let mut stat_use = statelen;
-    let mut plg_use = pluglen;
-
-    if ver_use + prefixlen + pathlen + plg_use + stat_use > cols {
-        ver_use = 2;
-    }
-    if ver_use + prefixlen + pathlen + plg_use + stat_use > cols {
-        plg_use = 0;
-    }
-    if ver_use + prefixlen + pathlen + plg_use + stat_use > cols {
-        ver_use = 0;
-        if stat_use > 2 { stat_use -= 2; }
-    }
-
-    let offset = if ver_use > 0 {
-        ver_use + (cols.saturating_sub(ver_use + plg_use + stat_use + prefixlen + pathlen)) / 2
-    } else {
-        0
-    };
+    let reserve_modified = !inhelp && path.is_none() && currmenu != MLINTER && with_state(|s| {
+        let file = s.openfile.as_ref();
+        !s.flag_isset(VIEW_MODE)
+            && !s.flag_isset(STATEFLAGS)
+            && !s.flag_isset(RESTRICTED)
+            && !file.map(|f| f.modified).unwrap_or(false)
+    });
+    let layout = calculate_titlebar_layout(
+        &upperleft,
+        &prefix,
+        &state,
+        &caption,
+        reserve_modified,
+        cols,
+    );
 
     // Print version / buffer ranking
-    if ver_use > 0 && ver_use + prefixlen + pathlen + plg_use + stat_use <= cols {
+    if layout.show_upperleft {
         let _ = queue!(stdout, MoveTo(topwin_x + 2, topwin_y));
         let _ = queue!(stdout, Print(&upperleft));
     }
 
     // Print prefix
-    if ver_use + prefixlen + pathlen + plg_use + stat_use <= cols && !prefix.is_empty() {
-        let _ = queue!(stdout, MoveTo(topwin_x + offset as u16, topwin_y));
+    if layout.show_prefix && !prefix.is_empty() {
+        let _ = queue!(stdout, MoveTo(topwin_x + layout.offset as u16, topwin_y));
         let _ = queue!(stdout, Print(&prefix));
         let _ = queue!(stdout, Print(" "));
     } else {
-        let _ = queue!(stdout, MoveTo(topwin_x + offset as u16, topwin_y));
+        let _ = queue!(stdout, MoveTo(topwin_x + layout.offset as u16, topwin_y));
     }
 
     // Print path / title
-    let _available = cols.saturating_sub(stat_use + plg_use);
-    if pathlen + plg_use + stat_use <= cols {
-        let disp = display_string(&caption, 0, pathlen, false, false);
+    if layout.pathlen + layout.pluglen + layout.statelen <= cols {
+        let disp = display_string(&caption, 0, layout.pathlen, false, false);
         let _ = queue!(stdout, Print(&disp));
-    } else if 5 + stat_use <= cols {
+    } else if 5 + layout.statelen <= cols {
         let _ = queue!(stdout, Print("..."));
         let disp = display_string(&caption,
-            3 + pathlen.saturating_sub(cols.saturating_sub(stat_use)),
-            cols.saturating_sub(stat_use),
+            3 + layout.pathlen.saturating_sub(cols.saturating_sub(layout.statelen)),
+            cols.saturating_sub(layout.statelen),
             false, false);
         let _ = queue!(stdout, Print(&disp));
     }
@@ -2576,27 +3271,100 @@ pub fn titlebar(path: Option<&str>) {
             if modified && cols > 1 {
                 let _ = queue!(stdout, Print(" *"));
             }
-            if stat_use < cols {
-                let state_col = (cols + 2).saturating_sub(stat_use);
+            if layout.statelen < cols {
+                let state_col = (cols + 2).saturating_sub(layout.statelen);
                 let _ = queue!(stdout, MoveTo(topwin_x + state_col as u16, topwin_y));
                 show_states_at_win(&crate::global::state().topwin.clone(), 0, state_col as u16);
             }
         } else {
-            print_state_word(&state, stat_use, cols, topwin_x, topwin_y);
+            print_state_word(&state, layout.statelen, cols, topwin_x, topwin_y);
         }
     }
     #[cfg(feature = "tiny")]
     {
-        print_state_word(&state, stat_use, cols, topwin_x, topwin_y);
+        print_state_word(&state, layout.statelen, cols, topwin_x, topwin_y);
     }
 
     queue_reset_color(&mut stdout);
     let _ = stdout.flush();
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TitlebarLayout {
+    pathlen: usize,
+    statelen: usize,
+    pluglen: usize,
+    offset: usize,
+    show_upperleft: bool,
+    show_prefix: bool,
+}
+
+fn calculate_titlebar_layout(
+    upperleft: &str,
+    prefix: &str,
+    state_word: &str,
+    caption: &str,
+    reserve_modified: bool,
+    cols: usize,
+) -> TitlebarLayout {
+    let mut verlen = breadth(upperleft) + 3;
+    let prefixlen = if prefix.is_empty() { 0 } else { breadth(prefix) + 1 };
+    let mut pathlen = breadth(caption);
+    // GNU nano always reserves the two side cells initially.  They are eaten
+    // only after the version and the Modified placeholder have been
+    // sacrificed on a narrow terminal.
+    let mut statelen = breadth(state_word) + 2;
+    if statelen > 2 {
+        pathlen += 1;
+    }
+    let mut pluglen = if reserve_modified {
+        breadth("Modified") + 1
+    } else {
+        0
+    };
+
+    let fits = |v: usize, p: usize, path: usize, plug: usize, state: usize| {
+        v.saturating_add(p)
+            .saturating_add(path)
+            .saturating_add(plug)
+            .saturating_add(state)
+            <= cols
+    };
+
+    let show_upperleft = fits(verlen, prefixlen, pathlen, pluglen, statelen);
+    if !show_upperleft {
+        verlen = 2;
+        if !fits(verlen, prefixlen, pathlen, pluglen, statelen) {
+            pluglen = 0;
+        }
+        if !fits(verlen, prefixlen, pathlen, pluglen, statelen) {
+            verlen = 0;
+            statelen = statelen.saturating_sub(2);
+        }
+    }
+
+    let show_prefix = fits(verlen, prefixlen, pathlen, pluglen, statelen);
+    let offset = if verlen > 0 {
+        verlen + cols
+            .saturating_sub(verlen + pluglen + statelen + prefixlen + pathlen)
+            / 2
+    } else {
+        0
+    };
+
+    TitlebarLayout {
+        pathlen,
+        statelen,
+        pluglen,
+        offset,
+        show_upperleft,
+        show_prefix,
+    }
+}
+
 fn print_state_word(state: &str, statelen: usize, cols: usize, x: u16, y: u16) {
     if statelen > 0 {
-        let stdout = out();
+        let mut stdout = out();
         if statelen <= cols {
             let col = (cols - statelen) as u16;
             let _ = queue!(stdout, MoveTo(x + col, y), Print(state));
@@ -2659,13 +3427,14 @@ fn compute_titlebar_strings(
             upperleft = "GNU nano".to_string();
         }
 
-        let (filename, modified, view_mode, restricted) = with_state(|s| {
+        let (filename, modified, view_mode, stateflags, restricted) = with_state(|s| {
             let f = s.openfile.as_ref();
             let fname = f.map(|f| f.filename.clone()).unwrap_or_default();
             let modif = f.map(|f| f.modified).unwrap_or(false);
             let view = s.flag_isset(VIEW_MODE);
+            let stateflags = s.flag_isset(STATEFLAGS);
             let rest = s.flag_isset(RESTRICTED);
-            (fname, modif, view, rest)
+            (fname, modif, view, stateflags, rest)
         });
 
         if filename.is_empty() {
@@ -2676,6 +3445,8 @@ fn compute_titlebar_strings(
 
         if view_mode {
             state = "View".to_string();
+        } else if stateflags {
+            state = "+.xxxxx".to_string();
         } else if modified {
             state = "Modified".to_string();
         } else if restricted {
@@ -2724,7 +3495,7 @@ pub fn minibar() {
 
     if cols == 0 { return; }
 
-    let stdout = out();
+    let mut stdout = out();
 
     // Draw colored bar
     apply_interface_color(mini_pair);
@@ -2931,17 +3702,16 @@ pub fn statusline(importance: MessageType, msg: &str) {
         return;
     }
 
-    let (cols, footwin_x, footwin_y, _zero, _minibar_on, _lines, _currmenu) = with_state(|s| (
+    let (cols, footwin_x, footwin_y, _zero, _minibar_on, _currmenu) = with_state(|s| (
         s.footwin.cols as usize,
         s.footwin.x,
         s.footwin.y,
         s.flag_isset(ZERO),
         s.flag_isset(MINIBAR),
-        s.midwin.rows + s.topwin.rows + s.footwin.rows,
         s.currmenu,
     ));
 
-    let stdout = out();
+    let mut stdout = out();
 
     // If multiple ALERT messages, add trailing dots
     if lastmessage == MessageType::Alert {
@@ -3065,7 +3835,7 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
 /// Internal: post_one_key with explicit row/col positioning (used by bottombars).
 fn post_one_key_at(keystroke: &str, tag: &str, width: usize, row: u16, col: u16) {
     let (footwin_x, footwin_y) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let stdout = out();
+    let mut stdout = out();
     let _ = queue!(stdout, MoveTo(footwin_x + col, footwin_y + row));
     post_one_key(keystroke, tag, width as i32);
 }
@@ -3074,12 +3844,12 @@ fn post_one_key_at(keystroke: &str, tag: &str, width: usize, row: u16, col: u16)
 pub fn bottombars(menu: u32) {
     state_mut().currmenu = menu;
 
-    let (no_help, lines, zero, minibar_on) = with_state(|s| (
+    let (no_help, zero, minibar_on) = with_state(|s| (
         s.flag_isset(NO_HELP),
-        s.midwin.rows + s.topwin.rows + s.footwin.rows,
         s.flag_isset(ZERO),
         s.flag_isset(MINIBAR),
     ));
+    let lines = screen_rows();
 
     let min_lines = if zero { 3 } else if minibar_on { 4 } else { 5 };
     if no_help || (lines as i32) < min_lines { return; }
@@ -3577,7 +4347,7 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     let (midwin_x, midwin_y, margin, cols, _sidebar, editwincols) = with_state(|s| {
         (s.midwin.x, s.midwin.y, s.margin, s.midwin.cols as usize, s.sidebar, s.editwincols as usize)
     });
-    let stdout = out();
+    let mut stdout = out();
 
     let abs_y = midwin_y + row as u16;
 
@@ -3722,7 +4492,7 @@ fn apply_syntax_highlighting(
             return;
         }
         set_color(v);
-        let stdout = out();
+        let mut stdout = out();
         let _ = queue!(stdout,
             MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y),
             Print(piece),
@@ -3942,7 +4712,7 @@ fn apply_mark_highlighting(
         let selected_pair = state().interface_color_pair[SELECTED_TEXT];
         apply_interface_color(selected_pair);
 
-        let stdout = out();
+        let mut stdout = out();
         let _ = queue!(stdout, MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y));
         match paintlen {
             Some(n) => { let _ = queue!(stdout, Print(&converted[thetext_x..thetext_x + n])); }
@@ -3999,7 +4769,7 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     let (midwin_x, midwin_y, margin, _sidebar, _hilite) = with_state(|s| (
         s.midwin.x, s.midwin.y, s.margin, s.sidebar, s.hilite_attribute,
     ));
-    let stdout = out();
+    let mut stdout = out();
 
     // Left-scroll indicator
     if from_col > 0 && !converted.is_empty() {
@@ -4178,7 +4948,7 @@ pub fn draw_scrollbar() {
     let (midwin_x, midwin_y, cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
     let bar_pair = state().interface_color_pair[SCROLL_BAR];
 
-    let stdout = out();
+    let mut stdout = out();
     let mut bardata = Vec::with_capacity(editwinrows as usize);
 
     for row in 0..editwinrows {
@@ -4240,7 +5010,7 @@ pub fn edit_scroll(direction: bool) {
     // Actually scroll the text of the edit window one row up or down.
     let (midwin_y, editwinrows) = with_state(|s| (s.midwin.y, s.editwinrows));
     {
-        let stdout = out();
+        let mut stdout = out();
         if direction == BACKWARD {
             let _ = queue!(stdout, MoveTo(0, midwin_y), ScrollDown(1));
         } else {
@@ -4443,7 +5213,7 @@ pub fn edit_refresh() {
 
     // Blank remaining rows
     let (midwin_x, midwin_y, midwin_cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
-    let stdout = out();
+    let mut stdout = out();
     while row < editwinrows {
         let _ = queue!(stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
@@ -4663,7 +5433,7 @@ pub fn spotlight(from_col: usize, to_col: usize) {
     let spot_pair = state().interface_color_pair[SPOTLIGHTED];
     apply_interface_color(spot_pair);
 
-    let stdout = out();
+    let mut stdout = out();
     let _ = queue!(stdout, Print(&word[..actual_x(&word, to_col_eff)]));
 
     if overshoots {
@@ -4714,7 +5484,7 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
         };
 
         apply_interface_color(spot_pair);
-        let stdout = out();
+        let mut stdout = out();
         let _ = queue!(stdout, Print(&word[..actual_x(&word, break_col)]));
         reset_color();
 
@@ -4833,7 +5603,7 @@ pub fn do_credits() {
             let col = if text_width < cols { (cols - text_width) / 2 } else { 0 };
             let row = editwinrows - 1;
             let (midwin_x, midwin_y) = with_state(|s| (s.midwin.x, s.midwin.y));
-            let stdout = out();
+            let mut stdout = out();
             let _ = queue!(stdout, MoveTo(midwin_x + col as u16, midwin_y + row as u16), Print(text));
             let _ = stdout.flush();
         }
@@ -5033,4 +5803,297 @@ pub fn get_midwin() -> NanoWindow {
 /// Return reference to footwin for external use.
 pub fn get_footwin() -> NanoWindow {
     state().footwin.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recoverable_worker_panic_does_not_own_terminal_cleanup() {
+        assert!(panic_should_restore_terminal(true));
+
+        #[cfg(panic = "unwind")]
+        assert!(!panic_should_restore_terminal(false));
+
+        #[cfg(panic = "abort")]
+        assert!(panic_should_restore_terminal(false));
+
+        let previous = IS_TERMINAL_UI_THREAD.with(|is_ui_thread| is_ui_thread.replace(true));
+        let worker_owns_terminal = std::thread::spawn(|| {
+            IS_TERMINAL_UI_THREAD.with(Cell::get)
+        }).join().unwrap();
+        IS_TERMINAL_UI_THREAD.with(|is_ui_thread| is_ui_thread.set(previous));
+
+        assert!(!worker_owns_terminal);
+    }
+
+    #[test]
+    fn cleanup_plan_unwinds_every_partial_terminal_transition() {
+        assert_eq!(
+            cleanup_plan(RAW_MODE_ACTIVE),
+            TerminalCleanupPlan {
+                show_cursor: false,
+                leave_alternate_screen: false,
+                disable_raw_mode: true,
+            },
+        );
+        assert_eq!(
+            cleanup_plan(RAW_MODE_ACTIVE | ALTERNATE_SCREEN_ACTIVE),
+            TerminalCleanupPlan {
+                show_cursor: false,
+                leave_alternate_screen: true,
+                disable_raw_mode: true,
+            },
+        );
+        assert_eq!(
+            cleanup_plan(TERMINAL_READY),
+            TerminalCleanupPlan {
+                show_cursor: true,
+                leave_alternate_screen: true,
+                disable_raw_mode: true,
+            },
+        );
+    }
+
+    #[test]
+    fn terminal_output_handles_can_be_used_interleaved() {
+        let mut first = out();
+        let mut second = out();
+
+        // Keeping one handle alive while acquiring and using another must not
+        // retain a borrow of the underlying writer.  Under the old `&'static
+        // mut BufWriter` API, using `first` again after creating `second`
+        // exercised the aliased mutable references under Miri.
+        first.write_all(&[]).unwrap();
+        second.write_all(&[]).unwrap();
+        footwin_waddstr("");
+        flush_out();
+        first.write_all(&[]).unwrap();
+    }
+
+    fn reset_input_buffer() {
+        KEY_BUFFER.with(|buffer| buffer.borrow_mut().clear());
+        tl_set!(NEXTCODES_IDX, 0);
+        tl_set!(WAITING_CODES, 0);
+        tl_set!(ESCAPES, 0);
+        tl_set!(FIRST_ESCAPE_WAS_ALONE, false);
+        tl_set!(LAST_ESCAPE_WAS_ALONE, false);
+        with_state_mut(|state| {
+            state.shift_held = false;
+            state.meta_key = false;
+        });
+
+        #[cfg(not(feature = "tiny"))]
+        {
+            tl_set!(RECORDING, false);
+            tl_set!(MILESTONE, 0);
+            MACRO_BUFFER.with(|buffer| buffer.borrow_mut().clear());
+            PREVIOUS_MACRO.with(|buffer| *buffer.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn window_layout_matches_flag_combinations() {
+        assert_eq!(
+            calculate_window_layout(80, 24, false, false, false, false),
+            WindowLayout { top_rows: 1, mid_rows: 20, mid_y: 1, foot_rows: 3, foot_y: 21 },
+        );
+        assert_eq!(
+            calculate_window_layout(80, 24, false, false, false, true),
+            WindowLayout { top_rows: 2, mid_rows: 19, mid_y: 2, foot_rows: 3, foot_y: 21 },
+        );
+        assert_eq!(
+            calculate_window_layout(80, 24, false, false, true, false),
+            WindowLayout { top_rows: 0, mid_rows: 21, mid_y: 0, foot_rows: 3, foot_y: 21 },
+        );
+        assert_eq!(
+            calculate_window_layout(80, 24, false, true, false, false),
+            WindowLayout { top_rows: 0, mid_rows: 22, mid_y: 0, foot_rows: 3, foot_y: 21 },
+        );
+        assert_eq!(
+            calculate_window_layout(80, 24, true, false, false, false),
+            WindowLayout { top_rows: 1, mid_rows: 22, mid_y: 1, foot_rows: 1, foot_y: 23 },
+        );
+    }
+
+    #[test]
+    fn window_layout_handles_flat_and_one_column_terminals() {
+        assert_eq!(
+            calculate_window_layout(1, 1, false, false, false, false),
+            WindowLayout { top_rows: 0, mid_rows: 1, mid_y: 0, foot_rows: 1, foot_y: 0 },
+        );
+        assert_eq!(
+            calculate_window_layout(1, 2, false, true, false, false),
+            WindowLayout { top_rows: 0, mid_rows: 2, mid_y: 0, foot_rows: 1, foot_y: 1 },
+        );
+    }
+
+    #[test]
+    fn resize_safe_points_distinguish_events_from_real_input() {
+        assert!(resize_was_requested(
+            Some(THE_WINDOW_RESIZED as i32),
+            false,
+        ));
+        assert!(resize_was_requested(None, true));
+        assert!(!resize_was_requested(None, false));
+
+        // A real key must reach its handler.  The pending atomic request is
+        // consumed by the loop's next no-input safe-point check.
+        assert!(!resize_was_requested(Some(b'x' as i32), true));
+    }
+
+    #[test]
+    fn titlebar_layout_sacrifices_elements_in_gnu_order() {
+        let wide = calculate_titlebar_layout("GNU nano", "", "", "file", true, 80);
+        assert!(wide.show_upperleft);
+        assert_eq!(wide.pluglen, breadth("Modified") + 1);
+        assert_eq!(wide.statelen, 2);
+
+        let without_version = calculate_titlebar_layout("GNU nano", "", "", "file", true, 25);
+        assert!(!without_version.show_upperleft);
+        assert_eq!(without_version.pluglen, breadth("Modified") + 1);
+        assert_eq!(without_version.statelen, 2);
+
+        let without_plug = calculate_titlebar_layout("GNU nano", "", "", "file", true, 15);
+        assert!(!without_plug.show_upperleft);
+        assert_eq!(without_plug.pluglen, 0);
+        assert_eq!(without_plug.statelen, 2);
+
+        let without_side_spaces = calculate_titlebar_layout("GNU nano", "", "", "file", true, 5);
+        assert!(!without_side_spaces.show_upperleft);
+        assert_eq!(without_side_spaces.pluglen, 0);
+        assert_eq!(without_side_spaces.statelen, 0);
+    }
+
+    #[test]
+    fn titlebar_layout_accounts_for_state_word_spacing() {
+        let layout = calculate_titlebar_layout("GNU nano", "", "Modified", "file", false, 80);
+        assert_eq!(layout.pathlen, breadth("file") + 1);
+        assert_eq!(layout.statelen, breadth("Modified") + 2);
+    }
+
+    #[test]
+    fn shifted_modifier_is_decoded_with_its_queued_event() {
+        reset_input_buffer();
+        translate_key_event(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        translate_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(parse_kbinput(), CONTROL_HOME as i32);
+        assert!(state().shift_held);
+        assert_eq!(parse_kbinput(), KEY_RIGHT);
+        assert!(!state().shift_held);
+    }
+
+    #[test]
+    fn plain_shift_navigation_uses_dedicated_codes() {
+        reset_input_buffer();
+        translate_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        translate_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+
+        assert_eq!(parse_kbinput(), KEY_LEFT);
+        assert!(state().shift_held);
+        assert_eq!(parse_kbinput(), KEY_END);
+        assert!(state().shift_held);
+    }
+
+    #[test]
+    fn ctrl_digits_and_punctuation_use_canonical_mapping() {
+        for (character, expected) in [
+            ('3', ESC),
+            ('7', 31),
+            ('8', DEL),
+            ('?', DEL),
+            ('2', 0),
+            ('/', 31),
+            ('[', 27),
+            ('_', 31),
+            ('A', 1),
+        ] {
+            reset_input_buffer();
+            translate_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL));
+            assert_eq!(get_input(None), expected, "Ctrl+{character}");
+        }
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn completion_grid_ignores_zero_and_single_candidate_sets() {
+        assert!(completion_grid(&[], 80, 20, false).cells.is_empty());
+        assert!(completion_grid(&["only".to_string()], 80, 20, false).cells.is_empty());
+        assert!(completion_grid(&["a".into(), "b".into()], 0, 20, false).cells.is_empty());
+        assert!(completion_grid(&["a".into(), "b".into()], 80, 0, false).cells.is_empty());
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn completion_grid_places_multiple_candidates_in_columns() {
+        let names = ["alpha", "beta", "gamma", "delta"].map(str::to_string);
+        let grid = completion_grid(&names, 20, 6, false);
+
+        assert_eq!(grid.name_width, 5);
+        assert_eq!(
+            grid.cells,
+            vec![
+                CompletionCell { row: 3, column: 0, match_index: Some(0) },
+                CompletionCell { row: 3, column: 7, match_index: Some(1) },
+                CompletionCell { row: 3, column: 14, match_index: Some(2) },
+                CompletionCell { row: 4, column: 0, match_index: Some(3) },
+            ],
+        );
+    }
+
+    #[cfg(feature = "tabcomp")]
+    #[test]
+    fn completion_grid_handles_narrow_and_overfull_views() {
+        let names: Vec<String> = (0..10).map(|index| format!("candidate-{index}")).collect();
+        let grid = completion_grid(&names, 1, 3, false);
+
+        assert_eq!(grid.name_width, 1);
+        assert_eq!(grid.cells.len(), 3);
+        assert_eq!(grid.cells[0].match_index, Some(0));
+        assert_eq!(grid.cells[1].match_index, Some(1));
+        assert_eq!(grid.cells[2], CompletionCell { row: 2, column: 0, match_index: None });
+
+        // ZERO mode shares its bottom row with the status bar.  The grid must
+        // stay out of that row instead of relying on unsigned subtraction.
+        let reserved = completion_grid(&["a".into(), "b".into()], 10, 1, true);
+        assert!(reserved.cells.is_empty());
+    }
+
+    #[cfg(all(feature = "tabcomp", feature = "utf8"))]
+    #[test]
+    fn completion_grid_measures_unicode_and_hidden_names_by_columns() {
+        crate::chars::remember_utf8(true);
+        let names = ["猫", ".hidden", "犬"].map(str::to_string);
+        let grid = completion_grid(&names, 30, 5, false);
+
+        assert_eq!(grid.name_width, breadth(".hidden"));
+        assert_eq!(grid.cells.len(), names.len());
+        assert_eq!(grid.cells[1].column, breadth(".hidden") + 2);
+        crate::chars::remember_utf8(false);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn macro_recording_restores_cancelled_macro_and_snips_stop_burst() {
+        reset_input_buffer();
+        MACRO_BUFFER.with(|buffer| *buffer.borrow_mut() = vec![10, 20]);
+
+        assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Started);
+        assert!(MACRO_BUFFER.with(|buffer| buffer.borrow().is_empty()));
+        push_keycode(99);
+        assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Cancelled);
+        assert_eq!(MACRO_BUFFER.with(|buffer| buffer.borrow().clone()), vec![10, 20]);
+
+        assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Started);
+        push_keycode(65);
+        tl_set!(MILESTONE, 1);
+        push_keycode(99);
+        assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Stopped);
+        assert_eq!(MACRO_BUFFER.with(|buffer| buffer.borrow().clone()), vec![65]);
+    }
 }

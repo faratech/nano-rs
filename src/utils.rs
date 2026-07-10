@@ -12,13 +12,15 @@ use crate::global::STATE;
  * On Windows there is no $HOME or passwd database, so fall back to the
  * standard %USERPROFILE% (then %HOMEDRIVE%%HOMEPATH%) variables. */
 pub fn get_homedir() {
-    let already_set = STATE.with(|s| s.borrow().homedir.is_some());
+    let already_set = STATE.with(|s| s.borrow().homedir_raw.is_some());
     if already_set {
         return;
     }
 
     // Try $HOME first
-    let mut homenv: Option<String> = std::env::var("HOME").ok().filter(|s| !s.is_empty());
+    let mut homenv = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
 
     // When $HOME is unset, or we are root (euid == 0), try the passwd database
     #[cfg(unix)]
@@ -30,10 +32,11 @@ pub fn get_homedir() {
             let pw = unsafe { libc::getpwuid(euid) };
             if !pw.is_null() {
                 let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
-                if let Ok(s) = dir.to_str() {
-                    if !s.is_empty() {
-                        homenv = Some(s.to_string());
-                    }
+                if !dir.to_bytes().is_empty() {
+                    use std::os::unix::ffi::OsStrExt;
+                    homenv = Some(std::path::PathBuf::from(
+                        std::ffi::OsStr::from_bytes(dir.to_bytes()),
+                    ));
                 }
             }
         }
@@ -45,20 +48,26 @@ pub fn get_homedir() {
     #[cfg(windows)]
     {
         if homenv.is_none() {
-            homenv = std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty());
+            homenv = std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from);
         }
         if homenv.is_none() {
-            let drive = std::env::var("HOMEDRIVE").ok().filter(|s| !s.is_empty());
-            let path = std::env::var("HOMEPATH").ok().filter(|s| !s.is_empty());
+            let drive = std::env::var_os("HOMEDRIVE").filter(|s| !s.is_empty());
+            let path = std::env::var_os("HOMEPATH").filter(|s| !s.is_empty());
             if let (Some(drive), Some(path)) = (drive, path) {
-                homenv = Some(format!("{}{}", drive, path));
+                let mut joined = std::ffi::OsString::from(drive);
+                joined.push(path);
+                homenv = Some(std::path::PathBuf::from(joined));
             }
         }
     }
 
     if let Some(home) = homenv {
         STATE.with(|s| {
-            s.borrow_mut().homedir = Some(home);
+            let mut state = s.borrow_mut();
+            state.homedir = Some(home.to_string_lossy().into_owned());
+            state.homedir_raw = Some(home);
         });
     }
 }
@@ -66,7 +75,7 @@ pub fn get_homedir() {
 /* C: const char *tail(const char *path)
  * Return the filename part of the given path (everything after the last '/'). */
 pub fn tail(path: &str) -> &str {
-    match path.rfind('/') {
+    match path.rfind(['/', '\\']) {
         None => path,
         Some(pos) => &path[pos + 1..],
     }
@@ -427,12 +436,17 @@ pub fn get_page_start(column: usize) -> usize {
             let st = s.borrow();
             (st.editwincols.max(0) as usize, st.flag_isset(crate::definitions::SOFTWRAP))
         });
-        if column == 0 || column + 2 < editwincols || softwrap {
+        // Very narrow terminals are valid (the one-line layout can be only a
+        // single column wide).  Use the same guarded arithmetic as the full
+        // build instead of subtracting 2 or 8 from an undersized width.
+        let ecols = editwincols.max(2);
+        if column == 0 || column.saturating_add(2) < ecols || softwrap {
             0
-        } else if editwincols > 8 {
-            column - 6 - (column - 6) % (editwincols - 8)
+        } else if ecols > 8 {
+            let shifted = column.saturating_sub(6);
+            shifted - shifted % (ecols - 8)
         } else {
-            column - (editwincols - 2)
+            column.saturating_sub(ecols.saturating_sub(2))
         }
     }
 }
@@ -508,7 +522,7 @@ pub fn breadth(text: &str) -> usize {
  * Append a new empty magic line to the end of the buffer. */
 pub fn new_magicline() {
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.append_magicline();
     });
 }
@@ -518,7 +532,7 @@ pub fn new_magicline() {
  * it is not the only line. */
 pub fn remove_magicline() {
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.remove_magicline_if_empty();
     });
 }
@@ -550,7 +564,7 @@ pub fn get_region() -> (usize, usize, usize, usize) {
 pub fn get_range() -> (usize, usize) {
     // Returns (top_lineno, bot_lineno)
     STATE.with(|s| {
-        let st = s.borrow_mut();
+        let mut st = s.borrow_mut();
         st.get_range_linenos()
     })
 }
@@ -588,4 +602,31 @@ pub fn number_of_characters_in(lines: &[String], begin: usize, end: usize) -> us
     }
     // Do not count the final newline
     count.saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_start_is_safe_for_zero_and_one_column_windows() {
+        for width in 0..=2 {
+            STATE.with(|state| {
+                let state = &mut *state.borrow_mut();
+                state.editwincols = width;
+                state.united_sidescroll = false;
+                state.flags[crate::global::flag_index(SOFTWRAP)] &=
+                    !crate::global::flag_mask(SOFTWRAP);
+            });
+
+            let start = get_page_start(10);
+            assert!(start <= 10, "width {width} produced {start}");
+        }
+    }
+
+    #[test]
+    fn tail_accepts_both_native_separator_styles() {
+        assert_eq!(tail("/usr/bin/nano"), "nano");
+        assert_eq!(tail(r"C:\\Tools\\nano.exe"), "nano.exe");
+    }
 }

@@ -52,7 +52,7 @@ Cargo features mirror GNU nano's optional build areas:
 | `justify`, `wrapping`, `multibuffer` | Editing features |
 | `mouse`, `linenumbers`, `linter`, `formatter`, `speller` | Optional UI/tools |
 | `tabcomp`, `wordcomp`, `comment`, `operatingdir`, `extra` | Additional interactive features |
-| `libmagic` | Optional magic-byte syntax fallback via `infer` |
+| `libmagic` | Optional native libmagic description matching (requires system libmagic) |
 
 When porting or changing feature-gated code, map C-style conditions this way:
 

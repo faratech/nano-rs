@@ -3,7 +3,7 @@
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::process;
 
 use crate::definitions::*;
@@ -23,6 +23,17 @@ pub static CONTROL_C_WAS_PRESSED: AtomicBool = AtomicBool::new(false);
 /// Whether SIGWINCH has fired.
 /// C: bool the_window_resized
 pub static THE_WINDOW_RESIZED: AtomicBool = AtomicBool::new(false);
+
+/// Fatal-but-recoverable termination requested by SIGHUP or SIGTERM.  The
+/// handler only stores the signal; emergency saving happens at a safe point in
+/// the main loop.
+#[cfg(unix)]
+static TERMINATION_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// SIGTSTP is likewise deferred so terminal I/O and AppState mutation never run
+/// from an asynchronous signal context.
+#[cfg(all(unix, not(feature = "tiny")))]
+static SUSPEND_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // make_new_node — create a new linestruct node
@@ -274,14 +285,21 @@ pub fn suggest_ctrlT_ctrlZ() {
 /* C: void restore_terminal(void) */
 pub fn restore_terminal() {
     #[cfg(not(feature = "tiny"))]
-    {
+    if winio::terminal_is_active() {
         // Disable bracketed-paste mode (through the shared buffer, so it is
         // ordered after any pending paint).
         use std::io::Write;
         let _ = write!(crate::winio::out(), "\x1B[?2004l");
         crate::winio::flush_out();
     }
-    let _ = winio::terminal_exit();
+    if winio::terminal_exit().is_err() {
+        // Retry through the independent fallback.  This matters most on fatal
+        // exits, where there will be no later redraw or teardown opportunity.
+        #[cfg(unix)]
+        winio::signal_safe_terminal_restore();
+        #[cfg(not(unix))]
+        winio::emergency_terminal_restore();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,13 +325,16 @@ pub fn finish() {
 pub fn close_and_go() {
     #[cfg(not(feature = "tiny"))]
     {
-        let lock_filename = with_state(|s| {
-            s.openfile.as_ref()
-                .and_then(|of| of.lock_filename.clone())
+        let (lock_filename, lock_file) = with_state_mut(|s| {
+            match s.openfile.as_mut() {
+                Some(of) => (of.lock_filename.take(), of.lock_file.take()),
+                None => (None, None),
+            }
         });
         if let Some(ref lf) = lock_filename {
-            files::delete_lockfile(lf);
+            files::delete_lockfile(lf, lock_file.as_ref());
         }
+        drop(lock_file);
     }
 
     #[cfg(feature = "histories")]
@@ -440,22 +461,23 @@ fn save_all_modified_buffers() {
     };
 
     for _ in 0..total {
-        let (lock, save, filename) = with_state(|s| {
-            let of = s.openfile.as_ref();
+        let (lock, lock_file, save, filename) = with_state_mut(|s| {
+            let save = s.openfile.as_ref().map(|f| f.modified).unwrap_or(false) && !restricted;
+            let filename = s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default();
             #[cfg(not(feature = "tiny"))]
-            let lock = of.and_then(|f| f.lock_filename.clone());
+            let (lock, lock_file) = match s.openfile.as_mut() {
+                Some(file) => (file.lock_filename.take(), file.lock_file.take()),
+                None => (None, None),
+            };
             #[cfg(feature = "tiny")]
-            let lock: Option<String> = None;
-            (
-                lock,
-                of.map(|f| f.modified).unwrap_or(false) && !restricted,
-                of.map(|f| f.filename.clone()).unwrap_or_default(),
-            )
+            let (lock, lock_file): (Option<String>, Option<std::fs::File>) = (None, None);
+            (lock, lock_file, save, filename)
         });
 
         if let Some(ref lf) = lock {
-            files::delete_lockfile(lf);
+            files::delete_lockfile(lf, lock_file.as_ref());
         }
+        drop(lock_file);
         if save {
             emergency_save(&filename);
         }
@@ -789,10 +811,15 @@ pub fn make_a_note(_signal: i32) {
 /* C: void install_handler_for_Ctrl_C(void) */
 pub fn install_handler_for_Ctrl_C() {
     CONTROL_C_WAS_PRESSED.store(false, Ordering::SeqCst);
-    // Signal handling via libc for compatibility.
+    // Deliberately omit SA_RESTART: a Ctrl-C must wake a blocking FIFO/stdin
+    // read so the reader can observe CONTROL_C_WAS_PRESSED promptly.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGINT, make_a_note_trampoline as *const () as libc::sighandler_t);
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = make_a_note_trampoline as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = 0;
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
     }
 }
 
@@ -814,7 +841,7 @@ extern "C" fn make_a_note_trampoline(_sig: libc::c_int) {
 // scoop_stdin — read from standard input into a new buffer
 // ---------------------------------------------------------------------------
 /* C: bool scoop_stdin(void) */
-#[cfg(not(feature = "tiny"))]
+#[cfg(any(not(feature = "tiny"), windows))]
 /* C: void reconnect_and_store_state(void)
  * Reconnect standard input to the keyboard after it was used as a pipe. */
 pub fn reconnect_and_store_state() {
@@ -827,51 +854,103 @@ pub fn reconnect_and_store_state() {
         }
         libc::close(thetty);
     }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Console::{SetStdHandle, STD_INPUT_HANDLE};
+
+        let console = match std::fs::File::open("CONIN$") {
+            Ok(file) => file,
+            Err(error) => {
+                winio::statusline(
+                    MessageType::Alert,
+                    &format!("Could not reconnect console input: {}", error),
+                );
+                return;
+            }
+        };
+        let raw = console.into_raw_handle();
+        if unsafe { SetStdHandle(STD_INPUT_HANDLE, HANDLE(raw)) }.is_err() {
+            // Reconstitute ownership so a failed handoff does not leak.
+            use std::os::windows::io::FromRawHandle;
+            drop(unsafe { std::fs::File::from_raw_handle(raw) });
+            winio::statusline(MessageType::Alert, "Could not reconnect console input");
+        }
+    }
 }
 
-#[cfg(feature = "tiny")]
+#[cfg(all(feature = "tiny", not(windows)))]
 pub fn reconnect_and_store_state() {}
 
-pub fn scoop_stdin() -> bool {
+fn scoop_stdin_from<R: std::io::Read>(reader: R, stdin_is_terminal: bool) -> bool {
     restore_terminal();
 
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if stdin_is_terminal {
         eprintln!("Reading data from keyboard; type ^D or ^D^D to finish.");
     }
 
-    let stream = std::fs::File::open("/dev/stdin");
-    match stream {
-        Err(e) => {
-            let _ = winio::terminal_init();
-            winio::statusline(MessageType::Alert,
-                &format!("Failed to open stdin: {}", e));
-            return false;
-        }
-        Ok(f) => {
-            install_handler_for_Ctrl_C();
-            files::make_new_buffer();
-            files::read_file_impl(f, true, "stdin", false);
-            #[cfg(feature = "color")]
-            color::find_and_prime_applicable_syntax();
-            restore_handler_for_Ctrl_C();
+    install_handler_for_Ctrl_C();
+    files::make_new_buffer();
+    let read_succeeded = files::read_file_impl(reader, true, "stdin", false);
+    restore_handler_for_Ctrl_C();
 
-            if !ISSET!(VIEW_MODE) {
-                let totsize = with_state(|s| {
-                    s.openfile.as_ref().map(|of| of.totsize).unwrap_or(0)
-                });
-                if totsize > 0 {
-                    files::set_modified();
-                }
-            }
+    if !stdin_is_terminal {
+        reconnect_and_store_state();
+    }
+    terminal_init();
 
-            // When stdin was a pipe, reattach the keyboard (C parity).
-            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                reconnect_and_store_state();
-            }
-            let _ = winio::terminal_init();
-            true
+    if !read_succeeded {
+        files::discard_transient_buffer();
+        return false;
+    }
+
+    #[cfg(feature = "color")]
+    color::find_and_prime_applicable_syntax();
+
+    if !ISSET!(VIEW_MODE) {
+        let totsize = with_state(|s| {
+            s.openfile.as_ref().map(|of| of.totsize).unwrap_or(0)
+        });
+        if totsize > 0 {
+            files::set_modified();
         }
     }
+
+    true
+}
+
+pub fn scoop_stdin() -> bool {
+    let stdin = std::io::stdin();
+    let stdin_is_terminal = std::io::IsTerminal::is_terminal(&stdin);
+    scoop_stdin_from(stdin.lock(), stdin_is_terminal)
+}
+
+/// Preserve redirected standard input before switching the process standard
+/// handle back to the Windows console.  Crossterm needs a console input handle
+/// in order to enter raw mode, while `nano -` still needs to consume the pipe.
+#[cfg(windows)]
+fn prepare_windows_terminal_input(retain_redirected_input: bool) -> Option<std::fs::File> {
+    use std::io::IsTerminal;
+    use std::os::windows::io::AsHandle;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+
+    let retained = retain_redirected_input.then(|| {
+        stdin
+            .as_handle()
+            .try_clone_to_owned()
+            .unwrap_or_else(|error| die(&format!("Could not retain redirected stdin: {error}\n")))
+    });
+    reconnect_and_store_state();
+    if !std::io::stdin().is_terminal() {
+        die(crate::tr!("Could not reconnect stdin to keyboard\n"));
+    }
+    retained.map(std::fs::File::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -880,20 +959,43 @@ pub fn scoop_stdin() -> bool {
 
 /* C: void handle_hupterm(int signal) */
 #[cfg(unix)]
-extern "C" fn handle_hupterm(_signal: libc::c_int) {
-    // Like C, call die() straight from the handler so modified buffers are
-    // emergency-saved to <name>.save.  The handler runs on the interrupted
-    // (single) thread, so the thread-local STATE is reachable; this carries
-    // the same async-signal re-entrancy hazard C's die-from-handler accepts,
-    // and die()'s recursion guard bails out if state proves unusable.
-    die(crate::tr!("Received SIGHUP or SIGTERM\n"));
+extern "C" fn handle_hupterm(signal: libc::c_int) {
+    TERMINATION_SIGNAL.store(signal, Ordering::SeqCst);
 }
 
 /* C: void handle_crash(int signal) */
 #[cfg(all(unix, not(feature = "tiny"), not(debug_assertions)))]
 extern "C" fn handle_crash(signal: libc::c_int) {
-    // Same rationale as handle_hupterm: match C and try to save work.
-    die(&format!("Sorry! Nano crashed!  Code: {}.  Please report a bug.\n", signal));
+    // A corrupted process cannot safely allocate, lock stdout, traverse editor
+    // state, or attempt an emergency save.  Restore the display and the exact
+    // pre-raw termios snapshot through the async-signal-safe fallback, emit a
+    // static diagnostic, and terminate immediately.
+    const MESSAGE: &[u8] = b"nano-rs crashed; modified buffers were not saved\n";
+    winio::signal_safe_terminal_restore();
+    unsafe {
+        let _ = libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len());
+        libc::_exit(128 + signal);
+    }
+}
+
+#[cfg(all(unix, not(feature = "tiny")))]
+extern "C" fn request_suspend(_signal: libc::c_int) {
+    SUSPEND_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn process_pending_signal_requests() {
+    #[cfg(unix)]
+    {
+        let signal = TERMINATION_SIGNAL.swap(0, Ordering::SeqCst);
+        if signal != 0 {
+            die(crate::tr!("Received SIGHUP or SIGTERM\n"));
+        }
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    if SUSPEND_REQUESTED.swap(false, Ordering::SeqCst) {
+        suspend_nano(0);
+    }
 }
 
 /* C: void suspend_nano(int signal) */
@@ -962,10 +1064,6 @@ pub fn block_sigwinch(_blockit: bool) {}
 #[cfg(all(unix, not(feature = "tiny")))]
 extern "C" fn handle_sigwinch(_signal: libc::c_int) {
     THE_WINDOW_RESIZED.store(true, Ordering::SeqCst);
-    with_state_mut(|s| {
-        #[cfg(not(feature = "tiny"))]
-        { s.resized_for_browser = true; }
-    });
 }
 
 /* C: void set_up_sigwinch_handler(void) */
@@ -995,10 +1093,7 @@ pub fn set_up_signal_handlers() {
         // SIGTSTP / suspend.
         #[cfg(not(feature = "tiny"))]
         {
-            extern "C" fn suspend_trampoline(sig: libc::c_int) {
-                suspend_nano(sig);
-            }
-            libc::signal(libc::SIGTSTP, suspend_trampoline as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTSTP, request_suspend as *const () as libc::sighandler_t);
         }
         // SIGCONT.
         libc::signal(libc::SIGCONT, continue_nano as *const () as libc::sighandler_t);
@@ -1075,7 +1170,13 @@ pub fn enable_flow_control() {
 
 /* C: void terminal_init(void) */
 pub fn terminal_init() {
-    let _ = winio::terminal_init();
+    if let Err(error) = winio::terminal_init() {
+        // `winio::terminal_init` has already unwound any partial transition.
+        // Treat the missing interactive terminal as fatal instead of running
+        // the editor with an unknown mix of cooked/raw and main/alternate
+        // screen state.
+        die(&format!("Could not initialize terminal: {}\n", error));
+    }
     if ISSET!(PRESERVE) {
         enable_flow_control();
     } else {
@@ -1667,7 +1768,7 @@ pub fn regenerate_screen() {
 
     winio::recalculate_screensize();
 
-    let (lines, cols) = winio::terminal_size();
+    let (cols, lines) = winio::terminal_size();
     with_state_mut(|s| {
         s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 { 1 } else { 0 };
         let needed = lines as usize;
@@ -1824,8 +1925,7 @@ pub fn process_a_keystroke() {
 
     state_mut().lastmessage = MessageType::Vacuum;
 
-    #[cfg(not(feature = "tiny"))]
-    if input == crate::definitions::THE_WINDOW_RESIZED as i32 {
+    if winio::consume_resize_request(Some(input)) {
         return;
     }
 
@@ -1846,6 +1946,13 @@ pub fn process_a_keystroke() {
     } else {
         input
     };
+
+    // A shortcut click may require reading one more event.  Treat a resize in
+    // that slot exactly like the primary input instead of interpreting the
+    // synthetic keycode as an editor command.
+    if winio::consume_resize_request(Some(input)) {
+        return;
+    }
 
     #[cfg(not(feature = "tiny"))]
     let was_mark = with_state(|s| {
@@ -2083,7 +2190,112 @@ pub fn process_a_keystroke() {
 // nano_main — main entry point
 // ---------------------------------------------------------------------------
 /* C: int main(int argc, char **argv) */
+fn parse_position_numbers(spec: &str) -> Result<(isize, isize), ()> {
+    if spec.is_empty() {
+        return Err(());
+    }
+    let separator = spec.find([',', '.', ':']);
+    match separator {
+        None => crate::utils::parse_num(spec).map(|line| (line, 0)).ok_or(()),
+        Some(index) => {
+            let line = if index == 0 {
+                0
+            } else {
+                crate::utils::parse_num(&spec[..index]).ok_or(())?
+            };
+            let column = crate::utils::parse_num(&spec[index + 1..]).ok_or(())?;
+            Ok((line, column))
+        }
+    }
+}
+
+fn long_option_is_available(option: &str) -> bool {
+    match option {
+        "smarthome" | "backup" | "backupdir" | "tabstospaces" | "locking"
+        | "guidestripe" | "nonewlines" | "noconvert" | "bookstyle" | "softwrap"
+        | "tabsize" | "wordbounds" | "wordchars" | "zap" | "atblanks" | "emptyline"
+        | "autoindent" | "jumpyscrolling" | "cutfromcursor" | "noread" | "indicator"
+        | "unix" | "afterends" | "whitespacedisplay" | "colonparsing" | "stateflags"
+        | "minibar" | "zero" => !cfg!(feature = "tiny"),
+        "multibuffer" => cfg!(feature = "multibuffer"),
+        "historylog" | "positionlog" => cfg!(feature = "histories"),
+        "ignorercfiles" | "rcfile" => cfg!(feature = "nanorc"),
+        "trimblanks" | "fill" => cfg!(any(feature = "wrapping", feature = "justify")),
+        "quotestr" => cfg!(feature = "justify"),
+        "breaklonglines" | "nowrap" => cfg!(feature = "wrapping"),
+        "syntax" | "listsyntaxes" => cfg!(feature = "color"),
+        "showcursor" => cfg!(any(feature = "browser", feature = "help")),
+        "linenumbers" => cfg!(feature = "linenumbers"),
+        "mouse" => cfg!(feature = "mouse"),
+        "operatingdir" => cfg!(feature = "operatingdir"),
+        "speller" => cfg!(feature = "speller"),
+        "magic" => cfg!(feature = "libmagic"),
+        _ => true,
+    }
+}
+
+fn short_option_is_available(option: char) -> bool {
+    match option {
+        'A' | 'B' | 'C' | 'E' | 'G' | 'J' | 'L' | 'N' | 'O' | 'S' | 'T' | 'W'
+        | 'X' | 'Z' | 'a' | 'e' | 'i' | 'j' | 'k' | 'n' | 'q' | 'u' | 'y' | '@'
+        | '%' | '_' | '0' => !cfg!(feature = "tiny"),
+        'F' => cfg!(feature = "multibuffer"),
+        'H' | 'P' => cfg!(feature = "histories"),
+        'I' | 'f' => cfg!(feature = "nanorc"),
+        'M' | 'r' => cfg!(any(feature = "wrapping", feature = "justify")),
+        'Q' => cfg!(feature = "justify"),
+        'b' | 'w' => cfg!(feature = "wrapping"),
+        'Y' | 'z' => cfg!(feature = "color"),
+        'g' => cfg!(any(feature = "browser", feature = "help")),
+        'l' => cfg!(feature = "linenumbers"),
+        'm' => cfg!(feature = "mouse"),
+        'o' => cfg!(feature = "operatingdir"),
+        's' => cfg!(feature = "speller"),
+        '!' => cfg!(feature = "libmagic"),
+        _ => true,
+    }
+}
+
+fn reject_unavailable_option(argv0: &str, option: &str) -> ! {
+    eprintln!("Option '{option}' is not available in this build.");
+    eprintln!("Type '{argv0} -h' for a list of available options.");
+    process::exit(1);
+}
+
+#[cfg(not(feature = "tiny"))]
+fn parse_colon_notation(filename: &str) -> Option<(String, isize, isize)> {
+    if std::fs::metadata(filename).is_ok() {
+        return None;
+    }
+
+    let last_colon = filename.rfind(':')?;
+    let last_number = &filename[last_colon + 1..];
+    if last_number.is_empty() || !last_number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let one_number_path = &filename[..last_colon];
+    if std::fs::metadata(one_number_path).is_ok() {
+        let (line, column) = parse_position_numbers(last_number).ok()?;
+        return Some((one_number_path.to_string(), line, column));
+    }
+
+    let previous_colon = one_number_path.rfind(':')?;
+    let two_number_path = &filename[..previous_colon];
+    let numbers = &filename[previous_colon + 1..];
+    if std::fs::metadata(two_number_path).is_ok() {
+        let (line, column) = parse_position_numbers(numbers).ok()?;
+        return Some((two_number_path.to_string(), line, column));
+    }
+    None
+}
+
 pub fn nano_main() {
+    // Install this before update processing and argument parsing.  It is a
+    // no-op until terminal initialization changes process-visible state, but
+    // guarantees that later Rust panics restore raw/alternate-screen modes.
+    winio::install_terminal_panic_hook();
+
     // Apply any previously-downloaded update before doing anything else (this
     // may swap the executable on disk so the new version is used next launch).
     let _ = crate::installer::apply_pending_update();
@@ -2196,6 +2408,10 @@ pub fn nano_main() {
                 *idx += 1;
                 args.get(*idx).cloned().unwrap_or_default()
             };
+
+            if !long_option_is_available(&opt) {
+                reject_unavailable_option(&argv0, &format!("--{opt}"));
+            }
 
             match opt.as_str() {
                 "smarthome"      => { #[cfg(not(feature="tiny"))] SET!(SMART_HOME); }
@@ -2372,6 +2588,9 @@ pub fn nano_main() {
         let mut ci = 0;
         while ci < chars.len() {
             let c = chars[ci];
+            if !short_option_is_available(c) {
+                reject_unavailable_option(&argv0, &format!("-{c}"));
+            }
             // Helper: get next argument (either rest of this arg or next argv).
             let next_arg = |ci: &mut usize, chars: &Vec<char>, idx: &mut usize, args: &Vec<String>| -> String {
                 *ci += 1;
@@ -2551,6 +2770,14 @@ pub fn nano_main() {
     if std::env::var("TERM").is_err() {
         // Safe: single-threaded startup, before any threads are spawned.
         unsafe { std::env::set_var("TERM", "vt220"); }
+    }
+
+    #[cfg(feature = "color")]
+    {
+        // Match GNU nano: the mere presence of NO_COLOR suppresses default
+        // interface colors.  An explicit nanorc color combination may re-enable
+        // them later in color::set_interface_colorpairs().
+        state_mut().rescind_colors = std::env::var_os("NO_COLOR").is_some();
     }
 
     // Set up keybinding and function tables.
@@ -2818,6 +3045,9 @@ pub fn nano_main() {
     // ----------------------------------------------------------------
     // Terminal and window setup
     // ----------------------------------------------------------------
+    #[cfg(windows)]
+    let mut redirected_stdin =
+        prepare_windows_terminal_input(file_args.iter().any(|argument| argument == "-"));
     terminal_init();
     window_init();
 
@@ -2832,7 +3062,7 @@ pub fn nano_main() {
     // Sidebar / bardata init.
     #[cfg(not(feature = "tiny"))]
     {
-        let (lines, cols) = winio::terminal_size();
+        let (cols, lines) = winio::terminal_size();
         with_state_mut(|s| {
             s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 { 1 } else { 0 };
             let needed = lines as usize;
@@ -2841,7 +3071,7 @@ pub fn nano_main() {
     }
     let sidebar = state().sidebar;
     let margin = state().margin;
-    let (_, cols) = winio::terminal_size();
+    let cols = winio::terminal_size().0;
     state_mut().editwincols = cols as i32 - margin - sidebar;
 
     // ----------------------------------------------------------------
@@ -2901,7 +3131,7 @@ pub fn nano_main() {
 
     // Check whether we need to open multiple buffers: since nano 2.7.1,
     // every file named on the command line gets its own buffer.
-    let read_them_all = ISSET!(MULTIBUFFER) || file_args_count > 1;
+    let read_them_all = cfg!(feature = "multibuffer");
 
     while file_idx < file_args_count {
         // Check we should keep reading.
@@ -2916,7 +3146,7 @@ pub fn nano_main() {
         let mut searchstring: Option<String> = None;
 
         // If there's a +LINE[,COLUMN] argument, consume it.
-        if file_idx < file_args_count && file_args[file_idx].starts_with('+') {
+        if file_idx + 1 < file_args_count && file_args[file_idx].starts_with('+') {
             let plus_arg = file_args[file_idx].clone();
             let rest = &plus_arg[1..];
 
@@ -2954,11 +3184,14 @@ pub fn nano_main() {
                     if rest.is_empty() {
                         givenline = -1; // EOF
                     } else {
-                        let (line, col) = crate::utils::parse_line_column(rest);
-                        givenline = line.unwrap_or(0);
-                        givencol  = col.unwrap_or(0);
-                        if line.is_none() && !rest.is_empty() {
-                            winio::statusline(MessageType::Alert, "Invalid line or column number");
+                        match parse_position_numbers(rest) {
+                            Ok((line, column)) => {
+                                givenline = line;
+                                givencol = column;
+                            }
+                            Err(()) => {
+                                winio::statusline(MessageType::Alert, "Invalid line or column number");
+                            }
                         }
                     }
                     file_idx += 1;
@@ -2969,9 +3202,12 @@ pub fn nano_main() {
                 if rest.is_empty() {
                     givenline = -1;
                 } else {
-                    let (line, col) = crate::utils::parse_line_column(rest);
-                    givenline = line.unwrap_or(0);
-                    givencol  = col.unwrap_or(0);
+                    if let Ok((line, column)) = parse_position_numbers(rest) {
+                        givenline = line;
+                        givencol = column;
+                    } else {
+                        winio::statusline(MessageType::Alert, "Invalid line or column number");
+                    }
                 }
                 file_idx += 1;
             }
@@ -2981,32 +3217,31 @@ pub fn nano_main() {
             break;
         }
 
-        let filename = file_args[file_idx].clone();
+        let mut filename = file_args[file_idx].clone();
         file_idx += 1;
 
         // Handle '-' (stdin).
         #[cfg(not(feature = "tiny"))]
         if filename == "-" {
-            if !scoop_stdin() {
+            #[cfg(windows)]
+            let read_succeeded = if let Some(reader) = redirected_stdin.take() {
+                scoop_stdin_from(reader, false)
+            } else {
+                scoop_stdin()
+            };
+            #[cfg(not(windows))]
+            let read_succeeded = scoop_stdin();
+            if !read_succeeded {
                 continue;
             }
         } else {
-            // Colon-parsing: if filename contains ':' and file doesn't exist,
-            // try to strip trailing :linenumber.
             #[cfg(not(feature = "tiny"))]
-            {
-                let fname_clone = filename.clone();
-                let _colon_parsed = if ISSET!(COLON_PARSING) && givenline == 0
-                    && fname_clone.contains(':') && givencol == 0
-                {
-                    // Check if file exists first.
-                    std::fs::metadata(&fname_clone).is_err()
-                } else {
-                    false
-                };
-                // (colon-parsing: stripping :linenumber from filename)
-                // Abbreviated: full implementation would iterate from end.
-                // For now just open the filename as-is.
+            if ISSET!(COLON_PARSING) && givenline == 0 && givencol == 0 {
+                if let Some((parsed_filename, line, column)) = parse_colon_notation(&filename) {
+                    filename = parsed_filename;
+                    givenline = line;
+                    givencol = column;
+                }
             }
 
             if !files::open_buffer_impl(&filename, true) {
@@ -3085,6 +3320,11 @@ pub fn nano_main() {
                 }
             }
         }
+    }
+
+    #[cfg(not(feature = "multibuffer"))]
+    if file_idx < file_args_count {
+        die(crate::tr!("Can open just one file\n"));
     }
 
     // After handling command-line files, allow inserting files.
@@ -3172,6 +3412,8 @@ pub fn nano_main() {
     // Main input loop
     // ----------------------------------------------------------------
     loop {
+        process_pending_signal_requests();
+
         // Surface a completed background update, if any.
         if let Ok(status) = update_rx.try_recv() {
             if let crate::installer::UpdateStatus::Downloaded { version, .. } = status {
@@ -3316,9 +3558,7 @@ pub fn nano_main() {
         prompt::put_cursor_at_end_of_answer();
 
         // Handle window resize.
-        #[cfg(not(feature = "tiny"))]
-        if THE_WINDOW_RESIZED.load(Ordering::SeqCst) {
-            regenerate_screen();
+        if winio::consume_resize_request(None) {
             continue;
         }
 
@@ -3337,3 +3577,69 @@ trait Also: Sized {
     }
 }
 impl<T> Also for T {}
+
+#[cfg(all(test, unix))]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn asynchronous_handlers_only_publish_atomic_requests() {
+        TERMINATION_SIGNAL.store(0, Ordering::SeqCst);
+        handle_hupterm(libc::SIGTERM);
+        assert_eq!(TERMINATION_SIGNAL.swap(0, Ordering::SeqCst), libc::SIGTERM);
+
+        THE_WINDOW_RESIZED.store(false, Ordering::SeqCst);
+        #[cfg(not(feature = "tiny"))]
+        handle_sigwinch(libc::SIGWINCH);
+        #[cfg(not(feature = "tiny"))]
+        assert!(THE_WINDOW_RESIZED.swap(false, Ordering::SeqCst));
+
+        #[cfg(not(feature = "tiny"))]
+        {
+            SUSPEND_REQUESTED.store(false, Ordering::SeqCst);
+            request_suspend(libc::SIGTSTP);
+            assert!(SUSPEND_REQUESTED.swap(false, Ordering::SeqCst));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn position_parser_accepts_column_only_and_rejects_partial_numbers() {
+        assert_eq!(parse_position_numbers("12"), Ok((12, 0)));
+        assert_eq!(parse_position_numbers("12,3"), Ok((12, 3)));
+        assert_eq!(parse_position_numbers(",3"), Ok((0, 3)));
+        assert_eq!(parse_position_numbers("12:3"), Ok((12, 3)));
+        assert_eq!(parse_position_numbers("12,bad"), Err(()));
+        assert_eq!(parse_position_numbers("12,"), Err(()));
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn colon_parser_only_strips_numeric_suffixes_from_existing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("sample.txt");
+        std::fs::write(&file, b"one\ntwo\n").unwrap();
+        let base = file.to_string_lossy();
+
+        assert_eq!(
+            parse_colon_notation(&format!("{base}:2")),
+            Some((base.to_string(), 2, 0))
+        );
+        assert_eq!(
+            parse_colon_notation(&format!("{base}:2:4")),
+            Some((base.to_string(), 2, 4))
+        );
+        assert_eq!(parse_colon_notation(&format!("{base}:bad")), None);
+    }
+
+    #[test]
+    fn feature_availability_matches_the_compiled_build() {
+        assert_eq!(long_option_is_available("multibuffer"), cfg!(feature = "multibuffer"));
+        assert_eq!(short_option_is_available('s'), cfg!(feature = "speller"));
+        assert_eq!(long_option_is_available("magic"), cfg!(feature = "libmagic"));
+    }
+}

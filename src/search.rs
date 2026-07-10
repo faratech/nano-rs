@@ -57,8 +57,6 @@ unsafe extern "Rust" {}
     crate::winio::edit_redraw(was_current, mode)
 }
 
-#[inline] fn regenerate_screen() { crate::nano::regenerate_screen() }
-
 /// C: size_t xplustabs(void) — winio.c — column of the cursor in the current line.
 #[inline]
 fn xplustabs() -> usize {
@@ -339,7 +337,16 @@ fn unicode_ci_find(haystack: &str, needle: &str) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 fn unicode_ci_rfind(haystack: &str, needle: &str) -> Option<usize> {
+    unicode_ci_rfind_at_or_before(haystack, needle, haystack.len())
+}
+
+fn unicode_ci_rfind_at_or_before(
+    haystack: &str,
+    needle: &str,
+    ceiling: usize,
+) -> Option<usize> {
     let folded_needle = needle.to_lowercase();
     if folded_needle.is_empty() {
         return None;
@@ -347,6 +354,9 @@ fn unicode_ci_rfind(haystack: &str, needle: &str) -> Option<usize> {
 
     let mut last_match = None;
     for (start, _) in haystack.char_indices() {
+        if start > ceiling {
+            break;
+        }
         if unicode_ci_match_end_at(haystack, start, &folded_needle).is_some() {
             last_match = Some(start);
         }
@@ -380,11 +390,20 @@ fn strstrwrapper(
         let result = with_state(|s| {
             if let Some(ref re) = s.search_regexp {
                 if backwards {
-                    // Search from start up to from_offset for the LAST match.
-                    let search_slice = &data[..from_offset];
+                    // Find the last match whose start is at or before the
+                    // ceiling.  Restart one character after each match start
+                    // so overlapping matches remain visible.
                     let mut last_match: Option<(usize, usize)> = None;
-                    for m in re.find_iter(search_slice) {
+                    let mut next_rung = 0;
+                    while let Some(m) = re.find_at(data, next_rung) {
+                        if m.start() > from_offset {
+                            break;
+                        }
                         last_match = Some((m.start(), m.end()));
+                        if m.start() == from_offset || m.start() == data.len() {
+                            break;
+                        }
+                        next_rung = step_right(data, m.start());
                     }
                     // Store regmatches for the found match.
                     if let Some((start, _end)) = last_match {
@@ -393,10 +412,9 @@ fn strstrwrapper(
                     None
                 } else {
                     // Search forward from from_offset.
-                    let search_slice = &data[from_offset..];
-                    if let Some(m) = re.find(search_slice) {
+                    if let Some(m) = re.find_at(data, from_offset) {
                         // Update regmatches in STATE.
-                        Some(from_offset + m.start())
+                        Some(m.start())
                     } else {
                         None
                     }
@@ -413,15 +431,14 @@ fn strstrwrapper(
         if let Some(match_start) = result {
             let new_matches: Option<[(usize, usize); 10]> = with_state(|s| {
                 let re = s.search_regexp.as_ref()?;
-                let search_slice = &data[match_start..];
-                let caps = re.captures(search_slice)?;
-                if caps.get(0)?.start() != 0 {
+                let caps = re.captures_at(data, match_start)?;
+                if caps.get(0)?.start() != match_start {
                     return None;
                 }
                 let mut rm = [(0usize, 0usize); 10];
                 for i in 0..10 {
                     if let Some(m) = caps.get(i) {
-                        rm[i] = (match_start + m.start(), match_start + m.end());
+                        rm[i] = (m.start(), m.end());
                     }
                 }
                 Some(rm)
@@ -438,30 +455,35 @@ fn strstrwrapper(
 
         if backwards {
             // Find the last occurrence at or before from_offset.
-            let search_slice = &data[..from_offset];
             if case_sensitive {
                 let mut last_match: Option<usize> = None;
                 let mut start = 0;
-                while let Some(pos) = search_slice[start..].find(needle) {
+                while let Some(pos) = data[start..].find(needle) {
                     let match_pos = start + pos;
+                    if match_pos > from_offset {
+                        break;
+                    }
                     last_match = Some(match_pos);
                     // Advance past the FIRST character of the match by its byte
                     // length (not 1), so the next slice stays on a char boundary
                     // (C advances by char_length).
-                    let step = search_slice[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
+                    let step = data[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
                     start = match_pos + step;
-                    if start >= search_slice.len() {
+                    if start >= data.len() {
                         break;
                     }
                 }
                 last_match
-            } else if !needle.is_empty() && search_slice.is_ascii() && needle.is_ascii() {
+            } else if !needle.is_empty() && data.is_ascii() && needle.is_ascii() {
                 // Common case: ASCII, case-insensitive. Scan in place with no
                 // allocation. ASCII case-folding is byte-length-preserving, so this
                 // yields the exact same last-match offset as the to_lowercase() path.
-                ascii_ci_rfind(search_slice.as_bytes(), needle.as_bytes())
+                let search_end = from_offset.saturating_add(needle.len()).min(data.len());
+                ascii_ci_rfind(&data.as_bytes()[..search_end], needle.as_bytes())
+                    .filter(|&start| start <= from_offset)
             } else {
-                unicode_ci_rfind(search_slice, lowered_needle.unwrap_or(needle))
+                unicode_ci_rfind_at_or_before(
+                    data, lowered_needle.unwrap_or(needle), from_offset)
             }
         } else {
             // Find first occurrence at or after from_offset.
@@ -665,6 +687,47 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
 // ---------------------------------------------------------------------------
 // findnextstr — search for needle starting at openfile->current/current_x
 // ---------------------------------------------------------------------------
+
+/// Consume currently queued input while a long search is running and report
+/// whether it contains the menu's Cancel shortcut.  A zero-timeout poll keeps
+/// this function from ever blocking the search.
+fn search_cancel_requested() -> bool {
+    loop {
+        if crate::winio::waiting_keycodes() == 0 {
+            if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                return false;
+            }
+            crate::winio::read_keys_from();
+            if crate::winio::waiting_keycodes() == 0 {
+                continue;
+            }
+        }
+
+        let mut input = crate::winio::get_input(None);
+        if input == ESC_CODE as i32 {
+            if crate::winio::waiting_keycodes() == 0 {
+                state_mut().meta_key = false;
+                continue;
+            }
+            input = crate::winio::get_input(None);
+            state_mut().meta_key = true;
+        } else {
+            state_mut().meta_key = false;
+        }
+
+        let cancelled = crate::global::func_from_key(input)
+            .is_some_and(|f| f == crate::global::do_cancel as FuncPtr);
+        state_mut().meta_key = false;
+
+        if cancelled {
+            while crate::winio::waiting_keycodes() > 0 {
+                let _ = crate::winio::get_input(None);
+            }
+            return true;
+        }
+    }
+}
+
 /* C: int findnextstr(const char *needle, bool whole_word_only, int modus,
                       size_t *match_len, bool skipone,
                       const linestruct *begin, size_t begin_x) */
@@ -865,14 +928,9 @@ pub fn findnextstr(
         }
 
         // Check for window resize.
-        #[cfg(not(feature = "tiny"))]
-        {
-            let resized = state().the_window_resized;
-            if resized {
-                regenerate_screen();
-                statusbar("Searching...");
-                feedback = 1;
-            }
+        if crate::winio::consume_resize_request(None) {
+            statusbar("Searching...");
+            feedback = 1;
         }
 
         // If we're back at the beginning, there is no needle.
@@ -938,8 +996,12 @@ pub fn findnextstr(
             if lastkbcheck.elapsed().as_secs() > 0 {
                 lastkbcheck = std::time::Instant::now();
 
-                // In the real implementation we'd call wgetch and check for cancel.
-                // For now, just update the feedback counter.
+                if search_cancel_requested() {
+                    crate::winio::consume_resize_request(None);
+                    statusbar("Cancelled");
+                    return -2;
+                }
+
                 feedback += 1;
                 if feedback > 0 {
                     statusbar("Searching...");
@@ -1835,13 +1897,14 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
             let sw = s.flag_isset(SOFTWRAP);
             let ec = s.editwincols as usize;
             let pw = s.openfile.as_ref().map(|f| f.placewewant).unwrap_or(0);
-            let lb = current_data.chars().count();
+            let lb = breadth(&current_data);
             (sw, ec, pw, lb)
         });
-        if softwrap && placewewant / editwincols > line_breadth_u / editwincols {
+        let adjusted = softwrap_placewewant(placewewant, line_breadth_u, editwincols);
+        if softwrap && adjusted != placewewant {
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
-                    of.placewewant = line_breadth_u;
+                    of.placewewant = adjusted;
                 }
             });
         }
@@ -1908,6 +1971,16 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
         adjust_viewport(UpdateType::Stationary);
     } else {
         adjust_viewport(UpdateType::Centering);
+    }
+}
+
+/// Keep a requested softwrap column on the line's final screen chunk.  Both
+/// inputs are display columns, not byte or character counts.
+fn softwrap_placewewant(requested: usize, line_breadth: usize, editwincols: usize) -> usize {
+    if editwincols != 0 && requested / editwincols > line_breadth / editwincols {
+        line_breadth
+    } else {
+        requested
     }
 }
 
@@ -2312,7 +2385,10 @@ pub fn to_next_anchor() {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod ci_scan_tests {
-    use super::{ascii_ci_find, ascii_ci_rfind, regexp_init, strstrwrapper, unicode_ci_find, unicode_ci_rfind, SearchFlags};
+    use super::{
+        ascii_ci_find, ascii_ci_rfind, regexp_init, search_cancel_requested,
+        softwrap_placewewant, strstrwrapper, unicode_ci_find, unicode_ci_rfind, SearchFlags,
+    };
     use crate::global::{state, state_mut};
 
     /// Reference forward search: first match of the lowercased needle.
@@ -2375,6 +2451,61 @@ mod ci_scan_tests {
         assert_eq!(matches[2], (4, 5));
 
         state_mut().search_regexp = None;
+    }
+
+    #[test]
+    fn backward_plain_match_may_extend_beyond_ceiling() {
+        let sensitive = SearchFlags {
+            use_regexp: false,
+            backwards: true,
+            case_sensitive: true,
+        };
+        let insensitive = SearchFlags { case_sensitive: false, ..sensitive };
+
+        assert_eq!(strstrwrapper("abba", "bb", 2, None, sensitive), Some(1));
+        assert_eq!(strstrwrapper("aBBa", "bb", 2, Some("bb"), insensitive), Some(1));
+        assert_eq!(strstrwrapper("abb", "b", 1, None, sensitive), Some(1));
+    }
+
+    #[test]
+    fn backward_regex_enumerates_overlaps_and_preserves_captures() {
+        assert!(regexp_init("(aba)"));
+        let flags = SearchFlags {
+            use_regexp: true,
+            backwards: true,
+            case_sensitive: true,
+        };
+
+        assert_eq!(strstrwrapper("ababa", "unused", 5, None, flags), Some(2));
+        assert_eq!(state().regmatches[0], (2, 5));
+        assert_eq!(state().regmatches[1], (2, 5));
+
+        assert!(regexp_init("bb"));
+        assert_eq!(strstrwrapper("abba", "unused", 2, None, flags), Some(1));
+        assert_eq!(state().regmatches[0], (1, 3));
+
+        state_mut().search_regexp = None;
+    }
+
+    #[test]
+    fn queued_cancel_is_detected_without_blocking() {
+        crate::global::shortcut_init();
+        state_mut().currmenu = crate::definitions::MWHEREIS;
+        crate::winio::put_back(3);
+
+        assert!(search_cancel_requested());
+        assert_eq!(crate::winio::waiting_keycodes(), 0);
+    }
+
+    #[test]
+    fn softwrap_limit_uses_display_breadth() {
+        let old_tabsize = state().tabsize;
+        state_mut().tabsize = 8;
+        let tab_breadth = crate::utils::breadth("\t");
+        assert!(tab_breadth > "\t".chars().count());
+        assert_eq!(softwrap_placewewant(16, tab_breadth, 8), tab_breadth);
+        assert_eq!(softwrap_placewewant(7, tab_breadth, 8), 7);
+        state_mut().tabsize = old_tabsize;
     }
 
     #[test]
