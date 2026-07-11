@@ -432,34 +432,6 @@ fn beep() { crate::winio::beep() }
 #[inline]
 fn napms(ms: i32) { crate::winio::napms(ms.max(0) as u64) }
 
-// Helper: check if file is a special file (char device, block device, or socket)
-fn is_special_file(meta: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        // C's is_dev_chr/is_dev_blk check only matches S_ISCHR || S_ISBLK; sockets
-        // are NOT treated as "device files" (mirrors files.c).
-        meta.file_type().is_char_device() || meta.file_type().is_block_device()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-// Helper: check if file is a FIFO
-fn is_fifo_file(meta: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        meta.file_type().is_fifo()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
 fn usable_parent(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -3675,7 +3647,7 @@ pub fn write_file(
     let mut prepend_staging: Option<StagingFile> = None;
     #[cfg(not(feature = "tiny"))]
     let mut prepend_source: Option<File> = None;
-    #[cfg(not(feature = "tiny"))]
+    #[cfg(all(not(feature = "tiny"), not(unix)))]
     let mut prepend_permissions: Option<std::fs::Permissions> = None;
     #[cfg(all(not(feature = "tiny"), unix))]
     let mut prepend_statinfo: Option<FileStat> = None;
@@ -3723,7 +3695,10 @@ pub fn write_file(
             }
             Ok(f) => f,
         };
-        prepend_permissions = source.metadata().ok().map(|metadata| metadata.permissions());
+        #[cfg(not(unix))]
+        {
+            prepend_permissions = source.metadata().ok().map(|metadata| metadata.permissions());
+        }
         #[cfg(unix)]
         {
             prepend_statinfo = stat_with_alloc(&realname);

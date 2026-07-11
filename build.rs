@@ -5,7 +5,7 @@
 //! building ON a Windows host (and on the `windows-latest` release runners),
 //! but NOT during a plain `cargo check`/cross-build from a toolchain-less host
 //! — where cc-rs aborts. The metadata is cosmetic, so we only attempt the
-//! embed on a Windows host and skip (with a notice) everywhere else.
+//! embed on a Windows host and skip everywhere else.
 
 fn main() {
     println!("cargo:rerun-if-changed=media/nano.rc");
@@ -19,10 +19,5 @@ fn main() {
 
     if cfg!(windows) {
         let _ = embed_resource::compile("media/nano.rc", embed_resource::NONE);
-    } else {
-        println!(
-            "cargo:warning=nano-rs: Windows version metadata is only embedded when \
-             building on a Windows host; skipping resource compile for this cross build."
-        );
     }
 }

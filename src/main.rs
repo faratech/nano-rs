@@ -3,7 +3,8 @@
 // feature-gated paths shows up as unused; don't warn about it there.
 // The default-features build stays warning-clean and strict.
 #![cfg_attr(
-    not(all(feature = "color", feature = "nanorc", feature = "utf8",
+    not(all(not(feature = "tiny"),
+            feature = "color", feature = "nanorc", feature = "utf8",
             feature = "browser", feature = "help", feature = "histories",
             feature = "justify", feature = "multibuffer", feature = "wrapping",
             feature = "mouse", feature = "linenumbers", feature = "linter",
