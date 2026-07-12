@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/text.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2015 Mark Majeres
@@ -13,64 +17,87 @@
 // (at your option) any later version.
 
 #[allow(unused_imports)] // some of these are used only under feature gates
-#[allow(unused_imports)] // some of these are used only under feature gates
-use std::cell::RefCell;
-use crate::definitions::*;
-#[allow(unused_imports)] // some of these are used only under feature gates
-use crate::{ISSET, SET, UNSET, tr};
-use crate::global::{with_state, with_state_mut, state, state_mut,
-    flag_index, flag_mask,
-};
-#[allow(unused_imports)] // some of these are used only under feature gates
 use crate::chars::{
-    is_blank_char, is_word_char, char_length, step_left, step_right,
-    advance_over, mbstrlen, mbstrchr, white_string,
+    advance_over, char_length, is_blank_char, is_word_char, mbstrchr, mbstrlen, step_left,
+    step_right, white_string,
 };
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::cut::{do_snip, expunge};
+use crate::definitions::*;
+use crate::files::set_modified;
+use crate::global::{flag_index, flag_mask, state, state_mut, with_state, with_state_mut};
+use crate::search::goto_line_posx;
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::utils::{
-    xplustabs, measured_copy, wideness, breadth, actual_x,
-    new_magicline, remove_magicline, mark_is_before_cursor, get_range,
-    get_region,
+    actual_x, breadth, get_range, get_region, mark_is_before_cursor, measured_copy, new_magicline,
+    remove_magicline, wideness, xplustabs,
 };
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::winio::{
-    statusline, statusbar, titlebar, edit_refresh, adjust_viewport,
-    ensure_firstcolumn_is_aligned, blank_bottombars, bottombars, place_the_cursor,
-    wipe_statusbar, full_refresh, window_init,
+    adjust_viewport, blank_bottombars, bottombars, edit_refresh, ensure_firstcolumn_is_aligned,
+    full_refresh, place_the_cursor, statusbar, statusline, titlebar, window_init, wipe_statusbar,
 };
-use crate::files::set_modified;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::cut::{expunge, do_snip};
-use crate::search::goto_line_posx;
+use crate::{ISSET, SET, UNSET, tr};
+#[allow(unused_imports)] // some of these are used only under feature gates
+#[allow(unused_imports)] // some of these are used only under feature gates
+use std::cell::RefCell;
 
 // ---------------------------------------------------------------------------
-// UTF-8 boundary helpers
-// The C nano uses raw byte offsets everywhere; Rust requires that string slices
-// start and end on valid UTF-8 char boundaries. These helpers clip a byte
-// offset to the nearest valid boundary rather than panicking.
+// Byte/editing-unit boundary helpers
+//
+// Nano stores byte offsets, but in a UTF-8 locale a valid scalar must remain
+// atomic.  Malformed bytes are deliberately one editing unit each.  These
+// helpers therefore use the same decoder as cursor motion instead of Rust's
+// `str` boundaries (document data is not required to be UTF-8).
 // ---------------------------------------------------------------------------
 
-/// Return the largest index ≤ `pos` that is a valid UTF-8 char boundary in `s`.
+/// Return the largest editing-unit boundary that is not greater than `pos`.
 #[inline]
-fn safe_char_boundary(s: &str, pos: usize) -> usize {
-    let pos = pos.min(s.len());
-    (0..=pos).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+fn safe_edit_boundary<T: AsRef<[u8]> + ?Sized>(data: &T, pos: usize) -> usize {
+    let bytes = data.as_ref();
+    let target = pos.min(bytes.len());
+    if target == 0 {
+        return 0;
+    }
+
+    // `step_left()` probes at most four bytes backward and validates while
+    // walking forward.  This keeps typing at the end of a very long line O(1).
+    let previous = step_left(bytes, target);
+    let previous_end = (previous + char_length(&bytes[previous..])).min(bytes.len());
+    if previous_end == target {
+        target
+    } else {
+        previous
+    }
 }
 
-/// Return the smallest index ≥ `pos` that is a valid UTF-8 char boundary in `s`.
+/// Return the smallest editing-unit boundary that is not less than `pos`.
 #[inline]
-fn safe_char_boundary_end(s: &str, pos: usize) -> usize {
-    let pos = pos.min(s.len());
-    (pos..=s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(s.len())
+fn safe_edit_boundary_end<T: AsRef<[u8]> + ?Sized>(data: &T, pos: usize) -> usize {
+    let bytes = data.as_ref();
+    let target = pos.min(bytes.len());
+    let start = safe_edit_boundary(bytes, target);
+    if start == target {
+        target
+    } else {
+        (start + char_length(&bytes[start..])).min(bytes.len())
+    }
 }
 
-/// Return a stored byte range only when it is wholly valid for this String.
-/// Undo metadata should already satisfy this invariant; treating malformed
-/// offsets as unusable is preferable to panicking or deleting half a scalar.
+/// Return a stored byte range only when both ends are editing-unit boundaries.
 #[inline]
-fn checked_char_range(s: &str, start: usize, len: usize) -> Option<std::ops::Range<usize>> {
+fn checked_edit_range<T: AsRef<[u8]> + ?Sized>(
+    data: &T,
+    start: usize,
+    len: usize,
+) -> Option<std::ops::Range<usize>> {
+    let bytes = data.as_ref();
     let end = start.checked_add(len)?;
-    if end <= s.len() && s.is_char_boundary(start) && s.is_char_boundary(end) {
+    if end <= bytes.len()
+        && safe_edit_boundary(bytes, start) == start
+        && safe_edit_boundary(bytes, end) == end
+    {
         Some(start..end)
     } else {
         None
@@ -104,7 +131,9 @@ fn unlink_node(node: &LinePtr) {
 
 /// C: renumber_from(line) — reset line numbers starting from line.
 #[inline]
-fn renumber_from(start: &LinePtr) { crate::nano::renumber_from(start) }
+fn renumber_from(start: &LinePtr) {
+    crate::nano::renumber_from(start)
+}
 
 /// C: copy_buffer(src) — make a deep copy of the cut-buffer linked list.
 fn copy_buffer(src: &LinePtr) -> LinePtr {
@@ -175,24 +204,32 @@ fn do_para_end(line: LinePtr) -> LinePtr {
 
 /// C: in_restricted_mode() — check whether nano is in restricted mode.
 #[inline]
-fn in_restricted_mode() -> bool { crate::nano::in_restricted_mode() }
+fn in_restricted_mode() -> bool {
+    crate::nano::in_restricted_mode()
+}
 
 /// C: confirm_margin() — update line number margin.
 #[cfg(feature = "linenumbers")]
 #[inline]
-fn confirm_margin() { crate::nano::confirm_margin() }
+fn confirm_margin() {
+    crate::nano::confirm_margin()
+}
 
 /// C: block_sigwinch(block) — temporarily block/unblock SIGWINCH.
 #[inline]
-fn block_sigwinch(block: bool) { crate::nano::block_sigwinch(block) }
+fn block_sigwinch(block: bool) {
+    crate::nano::block_sigwinch(block)
+}
 
 /// C: terminal_init() — restore terminal settings after external program.
-fn terminal_init() { crate::nano::terminal_init(); }
+fn terminal_init() {
+    crate::nano::terminal_init();
+}
 
 /// C: doupdate() — flush pending ncurses updates.
 fn doupdate() {
     // Crossterm: flush stdout.
-    
+
     crate::winio::flush_out();
 }
 
@@ -236,13 +273,7 @@ fn read_file<R: std::io::Read>(file: R, is_new_file: bool, filename: &str, undoa
 
 /// C: write_file(name, stream, temporary, kind, notes) — write buffer to file.
 fn write_file_to(name: &str, temporary: bool) -> bool {
-    crate::files::write_file(
-        name,
-        None,
-        temporary,
-        KindOfWritingType::Overwrite,
-        NONOTES,
-    )
+    crate::files::write_file(name, None, temporary, KindOfWritingType::Overwrite, NONOTES)
 }
 
 /// C: write_region_to_file — write marked region to a temp file.
@@ -272,7 +303,15 @@ fn findnextstr(
     column: usize,
 ) -> i32 {
     let mut dummy_len: usize = 0;
-    crate::search::findnextstr(needle, whole_word_only, modus, &mut dummy_len, skipone, line_ptr, column)
+    crate::search::findnextstr(
+        needle,
+        whole_word_only,
+        modus,
+        &mut dummy_len,
+        skipone,
+        line_ptr,
+        column,
+    )
 }
 
 /// C: do_replace_loop — perform find+replace loop.
@@ -361,10 +400,14 @@ pub fn do_tab() {
     {
         // When a region is marked, indent it instead.
         let has_mark_other = with_state(|s| {
-            s.openfile.as_ref().map(|f| {
-                f.mark.is_some() && f.mark.as_ref().map(|m| m.as_ptr())
-                    != f.current.as_ref().map(|c| c.as_ptr())
-            }).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|f| {
+                    f.mark.is_some()
+                        && f.mark.as_ref().map(|m| m.as_ptr())
+                            != f.current.as_ref().map(|c| c.as_ptr())
+                })
+                .unwrap_or(false)
         });
         if has_mark_other {
             do_indent();
@@ -375,7 +418,9 @@ pub fn do_tab() {
     #[cfg(feature = "color")]
     {
         let tabstring = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.syntax.as_ref())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.syntax.as_ref())
                 .and_then(|syn_ptr| {
                     let syn = unsafe { &**syn_ptr };
                     syn.tabstring.clone()
@@ -410,7 +455,8 @@ pub fn do_tab() {
 
 /* C: void indent_a_line(linestruct *line, char *indentation) */
 #[cfg(not(feature = "tiny"))]
-pub fn indent_a_line(line: &LinePtr, indentation: &str) {
+pub fn indent_a_line<T: AsRef<[u8]> + ?Sized>(line: &LinePtr, indentation: &T) {
+    let indentation = indentation.as_ref();
     let indent_len = indentation.len();
     if indent_len == 0 {
         return;
@@ -418,7 +464,9 @@ pub fn indent_a_line(line: &LinePtr, indentation: &str) {
 
     {
         let mut node = line.borrow_mut();
-        node.data = format!("{}{}", indentation, node.data);
+        let mut new_data = LineData::from_internal(indentation.to_vec());
+        new_data.extend_bytes(node.data.as_bytes());
+        node.data = new_data;
     }
 
     with_state_mut(|s| {
@@ -464,7 +512,11 @@ pub fn do_indent() {
     add_undo(UndoType::Indent, None);
 
     for line in lines.iter() {
-        let real_indent = if line.borrow().data.is_empty() { "" } else { &indentation };
+        let real_indent = if line.borrow().data.is_empty() {
+            ""
+        } else {
+            &indentation
+        };
         indent_a_line(line, real_indent);
         #[cfg(not(feature = "tiny"))]
         update_multiline_undo(line.borrow().lineno, real_indent);
@@ -484,7 +536,9 @@ fn build_indentation() -> String {
     #[cfg(feature = "color")]
     {
         let tabstring = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.syntax.as_ref())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.syntax.as_ref())
                 .and_then(|syn_ptr| {
                     let syn = unsafe { &**syn_ptr };
                     syn.tabstring.clone()
@@ -523,11 +577,14 @@ fn collect_lines_in_range(top_lineno: usize, bot_lineno: usize) -> Vec<LinePtr> 
 
 /* C: size_t length_of_white(const char *text) */
 #[cfg(not(feature = "tiny"))]
-pub fn length_of_white(text: &str) -> usize {
+pub fn length_of_white<T: AsRef<[u8]> + ?Sized>(text: &T) -> usize {
+    let bytes = text.as_ref();
     #[cfg(feature = "color")]
     {
         let tabstring = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.syntax.as_ref())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.syntax.as_ref())
                 .and_then(|syn_ptr| {
                     let syn = unsafe { &**syn_ptr };
                     syn.tabstring.clone()
@@ -535,7 +592,7 @@ pub fn length_of_white(text: &str) -> usize {
         });
         if let Some(ref ts) = tabstring {
             let ts_len = ts.len();
-            if text.starts_with(ts.as_str()) {
+            if bytes.starts_with(ts.as_bytes()) {
                 return ts_len;
             }
         }
@@ -543,7 +600,6 @@ pub fn length_of_white(text: &str) -> usize {
 
     let tabsize = state().tabsize as usize;
     let mut white_count = 0usize;
-    let bytes = text.as_bytes();
     loop {
         if white_count >= bytes.len() {
             return white_count;
@@ -596,7 +652,7 @@ pub fn unindent_a_line(line: &LinePtr, indent_len: usize) {
     {
         let mut node = line.borrow_mut();
         if node.data.len() >= indent_len {
-            node.data = node.data[indent_len..].to_string();
+            node.data = LineData::from_internal(node.data[indent_len..].to_vec());
         }
     }
     with_state_mut(|s| {
@@ -616,7 +672,9 @@ pub fn do_unindent() {
     let lines = collect_lines_in_range(top_lineno, bot_lineno);
 
     // Skip leading lines that cannot be unindented.
-    let first_indented = lines.iter().position(|ln| length_of_white(&ln.borrow().data) > 0);
+    let first_indented = lines
+        .iter()
+        .position(|ln| length_of_white(&ln.borrow().data) > 0);
     let lines = match first_indented {
         None => return,
         Some(idx) => &lines[idx..],
@@ -687,12 +745,18 @@ pub fn handle_indent_action(u: &UndoStruct, undoing: bool, add_indent: bool) {
 
 /* C: bool comment_line(undo_type action, linestruct *line, const char *comment_seq) */
 #[cfg(feature = "comment")]
-pub fn comment_line(action: UndoType, line: &LinePtr, comment_seq: &str) -> bool {
-    let (pre_seq, post_seq) = if let Some(pipe_pos) = comment_seq.find('|') {
-        (&comment_seq[..pipe_pos], Some(&comment_seq[pipe_pos + 1..]))
-    } else {
-        (comment_seq, None)
-    };
+pub fn comment_line<T: AsRef<[u8]> + ?Sized>(
+    action: UndoType,
+    line: &LinePtr,
+    comment_seq: &T,
+) -> bool {
+    let comment_seq = comment_seq.as_ref();
+    let (pre_seq, post_seq) =
+        if let Some(pipe_pos) = comment_seq.iter().position(|&byte| byte == b'|') {
+            (&comment_seq[..pipe_pos], Some(&comment_seq[pipe_pos + 1..]))
+        } else {
+            (comment_seq, None)
+        };
 
     let pre_len = pre_seq.len();
     let post_len = post_seq.map_or(0, |p| p.len());
@@ -700,8 +764,11 @@ pub fn comment_line(action: UndoType, line: &LinePtr, comment_seq: &str) -> bool
     // Don't comment the magic last line unless NO_NEWLINES is set.
     {
         let is_filebot = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.filebot.as_ref())
-                .map(|bot| bot.as_ptr()) == Some(line.as_ptr())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.as_ref())
+                .map(|bot| bot.as_ptr())
+                == Some(line.as_ptr())
         });
         if !ISSET!(NO_NEWLINES) && is_filebot {
             return false;
@@ -714,11 +781,11 @@ pub fn comment_line(action: UndoType, line: &LinePtr, comment_seq: &str) -> bool
     match action {
         UndoType::Comment => {
             // Add comment markers.
-            let new_data = if let Some(post) = post_seq {
-                format!("{}{}{}", pre_seq, line_data, post)
-            } else {
-                format!("{}{}", pre_seq, line_data)
-            };
+            let mut new_data = LineData::from_internal(pre_seq.to_vec());
+            new_data.extend_bytes(line_data.as_bytes());
+            if let Some(post) = post_seq {
+                new_data.extend_bytes(post);
+            }
             line.borrow_mut().data = new_data;
 
             with_state_mut(|s| {
@@ -769,8 +836,12 @@ pub fn comment_line(action: UndoType, line: &LinePtr, comment_seq: &str) -> bool
                 return false;
             }
 
-            let end = if post_len > 0 { line_len - post_len } else { line_len };
-            let new_data = line_data[pre_len..end].to_string();
+            let end = if post_len > 0 {
+                line_len - post_len
+            } else {
+                line_len
+            };
+            let new_data = LineData::from_internal(line_data[pre_len..end].to_vec());
             line.borrow_mut().data = new_data;
 
             with_state_mut(|s| {
@@ -794,7 +865,9 @@ pub fn do_comment() {
         #[cfg(feature = "color")]
         {
             let seq = with_state(|s| {
-                s.openfile.as_ref().and_then(|f| f.syntax.as_ref())
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.syntax.as_ref())
                     .and_then(|syn_ptr| {
                         let syn = unsafe { &**syn_ptr };
                         #[cfg(feature = "comment")]
@@ -805,7 +878,10 @@ pub fn do_comment() {
             });
             if let Some(s) = seq {
                 if s.is_empty() {
-                    statusline(MessageType::Ahem, tr!("Commenting is not supported for this file type"));
+                    statusline(
+                        MessageType::Ahem,
+                        tr!("Commenting is not supported for this file type"),
+                    );
                     return;
                 }
                 s
@@ -823,7 +899,10 @@ pub fn do_comment() {
     // If only the magic line is selected, do nothing.
     {
         let filebot_ptr = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.filebot.as_ref()).map(|b| b.as_ptr())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.as_ref())
+                .map(|b| b.as_ptr())
         });
         if lines.len() == 1 {
             let single_ptr = lines[0].as_ptr();
@@ -853,13 +932,15 @@ pub fn do_comment() {
 
     add_undo(action, None);
 
-    // Store the comment sequence in the undo record's strdata.
+    // Store the inserted comment bytes in the undo record's payload.
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
             if !f.current_undo.is_null() {
                 // The active cursor was created through a unique Box path in
                 // add_undo; keep using that provenance for record mutation.
-                unsafe { (*f.current_undo).strdata = Some(comment_seq.clone()); }
+                unsafe {
+                    (*f.current_undo).payload = Some(LineData::from_utf8(&comment_seq));
+                }
             }
         }
     });
@@ -881,7 +962,7 @@ pub fn do_comment() {
 /* C: void handle_comment_action(undostruct *u, bool undoing, bool add_comment) */
 #[cfg(feature = "comment")]
 pub fn handle_comment_action(u: &UndoStruct, undoing: bool, add_comment: bool) {
-    let comment_seq = u.strdata.clone().unwrap_or_default();
+    let comment_seq = u.payload.clone().unwrap_or_default();
 
     if !undoing {
         goto_line_posx(u.head_lineno, u.head_x);
@@ -917,9 +998,14 @@ pub fn handle_comment_action(u: &UndoStruct, undoing: bool, add_comment: bool) {
 /// i.e. the first 6 variants that operate on the current single line.
 /// C: u->type <= REPLACE
 fn undo_type_is_simple(t: UndoType) -> bool {
-    matches!(t,
-        UndoType::Add | UndoType::Enter | UndoType::Back |
-        UndoType::Del | UndoType::Join | UndoType::Replace
+    matches!(
+        t,
+        UndoType::Add
+            | UndoType::Enter
+            | UndoType::Back
+            | UndoType::Del
+            | UndoType::Join
+            | UndoType::Replace
     )
 }
 
@@ -941,7 +1027,11 @@ fn undo_paste(u: &UndoStruct) {
 /* C: void undo_cut(undostruct *u) */
 #[cfg(not(feature = "tiny"))]
 pub fn undo_cut(u: &UndoStruct) {
-    let pos_x = if (u.xflags & WAS_WHOLE_LINE) != 0 { 0 } else { u.head_x };
+    let pos_x = if (u.xflags & WAS_WHOLE_LINE) != 0 {
+        0
+    } else {
+        u.head_x
+    };
     goto_line_posx(u.head_lineno, pos_x);
 
     // Clear an inherited anchor but not a user-placed one.
@@ -950,7 +1040,9 @@ pub fn undo_cut(u: &UndoStruct) {
             if let Some(ref mut f) = s.openfile {
                 if let Some(ref cur) = f.current {
                     #[cfg(not(feature = "tiny"))]
-                    { cur.borrow_mut().has_anchor = false; }
+                    {
+                        cur.borrow_mut().has_anchor = false;
+                    }
                 }
             }
         });
@@ -967,12 +1059,16 @@ pub fn undo_cut(u: &UndoStruct) {
             let filebot = f.filebot.as_ref()?;
             let current = f.current.as_ref()?;
             let filebot_ne_current = filebot.as_ptr() != current.as_ptr();
-            let prev_of_bot_empty = filebot.borrow().prev.as_ref()
+            let prev_of_bot_empty = filebot
+                .borrow()
+                .prev
+                .as_ref()
                 .and_then(|w| w.upgrade())
                 .map(|p| p.borrow().data.is_empty())
                 .unwrap_or(false);
             Some(filebot_ne_current && prev_of_bot_empty)
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
         if should_remove {
             remove_magicline();
         }
@@ -990,7 +1086,11 @@ pub fn redo_cut(u: &UndoStruct) {
     set_cutbuffer(None);
 
     let mark_line = get_line_from_number(u.head_lineno);
-    let mark_x = if (u.xflags & WAS_WHOLE_LINE) != 0 { 0 } else { u.head_x };
+    let mark_x = if (u.xflags & WAS_WHOLE_LINE) != 0 {
+        0
+    } else {
+        u.head_x
+    };
 
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
@@ -1017,8 +1117,8 @@ fn get_line_from_number(lineno: isize) -> Option<LinePtr> {
 /* C: void do_undo(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn do_undo() {
-    let u_ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo))
-        .unwrap_or(std::ptr::null_mut());
+    let u_ptr =
+        with_state(|s| s.openfile.as_ref().map(|f| f.current_undo)).unwrap_or(std::ptr::null_mut());
 
     if u_ptr.is_null() {
         statusline(MessageType::Ahem, tr!("Nothing to undo"));
@@ -1027,11 +1127,18 @@ pub fn do_undo() {
 
     // Extract only the Copy scalars from the undo record — do NOT ptr::read the full struct
     // (it owns Box/String/Rc fields; a bitwise copy + Drop = double-free).
-    let (u_type, u_xflags, u_head_lineno, u_head_x, u_tail_lineno, u_tail_x, u_wassize) =
-        unsafe {
-            let u = &*u_ptr;
-            (u.r#type, u.xflags, u.head_lineno, u.head_x, u.tail_lineno, u.tail_x, u.wassize)
-        };
+    let (u_type, u_xflags, u_head_lineno, u_head_x, u_tail_lineno, u_tail_x, u_wassize) = unsafe {
+        let u = &*u_ptr;
+        (
+            u.r#type,
+            u.xflags,
+            u.head_lineno,
+            u.head_x,
+            u.tail_lineno,
+            u.tail_x,
+            u.wassize,
+        )
+    };
 
     let mut undidmsg: Option<&str> = None;
 
@@ -1048,11 +1155,11 @@ pub fn do_undo() {
                 remove_magicline();
             }
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let strdata_len = strdata.len();
                 let mut data = ln.borrow().data.clone();
-                if let Some(range) = checked_char_range(&data, u_head_x, strdata_len) {
-                    data.replace_range(range, "");
+                if let Some(range) = checked_edit_range(&data, u_head_x, strdata_len) {
+                    data.replace_range_bytes(range, &[]);
                     ln.borrow_mut().data = data;
                 }
             }
@@ -1063,21 +1170,25 @@ pub fn do_undo() {
             let original_x = if u_head_x == 0 { u_tail_x } else { u_head_x };
             let regain_from_x = if u_head_x == 0 { 0 } else { u_tail_x };
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let suffix = if regain_from_x <= strdata.len() {
-                    strdata[regain_from_x..].to_string()
+                    LineData::from_internal(strdata[regain_from_x..].to_vec())
                 } else {
-                    String::new()
+                    LineData::empty()
                 };
                 {
                     let mut node = ln.borrow_mut();
                     node.data.push_str(&suffix);
                 }
                 let next_anchor = {
-                    ln.borrow().next.as_ref()
+                    ln.borrow()
+                        .next
+                        .as_ref()
                         .map(|nx| {
                             #[cfg(not(feature = "tiny"))]
-                            { nx.borrow().has_anchor }
+                            {
+                                nx.borrow().has_anchor
+                            }
                             #[cfg(feature = "tiny")]
                             false
                         })
@@ -1103,9 +1214,9 @@ pub fn do_undo() {
         UndoType::Back | UndoType::Del => {
             undidmsg = Some(tr!("deletion"));
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() && data.is_char_boundary(u_head_x) {
+                if safe_edit_boundary(&data, u_head_x) == u_head_x {
                     data.insert_str(u_head_x, &strdata);
                     ln.borrow_mut().data = data;
                 }
@@ -1116,7 +1227,9 @@ pub fn do_undo() {
             undidmsg = Some(tr!("line join"));
             if (u_xflags & WAS_BACKSPACE_AT_EOF) != 0 && !ISSET!(NO_NEWLINES) {
                 let filebot_lineno = with_state(|s| {
-                    s.openfile.as_ref().and_then(|f| f.filebot.as_ref())
+                    s.openfile
+                        .as_ref()
+                        .and_then(|f| f.filebot.as_ref())
                         .map(|b| b.borrow().lineno)
                         .unwrap_or(0)
                 });
@@ -1125,11 +1238,11 @@ pub fn do_undo() {
             } else if let Some(ref ln) = line {
                 {
                     let mut node = ln.borrow_mut();
-                    if u_tail_x <= node.data.len() && node.data.is_char_boundary(u_tail_x) {
+                    if safe_edit_boundary(&node.data, u_tail_x) == u_tail_x {
                         node.data.truncate(u_tail_x);
                     }
                 }
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let intruder = make_new_node(Some(ln.clone()));
                 intruder.borrow_mut().data = strdata;
                 splice_node(ln, intruder.clone());
@@ -1140,11 +1253,13 @@ pub fn do_undo() {
         UndoType::Replace => {
             undidmsg = Some(tr!("replacement"));
             if let Some(ref ln) = line {
-                // Swap strdata with line->data. Must do this through raw ptr only.
-                let strdata = unsafe { (*u_ptr).strdata.take().unwrap_or_default() };
+                // Swap the saved payload with line data through the raw pointer.
+                let strdata = unsafe { (*u_ptr).payload.take().unwrap_or_default() };
                 let old_data = ln.borrow().data.clone();
                 ln.borrow_mut().data = strdata;
-                unsafe { (*u_ptr).strdata = Some(old_data); }
+                unsafe {
+                    (*u_ptr).payload = Some(old_data);
+                }
             }
             goto_line_posx(u_head_lineno, u_head_x);
         }
@@ -1159,10 +1274,16 @@ pub fn do_undo() {
                 let t = with_state(|s| {
                     s.openfile.as_ref().and_then(|f| {
                         let ptr = f.current_undo;
-                        if ptr.is_null() { None } else { Some(unsafe { (*ptr).r#type }) }
+                        if ptr.is_null() {
+                            None
+                        } else {
+                            Some(unsafe { (*ptr).r#type })
+                        }
                     })
                 });
-                if t == Some(UndoType::SplitBegin) || t.is_none() { break; }
+                if t == Some(UndoType::SplitBegin) || t.is_none() {
+                    break;
+                }
                 do_undo();
             }
             return;
@@ -1188,8 +1309,11 @@ pub fn do_undo() {
                     let filebot = f.filebot.as_ref()?;
                     let current = f.current.as_ref()?;
                     Some(filebot.as_ptr() != current.as_ptr())
-                }).unwrap_or(false);
-                if should_remove { remove_magicline(); }
+                })
+                .unwrap_or(false);
+                if should_remove {
+                    remove_magicline();
+                }
             }
         }
         UndoType::Insert => {
@@ -1206,7 +1330,9 @@ pub fn do_undo() {
             });
             cut_marked_region();
             let new_cut = get_cutbuffer();
-            unsafe { (*u_ptr).cutbuffer = new_cut; }
+            unsafe {
+                (*u_ptr).cutbuffer = new_cut;
+            }
             set_cutbuffer(old_cutbuffer);
             if (u_xflags & INCLUDED_LAST_LINE) != 0 && !ISSET!(NO_NEWLINES) {
                 let should_remove = with_state(|s| {
@@ -1214,12 +1340,15 @@ pub fn do_undo() {
                     let filebot = f.filebot.as_ref()?;
                     let current = f.current.as_ref()?;
                     Some(filebot.as_ptr() != current.as_ptr())
-                }).unwrap_or(false);
-                if should_remove { remove_magicline(); }
+                })
+                .unwrap_or(false);
+                if should_remove {
+                    remove_magicline();
+                }
             }
         }
         UndoType::CoupleBegin => {
-            undidmsg = unsafe { (*u_ptr).strdata.as_deref() };
+            undidmsg = unsafe { (*u_ptr).description.as_deref() };
             goto_line_posx(u_head_lineno, u_head_x);
             with_state_mut(|s| {
                 if let Some(ref mut f) = s.openfile {
@@ -1230,7 +1359,9 @@ pub fn do_undo() {
         }
         UndoType::CoupleEnd => {
             let cursor_row = with_state(|s| s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0));
-            unsafe { (*u_ptr).head_lineno = cursor_row; }
+            unsafe {
+                (*u_ptr).head_lineno = cursor_row;
+            }
             advance_current_undo();
             do_undo();
             do_undo();
@@ -1262,8 +1393,8 @@ pub fn do_undo() {
         _ => {}
     }
 
-    // The CoupleBegin case borrows u_ptr.strdata as undidmsg; after this point
-    // we must not read from u_ptr.strdata for CoupleBegin.
+    // The CoupleBegin case borrows u_ptr.description as undidmsg; after this
+    // point we must not mutate that description for CoupleBegin.
     let pletion_line_is_none = state().pletion_line.is_none();
     if let Some(msg) = undidmsg {
         if !ISSET!(ZERO) && pletion_line_is_none {
@@ -1296,12 +1427,16 @@ pub fn do_undo() {
     }
 
     let (current_undo_ptr, last_saved_ptr) = with_state(|s| {
-        s.openfile.as_ref().map(|f| (f.current_undo, f.last_saved))
+        s.openfile
+            .as_ref()
+            .map(|f| (f.current_undo, f.last_saved))
             .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
     });
     if current_undo_ptr == last_saved_ptr {
         with_state_mut(|s| {
-            if let Some(ref mut f) = s.openfile { f.modified = false; }
+            if let Some(ref mut f) = s.openfile {
+                f.modified = false;
+            }
         });
         titlebar(None);
     } else {
@@ -1316,12 +1451,15 @@ pub fn do_undo() {}
 #[cfg(not(feature = "tiny"))]
 fn advance_current_undo() {
     unsafe {
-        let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo)).unwrap_or(std::ptr::null_mut());
+        let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo))
+            .unwrap_or(std::ptr::null_mut());
         if !ptr.is_null() {
             // Preserve mutable provenance for a cursor that will later be used
             // to update the record.  Casting a shared `&UndoStruct` to `*mut`
             // makes the subsequent unique dereference undefined behaviour.
-            let next_ptr = (*ptr).next.as_deref_mut()
+            let next_ptr = (*ptr)
+                .next
+                .as_deref_mut()
                 .map(|record| record as *mut UndoStruct)
                 .unwrap_or(std::ptr::null_mut());
             with_state_mut(|s| {
@@ -1337,7 +1475,10 @@ fn advance_current_undo() {
 #[cfg(not(feature = "tiny"))]
 pub fn do_redo() {
     let current_undo_ptr = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.current_undo).unwrap_or(std::ptr::null_mut())
+        s.openfile
+            .as_ref()
+            .map(|f| f.current_undo)
+            .unwrap_or(std::ptr::null_mut())
     });
 
     // Find the item before current_undo in the chain (the item to redo).  Each
@@ -1348,7 +1489,9 @@ pub fn do_redo() {
             return (false, std::ptr::null_mut());
         };
         let has_undo = f.undotop.is_some();
-        let mut candidate = f.undotop.as_deref_mut()
+        let mut candidate = f
+            .undotop
+            .as_deref_mut()
             .map(|record| record as *mut UndoStruct)
             .unwrap_or(std::ptr::null_mut());
 
@@ -1362,7 +1505,9 @@ pub fn do_redo() {
 
         unsafe {
             while !candidate.is_null() {
-                let next = (*candidate).next.as_deref_mut()
+                let next = (*candidate)
+                    .next
+                    .as_deref_mut()
                     .map(|record| record as *mut UndoStruct)
                     .unwrap_or(std::ptr::null_mut());
                 if next == current_undo_ptr {
@@ -1386,11 +1531,18 @@ pub fn do_redo() {
     }
 
     // Extract only Copy scalars; never ptr::read the full struct.
-    let (u_type, u_xflags, u_head_lineno, u_head_x, u_tail_lineno, u_tail_x, u_newsize) =
-        unsafe {
-            let u = &*u_ptr;
-            (u.r#type, u.xflags, u.head_lineno, u.head_x, u.tail_lineno, u.tail_x, u.newsize)
-        };
+    let (u_type, u_xflags, u_head_lineno, u_head_x, u_tail_lineno, u_tail_x, u_newsize) = unsafe {
+        let u = &*u_ptr;
+        (
+            u.r#type,
+            u.xflags,
+            u.head_lineno,
+            u.head_x,
+            u.tail_lineno,
+            u.tail_x,
+            u.newsize,
+        )
+    };
 
     let mut redidmsg: Option<&str> = None;
     let mut suppress_modification = false;
@@ -1408,9 +1560,9 @@ pub fn do_redo() {
                 new_magicline();
             }
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let mut data = ln.borrow().data.clone();
-                if u_head_x <= data.len() && data.is_char_boundary(u_head_x) {
+                if safe_edit_boundary(&data, u_head_x) == u_head_x {
                     data.insert_str(u_head_x, &strdata);
                     ln.borrow_mut().data = data;
                 }
@@ -1422,11 +1574,11 @@ pub fn do_redo() {
             if let Some(ref ln) = line {
                 {
                     let mut node = ln.borrow_mut();
-                    if u_head_x <= node.data.len() && node.data.is_char_boundary(u_head_x) {
+                    if safe_edit_boundary(&node.data, u_head_x) == u_head_x {
                         node.data.truncate(u_head_x);
                     }
                 }
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let intruder = make_new_node(Some(ln.clone()));
                 intruder.borrow_mut().data = strdata;
                 splice_node(ln, intruder.clone());
@@ -1437,10 +1589,10 @@ pub fn do_redo() {
         UndoType::Back | UndoType::Del => {
             redidmsg = Some(tr!("deletion"));
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 let mut data = ln.borrow().data.clone();
-                if let Some(range) = checked_char_range(&data, u_head_x, strdata.len()) {
-                    data.replace_range(range, "");
+                if let Some(range) = checked_edit_range(&data, u_head_x, strdata.len()) {
+                    data.replace_range_bytes(range, &[]);
                     ln.borrow_mut().data = data;
                 }
             }
@@ -1451,7 +1603,7 @@ pub fn do_redo() {
             if (u_xflags & WAS_BACKSPACE_AT_EOF) != 0 && !ISSET!(NO_NEWLINES) {
                 goto_line_posx(u_tail_lineno, u_tail_x);
             } else if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.as_deref().unwrap_or("").to_string() };
+                let strdata = unsafe { (*u_ptr).payload.clone().unwrap_or_default() };
                 {
                     let mut node = ln.borrow_mut();
                     node.data.push_str(&strdata);
@@ -1472,10 +1624,12 @@ pub fn do_redo() {
         UndoType::Replace => {
             redidmsg = Some(tr!("replacement"));
             if let Some(ref ln) = line {
-                let strdata = unsafe { (*u_ptr).strdata.take().unwrap_or_default() };
+                let strdata = unsafe { (*u_ptr).payload.take().unwrap_or_default() };
                 let old_data = ln.borrow().data.clone();
                 ln.borrow_mut().data = strdata;
-                unsafe { (*u_ptr).strdata = Some(old_data); }
+                unsafe {
+                    (*u_ptr).payload = Some(old_data);
+                }
             }
             goto_line_posx(u_head_lineno, u_head_x);
         }
@@ -1486,10 +1640,16 @@ pub fn do_redo() {
                 let t = with_state(|s| {
                     s.openfile.as_ref().and_then(|f| {
                         let ptr = f.current_undo;
-                        if ptr.is_null() { None } else { Some(unsafe { (*ptr).r#type }) }
+                        if ptr.is_null() {
+                            None
+                        } else {
+                            Some(unsafe { (*ptr).r#type })
+                        }
                     })
                 });
-                if t == Some(UndoType::SplitEnd) || t.is_none() { break; }
+                if t == Some(UndoType::SplitEnd) || t.is_none() {
+                    break;
+                }
                 do_redo();
             }
             // Recursive redos can reborrow the undo chain, so use the scalars
@@ -1527,7 +1687,9 @@ pub fn do_redo() {
             } else {
                 suppress_modification = true;
             }
-            unsafe { (*u_ptr).cutbuffer = None; }
+            unsafe {
+                (*u_ptr).cutbuffer = None;
+            }
         }
         UndoType::CoupleBegin => {
             set_current_undo_to(u_ptr);
@@ -1537,7 +1699,7 @@ pub fn do_redo() {
             return;
         }
         UndoType::CoupleEnd => {
-            redidmsg = unsafe { (*u_ptr).strdata.as_deref() };
+            redidmsg = unsafe { (*u_ptr).description.as_deref() };
             goto_line_posx(u_tail_lineno, u_tail_x);
             with_state_mut(|s| {
                 if let Some(ref mut f) = s.openfile {
@@ -1602,12 +1764,16 @@ pub fn do_redo() {
     }
 
     let (current_undo_ptr, last_saved_ptr) = with_state(|s| {
-        s.openfile.as_ref().map(|f| (f.current_undo, f.last_saved))
+        s.openfile
+            .as_ref()
+            .map(|f| (f.current_undo, f.last_saved))
             .unwrap_or((std::ptr::null_mut(), std::ptr::null_mut()))
     });
     if current_undo_ptr == last_saved_ptr {
         with_state_mut(|s| {
-            if let Some(ref mut f) = s.openfile { f.modified = false; }
+            if let Some(ref mut f) = s.openfile {
+                f.modified = false;
+            }
         });
         titlebar(None);
     } else if !suppress_modification {
@@ -1680,7 +1846,7 @@ pub fn do_enter() {
         let rest = if current_x <= cur_data.len() {
             &cur_data[current_x..]
         } else {
-            ""
+            &[]
         };
         #[cfg(not(feature = "tiny"))]
         {
@@ -1691,21 +1857,26 @@ pub fn do_enter() {
                 } else {
                     &sample_data[..]
                 };
-                format!("{}{}", indent_part, rest)
+                let mut combined = LineData::from_internal(indent_part.to_vec());
+                combined.extend_bytes(rest);
+                combined
             } else {
-                rest.to_string()
+                LineData::from_internal(rest.to_vec())
             }
         }
         #[cfg(feature = "tiny")]
-        rest.to_string()
+        LineData::from_internal(rest.to_vec())
     };
 
     // Adjust mark if on the current line after cursor.
     #[cfg(not(feature = "tiny"))]
     {
         let mark_on_current = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.mark.as_ref())
-                .map(|m| m.as_ptr()) == Some(current_line.as_ptr())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.mark.as_ref())
+                .map(|m| m.as_ptr())
+                == Some(current_line.as_ptr())
         });
         let mark_x = with_state(|s| s.openfile.as_ref().map(|f| f.mark_x).unwrap_or(0));
         if mark_on_current && mark_x > current_x {
@@ -1727,10 +1898,15 @@ pub fn do_enter() {
     }
 
     // Make the current line end at the (possibly reset) cursor position.
-    let trunc_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(current_x));
+    let trunc_x = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .map(|f| f.current_x)
+            .unwrap_or(current_x)
+    });
     {
         let mut node = current_line.borrow_mut();
-        if trunc_x <= node.data.len() && node.data.is_char_boundary(trunc_x) {
+        if safe_edit_boundary(&node.data, trunc_x) == trunc_x {
             node.data.truncate(trunc_x);
         }
     }
@@ -1750,8 +1926,14 @@ pub fn do_enter() {
         let mark_on_current_and_after = with_state(|s| {
             let f = s.openfile.as_ref()?;
             let mark = f.mark.as_ref()?;
-            if mark.as_ptr() != current_line.as_ptr() { return None; }
-            if f.mark_x > current_x { Some(f.mark_x) } else { None }
+            if mark.as_ptr() != current_line.as_ptr() {
+                return None;
+            }
+            if f.mark_x > current_x {
+                Some(f.mark_x)
+            } else {
+                None
+            }
         });
         if let Some(old_mark_x) = mark_on_current_and_after {
             let new_mark_x = old_mark_x + extra - current_x;
@@ -1766,7 +1948,8 @@ pub fn do_enter() {
             let mark_moved = with_state(|s| {
                 let f = s.openfile.as_ref()?;
                 Some(f.mark.as_ref().map(|m| m.as_ptr()) == Some(current_line.as_ptr()))
-            }).unwrap_or(false);
+            })
+            .unwrap_or(false);
             if mark_moved {
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
@@ -1818,17 +2001,14 @@ pub fn do_enter() {
 // ---------------------------------------------------------------------------
 
 /* C: void inject(char *buf, size_t buf_len) */
-pub fn inject(buf: &str, buf_len: usize) {
-    let insertion_end = safe_char_boundary(buf, buf_len.min(buf.len()));
-    let raw_insertion = &buf[..insertion_end];
+pub fn inject<T: AsRef<[u8]> + ?Sized>(buf: &T, buf_len: usize) {
+    let bytes = buf.as_ref();
+    let insertion_end = safe_edit_boundary(bytes, buf_len.min(bytes.len()));
+    let raw_insertion = &bytes[..insertion_end];
     if raw_insertion.is_empty() {
         return;
     }
-    let insertion = if raw_insertion.contains('\0') {
-        std::borrow::Cow::Owned(raw_insertion.replace('\0', "\n"))
-    } else {
-        std::borrow::Cow::Borrowed(raw_insertion)
-    };
+    let insertion = LineData::from_external(raw_insertion);
 
     let (current_line, requested_x) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
@@ -1836,10 +2016,10 @@ pub fn inject(buf: &str, buf_len: usize) {
     });
 
     // Keep malformed restored state or a partially ported caller from making
-    // String::insert_str panic or leaving the cursor beyond end-of-line.
+    // splitting a valid UTF-8 scalar or leaving the cursor beyond end-of-line.
     let current_x = {
         let line = current_line.borrow();
-        safe_char_boundary(&line.data, requested_x)
+        safe_edit_boundary(&line.data, requested_x)
     };
     if current_x != requested_x {
         with_state_mut(|s| {
@@ -1851,7 +2031,9 @@ pub fn inject(buf: &str, buf_len: usize) {
 
     #[cfg(not(feature = "tiny"))]
     let continues_previous_add = with_state(|s| {
-        let Some(f) = s.openfile.as_ref() else { return false; };
+        let Some(f) = s.openfile.as_ref() else {
+            return false;
+        };
         if f.last_action != UndoType::Add || f.current_undo.is_null() {
             return false;
         }
@@ -1860,9 +2042,7 @@ pub fn inject(buf: &str, buf_len: usize) {
         // SAFETY: current_undo points into this buffer's owned undo chain.  A
         // non-null pointer paired with last_action == Add is the active record.
         let undo = unsafe { &*f.current_undo };
-        undo.r#type == UndoType::Add
-            && undo.tail_lineno == lineno
-            && undo.tail_x == current_x
+        undo.r#type == UndoType::Add && undo.tail_lineno == lineno && undo.tail_x == current_x
     });
 
     #[cfg(not(feature = "tiny"))]
@@ -1876,15 +2056,15 @@ pub fn inject(buf: &str, buf_len: usize) {
         let mut node = current_line.borrow_mut();
         let mut data = node.data.clone();
         if current_x <= data.len() {
-            data.insert_str(current_x, insertion.as_ref());
+            data.insert_str(current_x, &insertion);
         } else {
-            data.push_str(insertion.as_ref());
+            data.push_str(&insertion);
         }
         node.data = data;
     }
 
     let insertion_len = insertion.len();
-    let insertion_chars = insertion.chars().count();
+    let insertion_chars = mbstrlen(&insertion);
     let new_x = current_x + insertion_len;
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
@@ -1917,17 +2097,24 @@ pub fn inject(buf: &str, buf_len: usize) {
     // Handle magic last line.
     let (is_filebot, no_newlines) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
-        let is_bot = f.filebot.as_ref().map(|b| b.as_ptr()) == f.current.as_ref().map(|c| c.as_ptr());
-        (is_bot, s.flags[flag_index(NO_NEWLINES)] & flag_mask(NO_NEWLINES) != 0)
+        let is_bot =
+            f.filebot.as_ref().map(|b| b.as_ptr()) == f.current.as_ref().map(|c| c.as_ptr());
+        (
+            is_bot,
+            s.flags[flag_index(NO_NEWLINES)] & flag_mask(NO_NEWLINES) != 0,
+        )
     });
 
     if is_filebot && !no_newlines {
         new_magicline();
         #[cfg(not(feature = "tiny"))]
         {
-            let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo)).unwrap_or(std::ptr::null_mut());
+            let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo))
+                .unwrap_or(std::ptr::null_mut());
             if !ptr.is_null() {
-                unsafe { (*ptr).xflags |= INCLUDED_LAST_LINE; }
+                unsafe {
+                    (*ptr).xflags |= INCLUDED_LAST_LINE;
+                }
             }
         }
     }
@@ -1966,7 +2153,8 @@ pub fn inject(buf: &str, buf_len: usize) {
 pub fn discard_until(thisitem: *const UndoStruct) {
     loop {
         let undotop_ptr = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.undotop.as_deref())
                 .map(|b| b as *const UndoStruct)
                 .unwrap_or(std::ptr::null())
@@ -1977,9 +2165,7 @@ pub fn discard_until(thisitem: *const UndoStruct) {
         }
 
         // Pop the top item.
-        let dropit = with_state_mut(|s| {
-            s.openfile.as_mut().and_then(|f| f.undotop.take())
-        });
+        let dropit = with_state_mut(|s| s.openfile.as_mut().and_then(|f| f.undotop.take()));
 
         if let Some(mut dropit) = dropit {
             // Re-attach the rest of the chain.
@@ -1989,7 +2175,7 @@ pub fn discard_until(thisitem: *const UndoStruct) {
                     f.undotop = next_chain;
                 }
             });
-            // dropit is now dropped (freed), along with its strdata, cutbuffer, grouping.
+            // dropit is now dropped with its payload, cutbuffer, and grouping.
         }
     }
 
@@ -1998,12 +2184,16 @@ pub fn discard_until(thisitem: *const UndoStruct) {
     // never itself be cast into the mutable undo cursor.
     with_state_mut(|s| {
         if let Some(ref mut f) = s.openfile {
-            let mut retained = f.undotop.as_deref_mut()
+            let mut retained = f
+                .undotop
+                .as_deref_mut()
                 .map(|record| record as *mut UndoStruct)
                 .unwrap_or(std::ptr::null_mut());
             unsafe {
                 while !retained.is_null() && !std::ptr::eq(retained.cast_const(), thisitem) {
-                    retained = (*retained).next.as_deref_mut()
+                    retained = (*retained)
+                        .next
+                        .as_deref_mut()
                         .map(|record| record as *mut UndoStruct)
                         .unwrap_or(std::ptr::null_mut());
                 }
@@ -2035,7 +2225,8 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
 
     let mut u = Box::new(UndoStruct {
         r#type: action,
-        strdata: None,
+        payload: None,
+        description: None,
         cutbuffer: None,
         head_lineno: lineno,
         head_x: current_x,
@@ -2079,7 +2270,9 @@ pub fn add_undo(action: UndoType, message: Option<&str>) {
         if let Some(ref mut f) = s.openfile {
             u.next = f.undotop.take();
             f.undotop = Some(u);
-            f.current_undo = f.undotop.as_deref_mut()
+            f.current_undo = f
+                .undotop
+                .as_deref_mut()
                 .map(|record| record as *mut UndoStruct)
                 .unwrap_or(std::ptr::null_mut());
         }
@@ -2096,12 +2289,18 @@ pub fn add_undo(_action: UndoType, _message: Option<&str>) {}
 #[cfg(not(feature = "tiny"))]
 fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, message: Option<&str>) {
     unsafe {
-        let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo)).unwrap_or(std::ptr::null_mut());
-        if ptr.is_null() { return; }
+        let ptr = with_state(|s| s.openfile.as_ref().map(|f| f.current_undo))
+            .unwrap_or(std::ptr::null_mut());
+        if ptr.is_null() {
+            return;
+        }
         let u = &mut *ptr;
 
         let filebot_ptr = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.filebot.as_ref()).map(|b| b.as_ptr())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.as_ref())
+                .map(|b| b.as_ptr())
         });
         let is_filebot = Some(thisline.as_ptr()) == filebot_ptr;
 
@@ -2113,7 +2312,10 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
             }
             UndoType::Enter => {}
             UndoType::Back => {
-                let next_is_filebot = thisline.borrow().next.as_ref()
+                let next_is_filebot = thisline
+                    .borrow()
+                    .next
+                    .as_ref()
                     .map(|nx| Some(nx.as_ptr()) == filebot_ptr)
                     .unwrap_or(false);
                 let has_data = !thisline.borrow().data.is_empty();
@@ -2124,17 +2326,25 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
                 let data = thisline.borrow().data.clone();
                 if current_x < data.len() {
                     let charlen = char_length(&data[current_x..]);
-                    u.strdata = Some(data[current_x..current_x + charlen].to_string());
+                    u.payload = Some(LineData::from_internal(
+                        data[current_x..current_x + charlen].to_vec(),
+                    ));
                     if action == UndoType::Back {
                         u.tail_x += charlen;
                     }
                 } else {
                     // Join action
-                    let next_data = thisline.borrow().next.as_ref()
+                    let next_data = thisline
+                        .borrow()
+                        .next
+                        .as_ref()
                         .map(|nx| nx.borrow().data.clone());
-                    u.strdata = next_data;
+                    u.payload = next_data;
                     if action == UndoType::Back {
-                        u.head_lineno = thisline.borrow().next.as_ref()
+                        u.head_lineno = thisline
+                            .borrow()
+                            .next
+                            .as_ref()
                             .map(|nx| nx.borrow().lineno)
                             .unwrap_or(u.head_lineno);
                         u.head_x = 0;
@@ -2146,16 +2356,21 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
                 let data = thisline.borrow().data.clone();
                 if current_x < data.len() {
                     let charlen = char_length(&data[current_x..]);
-                    u.strdata = Some(data[current_x..current_x + charlen].to_string());
+                    u.payload = Some(LineData::from_internal(
+                        data[current_x..current_x + charlen].to_vec(),
+                    ));
                 } else {
-                    let next_data = thisline.borrow().next.as_ref()
+                    let next_data = thisline
+                        .borrow()
+                        .next
+                        .as_ref()
                         .map(|nx| nx.borrow().data.clone());
-                    u.strdata = next_data;
+                    u.payload = next_data;
                     u.r#type = UndoType::Join;
                 }
             }
             UndoType::Replace => {
-                u.strdata = Some(thisline.borrow().data.clone());
+                u.payload = Some(thisline.borrow().data.clone());
             }
             #[cfg(feature = "wrapping")]
             UndoType::SplitBegin | UndoType::SplitEnd => {}
@@ -2171,7 +2386,11 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
             UndoType::Zap | UndoType::Cut => {
                 let (mark, mark_x, cut_from_cursor) = with_state(|s| {
                     let f = s.openfile.as_ref().expect("an open buffer");
-                    (f.mark.clone(), f.mark_x, s.flags[flag_index(CUT_FROM_CURSOR)] & flag_mask(CUT_FROM_CURSOR) != 0)
+                    (
+                        f.mark.clone(),
+                        f.mark_x,
+                        s.flags[flag_index(CUT_FROM_CURSOR)] & flag_mask(CUT_FROM_CURSOR) != 0,
+                    )
                 });
 
                 if let Some(ref m) = mark {
@@ -2190,8 +2409,11 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
                     }
 
                     let filebot_lineno = with_state(|s| {
-                        s.openfile.as_ref().and_then(|f| f.filebot.as_ref())
-                            .map(|b| b.borrow().lineno).unwrap_or(0)
+                        s.openfile
+                            .as_ref()
+                            .and_then(|f| f.filebot.as_ref())
+                            .map(|b| b.borrow().lineno)
+                            .unwrap_or(0)
                     });
                     if u.tail_lineno == filebot_lineno {
                         u.xflags |= INCLUDED_LAST_LINE;
@@ -2212,7 +2434,8 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
                         }
                     }
                     f.current.as_ref().map(|c| c.borrow().has_anchor)
-                }).unwrap_or(false);
+                })
+                .unwrap_or(false);
                 if had_anchor {
                     u.xflags |= HAD_ANCHOR_AT_START;
                 }
@@ -2233,15 +2456,16 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
                 }
             }
             UndoType::CoupleBegin => {
-                let cursor_row = with_state(|s| s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0));
+                let cursor_row =
+                    with_state(|s| s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0));
                 u.tail_lineno = cursor_row;
                 if let Some(msg) = message {
-                    u.strdata = Some(msg.to_string());
+                    u.description = Some(msg.to_string());
                 }
             }
             UndoType::CoupleEnd => {
                 if let Some(msg) = message {
-                    u.strdata = Some(msg.to_string());
+                    u.description = Some(msg.to_string());
                 }
             }
             UndoType::Indent | UndoType::Unindent => {}
@@ -2266,23 +2490,33 @@ fn fill_undo_fields(action: UndoType, thisline: &LinePtr, current_x: usize, mess
 /// Stub for SPLIT_BEGIN special case store.
 #[cfg(not(feature = "tiny"))]
 #[cfg(feature = "wrapping")]
-fn store_undo_record_fields(action: UndoType, thisline: &LinePtr, current_x: usize, message: Option<&str>) {
+fn store_undo_record_fields(
+    action: UndoType,
+    thisline: &LinePtr,
+    current_x: usize,
+    message: Option<&str>,
+) {
     fill_undo_fields(action, thisline, current_x, message);
 }
 
 /* C: void update_multiline_undo(ssize_t lineno, char *indentation) */
 #[cfg(not(feature = "tiny"))]
-pub fn update_multiline_undo(lineno: isize, indentation: &str) {
+pub fn update_multiline_undo<T: AsRef<[u8]> + ?Sized>(lineno: isize, indentation: &T) {
+    let indentation = indentation.as_ref();
     with_state_mut(|s| {
         let f = s.openfile.as_mut().expect("an open buffer");
         let u_ptr = f.current_undo;
-        if u_ptr.is_null() { return; }
+        if u_ptr.is_null() {
+            return;
+        }
         let u = unsafe { &mut *u_ptr };
 
         if let Some(ref mut group) = u.grouping {
             if group.bottom_line + 1 == lineno {
                 group.bottom_line = lineno;
-                group.indentations.push(indentation.to_string());
+                group
+                    .indentations
+                    .push(LineData::from_internal(indentation.to_vec()));
                 u.newsize = f.totsize;
                 return;
             }
@@ -2292,7 +2526,7 @@ pub fn update_multiline_undo(lineno: isize, indentation: &str) {
         let born = Box::new(GroupStruct {
             top_line: lineno,
             bottom_line: lineno,
-            indentations: vec![indentation.to_string()],
+            indentations: vec![LineData::from_internal(indentation.to_vec())],
             next: u.grouping.take(),
         });
         u.grouping = Some(born);
@@ -2301,23 +2535,30 @@ pub fn update_multiline_undo(lineno: isize, indentation: &str) {
 }
 
 #[cfg(feature = "tiny")]
-pub fn update_multiline_undo(_lineno: isize, _indentation: &str) {}
+pub fn update_multiline_undo<T: AsRef<[u8]> + ?Sized>(_lineno: isize, _indentation: &T) {}
 
 /* C: void update_undo(undo_type action) */
 #[cfg(not(feature = "tiny"))]
 pub fn update_undo(action: UndoType) {
     let (current_line, current_x, totsize) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
-        (f.current.clone().expect("a current line"), f.current_x, f.totsize)
+        (
+            f.current.clone().expect("a current line"),
+            f.current_x,
+            f.totsize,
+        )
     });
 
     unsafe {
         let ptr = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .map(|f| f.current_undo)
                 .unwrap_or(std::ptr::null_mut())
         });
-        if ptr.is_null() { return; }
+        if ptr.is_null() {
+            return;
+        }
         let u = &mut *ptr;
 
         // Verify type match.
@@ -2332,51 +2573,55 @@ pub fn update_undo(action: UndoType) {
 
         match u.r#type {
             UndoType::Add => {
-                let newlen = if current_x >= u.head_x { current_x - u.head_x } else { 0 };
+                let newlen = if current_x >= u.head_x {
+                    current_x - u.head_x
+                } else {
+                    0
+                };
                 if u.head_x <= data.len() {
-                    // Clip byte offsets to valid UTF-8 char boundaries (C nano uses raw bytes;
-                    // Rust requires char-boundary slices).
-                    let start = safe_char_boundary(&data, u.head_x);
+                    let start = safe_edit_boundary(&data, u.head_x);
                     let raw_end = u.head_x + newlen.min(data.len() - u.head_x);
-                    let end = safe_char_boundary_end(&data, raw_end);
-                    u.strdata = Some(data[start..end].to_string());
+                    let end = safe_edit_boundary_end(&data, raw_end);
+                    u.payload = Some(LineData::from_internal(data[start..end].to_vec()));
                 }
                 u.tail_x = current_x;
             }
             UndoType::Enter => {
-                u.strdata = Some(data.clone());
+                u.payload = Some(data.clone());
                 u.tail_x = current_x;
             }
             UndoType::Back | UndoType::Del => {
-                let cur_safe = safe_char_boundary(&data, current_x);
+                let cur_safe = safe_edit_boundary(&data, current_x);
                 let text_at_pos = &data[cur_safe..];
                 let charlen = char_length(text_at_pos);
-                let _datalen = u.strdata.as_deref().map(|s| s.len()).unwrap_or(0);
+                let _datalen = u.payload.as_deref().map(|s| s.len()).unwrap_or(0);
 
                 if current_x == u.head_x {
                     // Deleted more forward.
                     let addition = if charlen > 0 {
-                        let s = safe_char_boundary(&data, current_x);
-                        let e = safe_char_boundary_end(&data, current_x + charlen);
-                        data[s..e].to_string()
+                        let s = safe_edit_boundary(&data, current_x);
+                        let e = safe_edit_boundary_end(&data, current_x + charlen);
+                        LineData::from_internal(data[s..e].to_vec())
                     } else {
-                        String::new()
+                        LineData::empty()
                     };
-                    if let Some(ref mut sd) = u.strdata {
+                    if let Some(ref mut sd) = u.payload {
                         sd.push_str(&addition);
                     } else {
-                        u.strdata = Some(addition);
+                        u.payload = Some(addition);
                     }
                     u.tail_x = current_x;
                 } else if current_x + charlen == u.head_x {
                     // Backspaced further.
                     let addition = if charlen > 0 && current_x + charlen <= data.len() {
-                        data[current_x..current_x + charlen].to_string()
+                        LineData::from_internal(data[current_x..current_x + charlen].to_vec())
                     } else {
-                        String::new()
+                        LineData::empty()
                     };
-                    let existing = u.strdata.take().unwrap_or_default();
-                    u.strdata = Some(format!("{}{}", addition, existing));
+                    let existing = u.payload.take().unwrap_or_default();
+                    let mut combined = addition;
+                    combined.push_str(&existing);
+                    u.payload = Some(combined);
                     u.head_x = current_x;
                 } else {
                     // Deleted elsewhere — start new undo.
@@ -2414,21 +2659,33 @@ pub fn update_undo(action: UndoType) {
 
                     let cut_from_cursor = ISSET!(CUT_FROM_CURSOR);
                     if cut_from_cursor || u.r#type == UndoType::CutToEof {
-                        let ll_len = last_line.as_ref().map(|l| l.borrow().data.len()).unwrap_or(0);
+                        let ll_len = last_line
+                            .as_ref()
+                            .map(|l| l.borrow().data.len())
+                            .unwrap_or(0);
                         u.tail_x = ll_len;
                         if count == 0 {
                             u.tail_x += u.head_x;
                         }
                     } else {
                         let at_filebot = with_state(|s| {
-                            s.openfile.as_ref()
-                                .and_then(|f| f.current.as_ref().map(|c| {
-                                    f.filebot.as_ref().map(|b| b.as_ptr() == c.as_ptr()).unwrap_or(false)
-                                }))
+                            s.openfile
+                                .as_ref()
+                                .and_then(|f| {
+                                    f.current.as_ref().map(|c| {
+                                        f.filebot
+                                            .as_ref()
+                                            .map(|b| b.as_ptr() == c.as_ptr())
+                                            .unwrap_or(false)
+                                    })
+                                })
                                 .unwrap_or(false)
                         });
                         if at_filebot && ISSET!(NO_NEWLINES) {
-                            u.tail_x = last_line.as_ref().map(|l| l.borrow().data.len()).unwrap_or(0);
+                            u.tail_x = last_line
+                                .as_ref()
+                                .map(|l| l.borrow().data.len())
+                                .unwrap_or(0);
                         }
                     }
                 }
@@ -2481,7 +2738,11 @@ pub fn do_wrap() {
 
     let wrap_at = state().wrap_at;
     let lead_width = wideness(&line_data, lead_len);
-    let wrap_loc_rel = break_line(&line_data[lead_len..], (wrap_at as isize) - (lead_width as isize), false);
+    let wrap_loc_rel = break_line(
+        &line_data[lead_len..],
+        (wrap_at as isize) - (lead_width as isize),
+        false,
+    );
 
     if wrap_loc_rel < 0 || lead_len + (wrap_loc_rel as usize) == line_len {
         return;
@@ -2508,19 +2769,24 @@ pub fn do_wrap() {
         UNSET!(AUTOINDENT);
     }
 
-    let remainder = line_data[wrap_loc..].to_string();
+    let remainder = LineData::from_internal(line_data[wrap_loc..].to_vec());
     let rest_length = remainder.len();
 
     // If there's a spillage line we can prepend to, try joining first.
     let spillage_opt = with_state(|s| {
         #[cfg(feature = "wrapping")]
-        { s.openfile.as_ref().and_then(|f| f.spillage_line.clone()) }
+        {
+            s.openfile.as_ref().and_then(|f| f.spillage_line.clone())
+        }
         #[cfg(not(feature = "wrapping"))]
-        { None::<LinePtr> }
+        {
+            None::<LinePtr>
+        }
     });
 
     let next_line = line.borrow().next.clone();
-    let is_spillage_next = spillage_opt.as_ref()
+    let is_spillage_next = spillage_opt
+        .as_ref()
         .and_then(|sp| next_line.as_ref().map(|nx| sp.as_ptr() == nx.as_ptr()))
         .unwrap_or(false);
 
@@ -2560,7 +2826,8 @@ pub fn do_wrap() {
                 #[cfg(feature = "justify")]
                 {
                     let lead_matches = {
-                        let cur_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+                        let cur_x =
+                            with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
                         let d = line.borrow().data.clone();
                         d.starts_with(&line_data[..lead_len])
                             && d[cur_x..].starts_with(&line_data[..lead_len])
@@ -2574,7 +2841,8 @@ pub fn do_wrap() {
 
                 // Remove any extra blanks.
                 loop {
-                    let cur_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+                    let cur_x =
+                        with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
                     let d = line.borrow().data.clone();
                     if cur_x < d.len() && is_blank_char(&d[cur_x..]) {
                         expunge(UndoType::Del);
@@ -2603,7 +2871,9 @@ pub fn do_wrap() {
         loop {
             let _cur_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
             let d = line.borrow().data.clone();
-            if rr == 0 { break; }
+            if rr == 0 {
+                break;
+            }
             if (rr != typed_x || current_x_val >= wrap_loc) && is_blank_char(&d[rr..]) {
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
@@ -2650,11 +2920,18 @@ pub fn do_wrap() {
             if let Some(ref nl) = new_line {
                 let nl_data = nl.borrow().data.clone();
                 let _nl_len = nl_data.len();
-                let prev_data = nl.borrow().prev.as_ref()
+                let prev_data = nl
+                    .borrow()
+                    .prev
+                    .as_ref()
                     .and_then(|w| w.upgrade())
-                    .map(|p| p.borrow().data[..lead_len.min(p.borrow().data.len())].to_string())
+                    .map(|p| {
+                        let data = p.borrow().data.clone();
+                        LineData::from_internal(data[..lead_len.min(data.len())].to_vec())
+                    })
                     .unwrap_or_default();
-                let new_data = format!("{}{}", prev_data, nl_data);
+                let mut new_data = prev_data;
+                new_data.push_str(&nl_data);
                 nl.borrow_mut().data = new_data;
 
                 with_state_mut(|s| {
@@ -2667,12 +2944,15 @@ pub fn do_wrap() {
                 {
                     // Update the ENTER undo record.
                     let ptr = with_state(|s| {
-                        s.openfile.as_ref()
+                        s.openfile
+                            .as_ref()
                             .map(|f| f.current_undo)
                             .unwrap_or(std::ptr::null_mut())
                     });
                     if !ptr.is_null() {
-                        unsafe { (*ptr).strdata = None; }
+                        unsafe {
+                            (*ptr).payload = None;
+                        }
                     }
                     update_undo(UndoType::Enter);
                 }
@@ -2694,7 +2974,9 @@ pub fn do_wrap() {
 
     if current_x_val < wrap_loc {
         let prev_line = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.current.as_ref())
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.current.as_ref())
                 .and_then(|c| c.borrow().prev.as_ref().and_then(|w| w.upgrade()))
         });
         with_state_mut(|s| {
@@ -2731,21 +3013,21 @@ pub fn do_wrap() {
 
 /* C: ssize_t break_line(const char *textstart, ssize_t goal, bool snap_at_nl) */
 #[cfg(any(feature = "help", feature = "wrapping", feature = "justify"))]
-pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
+pub fn break_line<T: AsRef<[u8]> + ?Sized>(textstart: &T, goal: isize, snap_at_nl: bool) -> isize {
     let inhelp = state().inhelp;
     let mut lastblank: Option<usize> = None;
     let mut pos = 0usize;
     let mut column: usize = 0;
-    let bytes = textstart.as_bytes();
+    let bytes = textstart.as_ref();
 
     // Skip over leading whitespace.
-    while pos < bytes.len() && is_blank_char(&textstart[pos..]) {
-        pos += advance_over(&textstart[pos..], &mut column);
+    while pos < bytes.len() && is_blank_char(&bytes[pos..]) {
+        pos += advance_over(&bytes[pos..], &mut column);
     }
 
     // Find the last blank that does not overshoot the goal.
     while pos < bytes.len() && (column as isize) <= goal {
-        let ch = &textstart[pos..];
+        let ch = &bytes[pos..];
         if is_blank_char(ch) {
             if !inhelp || column > 17 || goal < 40 {
                 lastblank = Some(pos);
@@ -2758,7 +3040,7 @@ pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
                 break;
             }
         }
-        pos += advance_over(&textstart[pos..], &mut column);
+        pos += advance_over(&bytes[pos..], &mut column);
     }
 
     // If the whole text fits within the goal.
@@ -2769,18 +3051,18 @@ pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
     #[cfg(feature = "help")]
     {
         if snap_at_nl && lastblank.is_none() {
-            return step_left(textstart, pos) as isize;
+            return step_left(bytes, pos) as isize;
         }
     }
 
     // If no blank was found within the goal, seek one after it.
     if lastblank.is_none() {
         while pos < bytes.len() {
-            if is_blank_char(&textstart[pos..]) {
+            if is_blank_char(&bytes[pos..]) {
                 lastblank = Some(pos);
                 break;
             }
-            pos += char_length(&textstart[pos..]);
+            pos += char_length(&bytes[pos..]);
         }
         if lastblank.is_none() {
             return -1;
@@ -2788,13 +3070,13 @@ pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
     }
 
     let mut lb = lastblank.unwrap();
-    let lb_charlen = char_length(&textstart[lb..]);
+    let lb_charlen = char_length(&bytes[lb..]);
     let mut after_lb = lb + lb_charlen;
 
     // Skip consecutive blanks after the last blank.
-    while after_lb < bytes.len() && is_blank_char(&textstart[after_lb..]) {
+    while after_lb < bytes.len() && is_blank_char(&bytes[after_lb..]) {
         lb = after_lb;
-        after_lb += char_length(&textstart[after_lb..]);
+        after_lb += char_length(&bytes[after_lb..]);
     }
 
     lb as isize
@@ -2806,11 +3088,11 @@ pub fn break_line(textstart: &str, goal: isize, snap_at_nl: bool) -> isize {
 
 /* C: size_t indent_length(const char *line) */
 #[cfg(any(not(feature = "tiny"), feature = "wrapping", feature = "justify"))]
-pub fn indent_length(line: &str) -> usize {
+pub fn indent_length<T: AsRef<[u8]> + ?Sized>(line: &T) -> usize {
     let mut pos = 0usize;
-    let bytes = line.as_bytes();
-    while pos < bytes.len() && is_blank_char(&line[pos..]) {
-        pos += char_length(&line[pos..]);
+    let bytes = line.as_ref();
+    while pos < bytes.len() && is_blank_char(&bytes[pos..]) {
+        pos += char_length(&bytes[pos..]);
     }
     pos
 }
@@ -2821,11 +3103,14 @@ pub fn indent_length(line: &str) -> usize {
 
 /* C: size_t quote_length(const char *line) */
 #[cfg(feature = "justify")]
-pub fn quote_length(line: &str) -> usize {
+pub fn quote_length<T: AsRef<[u8]> + ?Sized>(line: &T) -> usize {
+    let bytes = line.as_ref();
     with_state(|s| {
         if let Some(ref re) = s.quotereg {
-            if let Some(m) = re.find(line) {
-                if m.start() == 0 { return m.end(); }
+            if let Some(m) = re.find(bytes) {
+                if m.start() == 0 {
+                    return m.end();
+                }
             }
         }
         0usize
@@ -2856,7 +3141,10 @@ pub fn begpar_fn(line: &LinePtr, depth: i32) -> bool {
     }
 
     // If quote part of preceding line differs.
-    let prev_data = line.borrow().prev.as_ref()
+    let prev_data = line
+        .borrow()
+        .prev
+        .as_ref()
         .and_then(|w| w.upgrade())
         .map(|p| p.borrow().data.clone())
         .unwrap_or_default();
@@ -2942,7 +3230,7 @@ pub fn concat_paragraph(line: &LinePtr, count: usize) {
 
             {
                 let mut node = cur.borrow_mut();
-                if !node.data.is_empty() && !node.data.ends_with(' ') {
+                if !node.data.is_empty() && !node.data.ends_with(b" ") {
                     node.data.push(' ');
                 }
                 node.data.push_str(stripped);
@@ -2971,8 +3259,7 @@ pub fn squeeze(line: &LinePtr, skip: usize) {
     let brackets = state().brackets.clone().unwrap_or_default();
 
     let start_bytes = &data[skip..];
-    let mut result = String::with_capacity(data.len());
-    result.push_str(&data[..skip]);
+    let mut result = LineData::from_internal(data[..skip].to_vec());
 
     let mut from = start_bytes;
 
@@ -3021,8 +3308,8 @@ pub fn squeeze(line: &LinePtr, skip: usize) {
     }
 
     // Remove trailing spaces.
-    while result.len() > skip && result.ends_with(' ') {
-        result.pop();
+    while result.len() > skip && result.ends_with(b" ") {
+        result.truncate(result.len() - 1);
     }
 
     line.borrow_mut().data = result;
@@ -3030,7 +3317,7 @@ pub fn squeeze(line: &LinePtr, skip: usize) {
 
 /* C: void rewrap_paragraph(linestruct **line, char *lead_string, size_t lead_len) */
 #[cfg(feature = "justify")]
-pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &str, lead_len: usize) {
+pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &LineData, lead_len: usize) {
     let wrap_at = state().wrap_at;
 
     loop {
@@ -3040,7 +3327,11 @@ pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &str, lead_len: usize) 
         }
         let line_len = line_data.len();
         let lead_width = wideness(&line_data, lead_len);
-        let break_pos = break_line(&line_data[lead_len..], (wrap_at as isize) - (lead_width as isize), false);
+        let break_pos = break_line(
+            &line_data[lead_len..],
+            (wrap_at as isize) - (lead_width as isize),
+            false,
+        );
 
         if break_pos < 0 || lead_len + (break_pos as usize) == line_len {
             break;
@@ -3049,7 +3340,8 @@ pub fn rewrap_paragraph(line: &mut LinePtr, lead_string: &str, lead_len: usize) 
         let break_pos_abs = lead_len + break_pos as usize + 1; // +1 to skip blank
 
         // Create new line after current.
-        let new_data = format!("{}{}", lead_string, &line_data[break_pos_abs..]);
+        let mut new_data = lead_string.clone();
+        new_data.push_str(&line_data[break_pos_abs..]);
         let new_node = make_new_node(Some(line.clone()));
         new_node.borrow_mut().data = new_data;
 
@@ -3126,20 +3418,31 @@ pub fn justify_text(whole_buffer: bool) {
 
     #[cfg(not(feature = "tiny"))]
     let was_the_linenumber = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref())
-            .map(|c| c.borrow().lineno).unwrap_or(0)
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.as_ref())
+            .map(|c| c.borrow().lineno)
+            .unwrap_or(0)
     });
 
     #[cfg(not(feature = "tiny"))]
     let marked_backward = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.mark.is_some() && !mark_is_before_cursor()).unwrap_or(false)
+        s.openfile
+            .as_ref()
+            .map(|f| f.mark.is_some() && !mark_is_before_cursor())
+            .unwrap_or(false)
     });
 
     #[cfg(not(feature = "tiny"))]
     add_undo(UndoType::CoupleBegin, Some("justification"));
 
     #[cfg(not(feature = "tiny"))]
-    let has_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+    let has_mark = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .map(|f| f.mark.is_some())
+            .unwrap_or(false)
+    });
     #[cfg(feature = "tiny")]
     let has_mark = false;
 
@@ -3154,8 +3457,10 @@ pub fn justify_text(whole_buffer: bool) {
                     get_line_from_number(s_lineno as isize),
                     get_line_from_number(e_lineno as isize),
                 ) else {
-                    statusline(MessageType::Alert,
-                        "Internal error: region refers to a nonexistent line");
+                    statusline(
+                        MessageType::Alert,
+                        "Internal error: region refers to a nonexistent line",
+                    );
                     return;
                 };
 
@@ -3164,14 +3469,18 @@ pub fn justify_text(whole_buffer: bool) {
 
                 let quot_len = quote_length(&sl_data);
                 let fore_len = quot_len + indent_length(&sl_data[quot_len..]);
-                if sx_v <= fore_len { sx_v = 0; }
+                if sx_v <= fore_len {
+                    sx_v = 0;
+                }
                 while sx_v > 0 && is_blank_char(&sl_data[sx_v - 1..]) {
                     sx_v = step_left(&sl_data, sx_v);
                 }
 
                 let eq_len = quote_length(&el_data);
                 let ef_len = eq_len + indent_length(&el_data[eq_len..]);
-                if 0 < ex_v && ex_v < ef_len { ex_v = ef_len; }
+                if 0 < ex_v && ex_v < ef_len {
+                    ex_v = ef_len;
+                }
                 while ex_v > 0 && is_blank_char(&el_data[ex_v..]) {
                     ex_v = step_right(&el_data, ex_v);
                 }
@@ -3182,7 +3491,8 @@ pub fn justify_text(whole_buffer: bool) {
             if sl.as_ptr() == el.as_ptr() && sx == ex {
                 statusline(MessageType::Ahem, tr!("Selection is empty"));
                 let undotop_next_ptr = with_state(|s| {
-                    s.openfile.as_ref()
+                    s.openfile
+                        .as_ref()
                         .and_then(|f| f.undotop.as_deref())
                         .and_then(|u| u.next.as_deref())
                         .map(|b| b as *const UndoStruct)
@@ -3194,13 +3504,24 @@ pub fn justify_text(whole_buffer: bool) {
 
             // Find the sample line for leading-part determination.
             let mut sampleline = sl.clone();
-            while sampleline.borrow().prev.is_some() && inpar_fn(&sampleline) && !begpar_fn(&sampleline, 0) {
+            while sampleline.borrow().prev.is_some()
+                && inpar_fn(&sampleline)
+                && !begpar_fn(&sampleline, 0)
+            {
                 let prev = sampleline.borrow().prev.as_ref().and_then(|w| w.upgrade());
-                if let Some(p) = prev { sampleline = p; } else { break; }
+                if let Some(p) = prev {
+                    sampleline = p;
+                } else {
+                    break;
+                }
             }
             while sampleline.borrow().next.is_some() && !inpar_fn(&sampleline) {
                 let next = sampleline.borrow().next.clone();
-                if let Some(nx) = next { sampleline = nx; } else { break; }
+                if let Some(nx) = next {
+                    sampleline = nx;
+                } else {
+                    break;
+                }
             }
 
             let sample_data = sampleline.borrow().data.clone();
@@ -3210,22 +3531,31 @@ pub fn justify_text(whole_buffer: bool) {
 
             // Secondary lead: quote from first line + indent from second.
             let (secondary_lead, secondary_len) = {
-                let next_sample = if sampleline.borrow().next.is_some() && sl.as_ptr() != el.as_ptr() {
-                    sampleline.borrow().next.clone().unwrap()
-                } else {
-                    sampleline.clone()
-                };
+                let next_sample =
+                    if sampleline.borrow().next.is_some() && sl.as_ptr() != el.as_ptr() {
+                        sampleline.borrow().next.clone().unwrap()
+                    } else {
+                        sampleline.clone()
+                    };
                 let ns_data = next_sample.borrow().data.clone();
                 let ns_quot_len = quote_length(&ns_data);
                 let ns_white_len = indent_length(&ns_data[ns_quot_len..]);
                 let sec_len = s_quot_len + ns_white_len;
                 let sec_lead = {
                     let sl_data_ref = sl.borrow().data.clone();
-                    let part1 = if s_quot_len <= sl_data_ref.len() { &sl_data_ref[..s_quot_len] } else { &sl_data_ref[..] };
+                    let part1 = if s_quot_len <= sl_data_ref.len() {
+                        &sl_data_ref[..s_quot_len]
+                    } else {
+                        &sl_data_ref[..]
+                    };
                     let part2 = if ns_quot_len + ns_white_len <= ns_data.len() {
                         &ns_data[ns_quot_len..ns_quot_len + ns_white_len]
-                    } else { "" };
-                    format!("{}{}", part1, part2)
+                    } else {
+                        &[]
+                    };
+                    let mut combined = LineData::from_internal(part1.to_vec());
+                    combined.push_str(part2);
+                    combined
                 };
                 (sec_lead, sec_len)
             };
@@ -3259,8 +3589,8 @@ pub fn justify_text(whole_buffer: bool) {
                 let cb_data = cb_line.borrow().data.clone();
                 let cb_quot = quote_length(&cb_data);
                 let cb_fore = cb_quot + indent_length(&cb_data[cb_quot..]);
-                let text_part = cb_data[cb_fore..].to_string();
-                let new_data = format!("{}{}", primary_lead, text_part);
+                let mut new_data = primary_lead.clone();
+                new_data.push_str(&cb_data[cb_fore..]);
                 cb_line.borrow_mut().data = new_data;
 
                 // Justify the cut region.
@@ -3272,7 +3602,7 @@ pub fn justify_text(whole_buffer: bool) {
                 // If region started in middle of line, prepend an empty line.
                 if sx > 0 {
                     let empty = state_mut().lines.alloc(LineNode {
-                        data: String::new(),
+                        data: LineData::empty(),
                         lineno: 0,
                         next: None,
                         prev: None,
@@ -3309,7 +3639,9 @@ pub fn justify_text(whole_buffer: bool) {
                 let ft = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
                 if let Some(ref ft) = ft {
                     #[cfg(not(feature = "tiny"))]
-                    { ft.borrow_mut().has_anchor = false; }
+                    {
+                        ft.borrow_mut().has_anchor = false;
+                    }
                 }
             }
 
@@ -3324,9 +3656,16 @@ pub fn justify_text(whole_buffer: bool) {
 
             // After backward-marked justification, swap mark and cursor.
             if marked_backward {
-                let bottom = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
-                let bottom_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
-                let mark = with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.clone()).unwrap());
+                let bottom = with_state(|s| {
+                    s.openfile
+                        .as_ref()
+                        .and_then(|f| f.current.clone())
+                        .expect("a current line")
+                });
+                let bottom_x =
+                    with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+                let mark =
+                    with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.clone()).unwrap());
                 let mark_x = with_state(|s| s.openfile.as_ref().map(|f| f.mark_x).unwrap_or(0));
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
@@ -3362,7 +3701,10 @@ pub fn justify_text(whole_buffer: bool) {
         #[cfg(feature = "tiny")]
         {
             let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
-            startline = sl; start_x = sx; endline = el; end_x = ex;
+            startline = sl;
+            start_x = sx;
+            endline = el;
+            end_x = ex;
         }
     } else {
         let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
@@ -3373,7 +3715,14 @@ pub fn justify_text(whole_buffer: bool) {
     }
 
     // Non-marked path.
-    do_justify_buffer(whole_buffer, startline.clone(), start_x, endline.clone(), end_x, &mut linecount);
+    do_justify_buffer(
+        whole_buffer,
+        startline.clone(),
+        start_x,
+        endline.clone(),
+        end_x,
+        &mut linecount,
+    );
 
     #[cfg(not(feature = "tiny"))]
     add_undo(UndoType::CoupleEnd, Some("justification"));
@@ -3411,27 +3760,45 @@ pub fn justify_text(whole_buffer: bool) {
 /// C would dereference a stray pointer.
 fn get_region_as_lines() -> Option<(LinePtr, usize, LinePtr, usize)> {
     let (top_lineno, top_x, bot_lineno, bot_x) = get_region();
-    match (get_line_from_number(top_lineno as isize), get_line_from_number(bot_lineno as isize)) {
+    match (
+        get_line_from_number(top_lineno as isize),
+        get_line_from_number(bot_lineno as isize),
+    ) {
         (Some(tl), Some(bl)) => Some((tl, top_x, bl, bot_x)),
         _ => {
-            statusline(MessageType::Alert,
-                "Internal error: region refers to a nonexistent line");
+            statusline(
+                MessageType::Alert,
+                "Internal error: region refers to a nonexistent line",
+            );
             None
         }
     }
 }
 
 #[cfg(feature = "justify")]
-fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr, usize, LinePtr, usize) {
+fn prepare_justify_region(
+    whole_buffer: bool,
+    linecount: &mut usize,
+) -> (LinePtr, usize, LinePtr, usize) {
     if whole_buffer {
-        let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).expect("a top line"));
+        let filetop = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filetop.clone())
+                .expect("a top line")
+        });
         with_state_mut(|s| {
             if let Some(ref mut f) = s.openfile {
                 f.current = Some(filetop.clone());
             }
         });
     } else {
-        let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
+        let cur = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.current.clone())
+                .expect("a current line")
+        });
         if inpar_fn(&cur) && !begpar_fn(&cur, 0) {
             let first = do_para_begin(cur.clone());
             with_state_mut(|s| {
@@ -3442,13 +3809,21 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
         }
     }
 
-    let cur = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
+    let cur = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.clone())
+            .expect("a current line")
+    });
     let mut firstline = cur.clone();
 
     if !find_paragraph(&mut firstline, linecount) {
         let filebot_end = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.filebot.as_ref())
-                .map(|b| b.borrow().data.len()).unwrap_or(0)
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.as_ref())
+                .map(|b| b.borrow().data.len())
+                .unwrap_or(0)
         });
         with_state_mut(|s| {
             if let Some(ref mut f) = s.openfile {
@@ -3458,7 +3833,8 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
         #[cfg(not(feature = "tiny"))]
         {
             let undotop_next = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|f| f.undotop.as_deref())
                     .and_then(|u| u.next.as_deref())
                     .map(|b| b as *const UndoStruct)
@@ -3468,7 +3844,12 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
         }
         state_mut().refresh_needed = true;
         // Return dummy values; caller checks linecount.
-        let fl = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
+        let fl = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.clone())
+                .expect("a bottom line")
+        });
         return (fl.clone(), 0, fl, 0);
     }
 
@@ -3483,7 +3864,12 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
     let start_x = 0usize;
 
     let (endline, end_x) = if whole_buffer {
-        let fb = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
+        let fb = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.filebot.clone())
+                .expect("a bottom line")
+        });
         (fb, 0usize)
     } else {
         let mut el = startline.clone();
@@ -3504,7 +3890,6 @@ fn prepare_justify_region(whole_buffer: bool, linecount: &mut usize) -> (LinePtr
 
     (startline, start_x, endline, end_x)
 }
-
 
 #[cfg(feature = "justify")]
 fn do_justify_buffer(
@@ -3547,14 +3932,27 @@ fn do_justify_buffer(
         // Wipe inherited anchor on first paragraph.
         if whole_buffer {
             let has_anchor = with_state(|s| {
-                s.openfile.as_ref().and_then(|f| f.current.as_ref())
-                    .map(|c| { #[cfg(not(feature = "tiny"))] { c.borrow().has_anchor } #[cfg(feature = "tiny")] { false } })
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.current.as_ref())
+                    .map(|c| {
+                        #[cfg(not(feature = "tiny"))]
+                        {
+                            c.borrow().has_anchor
+                        }
+                        #[cfg(feature = "tiny")]
+                        {
+                            false
+                        }
+                    })
                     .unwrap_or(false)
             });
             if !has_anchor {
                 if let Some(cb) = get_cutbuffer() {
                     #[cfg(not(feature = "tiny"))]
-                    { cb.borrow_mut().has_anchor = false; }
+                    {
+                        cb.borrow_mut().has_anchor = false;
+                    }
                 }
             }
         }
@@ -3600,7 +3998,10 @@ pub fn construct_argument_list(command: &str, filename: &str) -> Vec<String> {
 }
 
 /* C: bool replace_buffer(const char *filename, undo_type action, const char *operation) */
-#[cfg(all(unix, any(not(feature = "tiny"), feature = "speller", feature = "formatter")))]
+#[cfg(all(
+    unix,
+    any(not(feature = "tiny"), feature = "speller", feature = "formatter")
+))]
 pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool {
     let replacement = match std::fs::read(filename) {
         Ok(bytes) => bytes,
@@ -3626,7 +4027,12 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
     #[cfg(not(feature = "tiny"))]
     add_undo(action, None);
 
-    let has_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+    let has_mark = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .map(|f| f.mark.is_some())
+            .unwrap_or(false)
+    });
     do_snip(has_mark, !has_mark, false);
 
     #[cfg(not(feature = "tiny"))]
@@ -3649,28 +4055,38 @@ pub fn replace_buffer(filename: &str, action: UndoType, operation: &str) -> bool
 }
 
 /* Windows stub for replace_buffer */
-#[cfg(all(not(unix), any(not(feature = "tiny"), feature = "speller", feature = "formatter")))]
+#[cfg(all(
+    not(unix),
+    any(not(feature = "tiny"), feature = "speller", feature = "formatter")
+))]
 pub fn replace_buffer(_filename: &str, _action: UndoType, _operation: &str) -> bool {
-    false  // Not supported on Windows
+    false // Not supported on Windows
 }
 
 /* C: void treat(char *tempfile_name, char *theprogram, bool spelling) */
 #[cfg(any(feature = "speller", feature = "formatter"))]
 pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
-    use std::process::Command;
     use std::fs;
+    use std::process::Command;
 
     if cfg!(not(unix)) {
         let tool = if spelling { "speller" } else { "formatter" };
         statusline(
             MessageType::Alert,
-            &format!("External {} execution is not supported on this platform", tool),
+            &format!(
+                "External {} execution is not supported on this platform",
+                tool
+            ),
         );
         return;
     }
 
     let was_lineno = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|c| c.borrow().lineno).unwrap_or(0)
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.as_ref())
+            .map(|c| c.borrow().lineno)
+            .unwrap_or(0)
     });
     let was_pww = with_state(|s| s.openfile.as_ref().map(|f| f.placewewant).unwrap_or(0));
     let mut was_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
@@ -3680,14 +4096,20 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
         let data = cur.borrow().data.clone();
         let cx = of.current_x;
         Some(cx >= data.len())
-    }).unwrap_or(false);
+    })
+    .unwrap_or(false);
 
     // Stat the temp file.
     let meta = fs::metadata(tempfile_name).ok();
     if let Some(ref m) = meta {
         if m.len() == 0 {
             #[cfg(not(feature = "tiny"))]
-            let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+            let in_mark = with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .map(|f| f.mark.is_some())
+                    .unwrap_or(false)
+            });
             #[cfg(not(feature = "tiny"))]
             if spelling && in_mark {
                 statusline(MessageType::Ahem, tr!("Selection is empty"));
@@ -3700,14 +4122,26 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
         }
     }
 
-    let timestamp_sec = meta.as_ref().map(|m| {
-        use std::time::UNIX_EPOCH;
-        m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs())
-    }).flatten();
-    let timestamp_nsec = meta.as_ref().map(|m| {
-        use std::time::UNIX_EPOCH;
-        m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.subsec_nanos())
-    }).flatten();
+    let timestamp_sec = meta
+        .as_ref()
+        .map(|m| {
+            use std::time::UNIX_EPOCH;
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+        })
+        .flatten();
+    let timestamp_nsec = meta
+        .as_ref()
+        .map(|m| {
+            use std::time::UNIX_EPOCH;
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.subsec_nanos())
+        })
+        .flatten();
 
     if spelling {
         // Leave terminal raw mode for interactive spell checker.
@@ -3720,9 +4154,7 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
 
     // Fork and exec.
     block_sigwinch(true);
-    let status = Command::new(&args[0])
-        .args(&args[1..])
-        .status();
+    let status = Command::new(&args[0]).args(&args[1..]).status();
     block_sigwinch(false);
 
     if spelling {
@@ -3752,10 +4184,16 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
             let exited_normally = s.code().is_some();
             let code = s.code().unwrap_or(-1);
             if !exited_normally || code > 2 {
-                statusline(MessageType::Alert, &format!(tr!("Error invoking '{}'"), args[0]));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Error invoking '{}'"), args[0]),
+                );
                 return;
             } else if code != 0 {
-                statusline(MessageType::Alert, &format!(tr!("Program '{}' complained"), args[0]));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Program '{}' complained"), args[0]),
+                );
             }
         }
     }
@@ -3764,11 +4202,15 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
     if let (Some(ts), Some(tn)) = (timestamp_sec, timestamp_nsec) {
         if let Ok(new_meta) = fs::metadata(tempfile_name) {
             use std::time::UNIX_EPOCH;
-            let new_sec = new_meta.modified().ok()
+            let new_sec = new_meta
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let new_nsec = new_meta.modified().ok()
+            let new_nsec = new_meta
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0);
@@ -3782,11 +4224,19 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
     let replaced;
     #[cfg(not(feature = "tiny"))]
     {
-        let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+        let in_mark = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.mark.is_some())
+                .unwrap_or(false)
+        });
         if spelling && in_mark {
             let was_mark_lineno = with_state(|s| {
-                s.openfile.as_ref().and_then(|f| f.mark.as_ref())
-                    .map(|m| m.borrow().lineno).unwrap_or(0)
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.mark.as_ref())
+                    .map(|m| m.borrow().lineno)
+                    .unwrap_or(0)
             });
             let upright = mark_is_before_cursor();
 
@@ -3810,21 +4260,36 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
                 }
             });
         } else {
-            let op = if spelling { "spelling correction" } else { "formatting" };
+            let op = if spelling {
+                "spelling correction"
+            } else {
+                "formatting"
+            };
             replaced = replace_buffer(tempfile_name, UndoType::CutToEof, op);
         }
     }
     #[cfg(feature = "tiny")]
     {
-        replaced = replace_buffer(tempfile_name, UndoType::CutToEof, if spelling { "spelling correction" } else { "formatting" });
+        replaced = replace_buffer(
+            tempfile_name,
+            UndoType::CutToEof,
+            if spelling {
+                "spelling correction"
+            } else {
+                "formatting"
+            },
+        );
     }
 
     let _cur_x_now = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     goto_line_posx(was_lineno, was_x);
 
     let cur_data_len = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref())
-            .map(|c| c.borrow().data.len()).unwrap_or(0)
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.as_ref())
+            .map(|c| c.borrow().data.len())
+            .unwrap_or(0)
     });
     if was_at_eol {
         with_state_mut(|s| {
@@ -3880,16 +4345,28 @@ pub fn treat(tempfile_name: &str, theprogram: &str, spelling: bool) {
 #[cfg(feature = "speller")]
 pub fn fix_spello(word: &str) -> bool {
     let was_edittop = with_state(|s| s.openfile.as_ref().and_then(|f| f.edittop.clone()));
-    let was_current = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()).expect("a current line"));
+    let was_current = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.clone())
+            .expect("a current line")
+    });
     let was_firstcolumn = with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0));
     let was_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
     let mut proceed = false;
 
     #[cfg(not(feature = "tiny"))]
     {
-        let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+        let in_mark = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.mark.is_some())
+                .unwrap_or(false)
+        });
         if in_mark {
-            let Some((top, top_x, bot, bot_x)) = get_region_as_lines_coords() else { return false };
+            let Some((top, top_x, bot, bot_x)) = get_region_as_lines_coords() else {
+                return false;
+            };
             let right_side_up = mark_is_before_cursor();
             if right_side_up {
                 with_state_mut(|s| {
@@ -3925,7 +4402,10 @@ pub fn fix_spello(word: &str) -> bool {
     let result = findnextstr(word, true, INREGION, None, false, None, 0);
 
     if result == 0 {
-        statusline(MessageType::Alert, &format!(tr!("Unfindable word: {}"), word));
+        statusline(
+            MessageType::Alert,
+            &format!(tr!("Unfindable word: {}"), word),
+        );
         state_mut().lastmessage = MessageType::Vacuum;
         proceed = true;
         napms(2800);
@@ -3980,15 +4460,27 @@ pub fn fix_spello(word: &str) -> bool {
     // Restore cursor position and viewport.
     #[cfg(not(feature = "tiny"))]
     {
-        let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+        let in_mark = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.mark.is_some())
+                .unwrap_or(false)
+        });
         if in_mark {
             // Restore mark and cursor.
             let right_side_up = mark_is_before_cursor();
-            let Some((top, top_x, _bot, _bot_x)) = get_region_as_lines_coords() else { return proceed };
+            let Some((top, top_x, _bot, _bot_x)) = get_region_as_lines_coords() else {
+                return proceed;
+            };
             if right_side_up {
                 with_state_mut(|s| {
                     if let Some(ref mut f) = s.openfile {
-                        f.current = Some(f.mark.as_ref().map(|m| m.clone()).unwrap_or(was_current.clone()));
+                        f.current = Some(
+                            f.mark
+                                .as_ref()
+                                .map(|m| m.clone())
+                                .unwrap_or(was_current.clone()),
+                        );
                         f.current_x = f.mark_x;
                         f.mark = Some(top.clone());
                         f.mark_x = top_x;
@@ -4055,9 +4547,15 @@ pub fn spell_check(tempfile_name: &str) {
     // Run: cat tempfile | hunspell -l | sort -f | uniq
     // (C reports tempfile/pipe failures via statusline ALERT and aborts.)
     let hunspell_output = match std::fs::File::open(tempfile_name) {
-        Ok(f) => Command::new("hunspell").arg("-l").stdin(Stdio::from(f)).output(),
+        Ok(f) => Command::new("hunspell")
+            .arg("-l")
+            .stdin(Stdio::from(f))
+            .output(),
         Err(e) => {
-            statusline(MessageType::Alert, &format!(tr!("Error invoking \"hunspell\": {}"), e));
+            statusline(
+                MessageType::Alert,
+                &format!(tr!("Error invoking \"hunspell\": {}"), e),
+            );
             return;
         }
     };
@@ -4070,14 +4568,20 @@ pub fn spell_check(tempfile_name: &str) {
             let infile = match std::fs::File::open(tempfile_name) {
                 Ok(f) => f,
                 Err(e) => {
-                    statusline(MessageType::Alert, &format!(tr!("Error invoking \"spell\": {}"), e));
+                    statusline(
+                        MessageType::Alert,
+                        &format!(tr!("Error invoking \"spell\": {}"), e),
+                    );
                     return;
                 }
             };
             match Command::new("spell").stdin(Stdio::from(infile)).output() {
                 Ok(o) => o.stdout,
                 Err(e) => {
-                    statusline(MessageType::Alert, &format!(tr!("Error invoking \"spell\": {}"), e));
+                    statusline(
+                        MessageType::Alert,
+                        &format!(tr!("Error invoking \"spell\": {}"), e),
+                    );
                     return;
                 }
             }
@@ -4095,7 +4599,10 @@ pub fn spell_check(tempfile_name: &str) {
         {
             Ok(p) => p,
             Err(e) => {
-                statusline(MessageType::Alert, &format!(tr!("Error invoking \"sort\": {}"), e));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Error invoking \"sort\": {}"), e),
+                );
                 return;
             }
         };
@@ -4105,7 +4612,10 @@ pub fn spell_check(tempfile_name: &str) {
         match sort_proc.wait_with_output() {
             Ok(o) => o.stdout,
             Err(e) => {
-                statusline(MessageType::Alert, &format!(tr!("Error reading from sort: {}"), e));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Error reading from sort: {}"), e),
+                );
                 return;
             }
         }
@@ -4121,7 +4631,10 @@ pub fn spell_check(tempfile_name: &str) {
         {
             Ok(p) => p,
             Err(e) => {
-                statusline(MessageType::Alert, &format!(tr!("Error invoking \"uniq\": {}"), e));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Error invoking \"uniq\": {}"), e),
+                );
                 return;
             }
         };
@@ -4131,7 +4644,10 @@ pub fn spell_check(tempfile_name: &str) {
         match uniq_proc.wait_with_output() {
             Ok(o) => o.stdout,
             Err(e) => {
-                statusline(MessageType::Alert, &format!(tr!("Error reading from uniq: {}"), e));
+                statusline(
+                    MessageType::Alert,
+                    &format!(tr!("Error reading from uniq: {}"), e),
+                );
                 return;
             }
         }
@@ -4171,7 +4687,10 @@ pub fn do_spell() {
     let (temp_name, _stream) = match crate::files::safe_tempfile() {
         Some(pair) => pair,
         None => {
-            statusline(MessageType::Alert, tr!("Error writing temp file: cannot create"));
+            statusline(
+                MessageType::Alert,
+                tr!("Error writing temp file: cannot create"),
+            );
             return;
         }
     };
@@ -4179,7 +4698,12 @@ pub fn do_spell() {
     let okay;
     #[cfg(not(feature = "tiny"))]
     {
-        let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+        let in_mark = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.mark.is_some())
+                .unwrap_or(false)
+        });
         if in_mark {
             okay = write_region_to_file_to(&temp_name, TEMPORARY);
         } else {
@@ -4201,9 +4725,13 @@ pub fn do_spell() {
 
     let alt_speller = with_state(|s| {
         #[cfg(feature = "speller")]
-        { s.alt_speller.clone() }
+        {
+            s.alt_speller.clone()
+        }
         #[cfg(not(feature = "speller"))]
-        { None::<String> }
+        {
+            None::<String>
+        }
     });
 
     if let Some(ref speller) = alt_speller {
@@ -4232,7 +4760,6 @@ pub fn do_spell() {
 #[cfg(feature = "linter")]
 pub fn do_linter() {
     use std::process::{Command, Stdio};
-    
 
     state_mut().ran_a_tool = true;
 
@@ -4247,7 +4774,9 @@ pub fn do_linter() {
             let syn = f.syntax.as_ref()?;
             let syn_ref = unsafe { &**syn };
             let linter = syn_ref.linter.as_ref()?.clone();
-            if linter.is_empty() { return None; }
+            if linter.is_empty() {
+                return None;
+            }
             Some((linter, f.filename.clone()))
         }
         #[cfg(not(feature = "color"))]
@@ -4257,13 +4786,19 @@ pub fn do_linter() {
     let (linter_cmd, filename) = match linter_info {
         Some(pair) => pair,
         None => {
-            statusline(MessageType::Ahem, tr!("No linter is defined for this type of file"));
+            statusline(
+                MessageType::Ahem,
+                tr!("No linter is defined for this type of file"),
+            );
             return;
         }
     };
 
     if linter_cmd.is_empty() {
-        statusline(MessageType::Ahem, tr!("No linter is defined for this type of file"));
+        statusline(
+            MessageType::Ahem,
+            tr!("No linter is defined for this type of file"),
+        );
         return;
     }
 
@@ -4313,7 +4848,10 @@ pub fn do_linter() {
     };
 
     if exit_code > 2 {
-        statusline(MessageType::Alert, &format!(tr!("Error invoking '{}'"), args[0]));
+        statusline(
+            MessageType::Alert,
+            &format!(tr!("Error invoking '{}'"), args[0]),
+        );
         return;
     }
 
@@ -4326,7 +4864,10 @@ pub fn do_linter() {
     }
 
     if lints.is_empty() {
-        statusline(MessageType::Remark, &format!(tr!("Got 0 parsable lines from command: {}"), linter_cmd));
+        statusline(
+            MessageType::Remark,
+            &format!(tr!("Got 0 parsable lines from command: {}"), linter_cmd),
+        );
         return;
     }
 
@@ -4355,13 +4896,20 @@ pub fn do_linter() {
         if last_shown != Some(cur_idx) {
             let entry_filename = lints[cur_idx].filename.clone();
             let current_name = with_state(|s| {
-                s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
+                s.openfile
+                    .as_ref()
+                    .map(|f| f.filename.clone())
+                    .unwrap_or_default()
             });
             if !entry_filename.is_empty() && entry_filename != current_name {
                 if !crate::files::rotate_to_buffer_named(&entry_filename) {
-                    let choice = ask_user(false, &format!(
-                        tr!("This message is for unopened file {}, open it in a new buffer?"),
-                        entry_filename));
+                    let choice = ask_user(
+                        false,
+                        &format!(
+                            tr!("This message is for unopened file {}, open it in a new buffer?"),
+                            entry_filename
+                        ),
+                    );
                     state_mut().currmenu = MLINTER;
                     if choice == CANCEL {
                         statusbar(tr!("Cancelled"));
@@ -4373,8 +4921,7 @@ pub fn do_linter() {
                         // consecutive run), then resume at the first remaining one.
                         lints.retain(|l| l.filename != entry_filename);
                         if lints.is_empty() {
-                            statusline(MessageType::Remark,
-                                tr!("No messages for this file"));
+                            statusline(MessageType::Remark, tr!("No messages for this file"));
                             break;
                         }
                         cur_idx = 0;
@@ -4395,7 +4942,8 @@ pub fn do_linter() {
                 let cur = of.current.as_ref()?;
                 let data = cur.borrow().data.clone();
                 Some(actual_x(&data, of.placewewant))
-            }).unwrap_or(0);
+            })
+            .unwrap_or(0);
             with_state_mut(|s| {
                 if let Some(ref mut f) = s.openfile {
                     f.current_x = new_x;
@@ -4444,7 +4992,9 @@ pub fn do_linter() {
                 last_shown = None;
             } else {
                 let now = std::time::Instant::now();
-                let should_beep = last_wait.map(|lw| now.duration_since(lw).as_secs() >= 1).unwrap_or(true);
+                let should_beep = last_wait
+                    .map(|lw| now.duration_since(lw).as_secs() >= 1)
+                    .unwrap_or(true);
                 if should_beep {
                     statusbar(tr!("At first message"));
                     beep();
@@ -4461,7 +5011,9 @@ pub fn do_linter() {
                 last_shown = None;
             } else {
                 let now = std::time::Instant::now();
-                let should_beep = last_wait.map(|lw| now.duration_since(lw).as_secs() >= 1).unwrap_or(true);
+                let should_beep = last_wait
+                    .map(|lw| now.duration_since(lw).as_secs() >= 1)
+                    .unwrap_or(true);
                 if should_beep {
                     statusbar(tr!("At last message"));
                     beep();
@@ -4504,11 +5056,7 @@ fn parse_lint_line(line: &str) -> Option<LintEntry> {
 
     fn split_number(text: &str) -> Option<(&str, isize)> {
         let separator = text.rfind(':')?;
-        let number = text[separator + 1..]
-            .split(',')
-            .next()?
-            .parse()
-            .ok()?;
+        let number = text[separator + 1..].split(',').next()?.parse().ok()?;
         Some((&text[..separator], number))
     }
 
@@ -4552,14 +5100,19 @@ pub fn do_formatter() {
                 syn_ref.formatter.clone()
             }
             #[cfg(not(feature = "color"))]
-            { None::<String> }
+            {
+                None::<String>
+            }
         })
     });
 
     let formatter_cmd = match formatter_cmd {
         Some(cmd) if !cmd.is_empty() => cmd,
         _ => {
-            statusline(MessageType::Ahem, tr!("No formatter is defined for this type of file"));
+            statusline(
+                MessageType::Ahem,
+                tr!("No formatter is defined for this type of file"),
+            );
             return;
         }
     };
@@ -4603,15 +5156,22 @@ pub fn count_lines_words_and_characters() {
     });
 
     let (topline, top_x, botline, bot_x, chars) = {
-        let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+        let in_mark = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.mark.is_some())
+                .unwrap_or(false)
+        });
         if in_mark {
             let (top_lineno, tx, bot_lineno, bx) = get_region();
             let (Some(tl), Some(bl)) = (
                 get_line_from_number(top_lineno as isize),
                 get_line_from_number(bot_lineno as isize),
             ) else {
-                statusline(MessageType::Alert,
-                    "Internal error: region refers to a nonexistent line");
+                statusline(
+                    MessageType::Alert,
+                    "Internal error: region refers to a nonexistent line",
+                );
                 return;
             };
 
@@ -4624,7 +5184,9 @@ pub fn count_lines_words_and_characters() {
                 let mut cur = tl.borrow().next.clone();
                 while let Some(ln) = cur {
                     char_count += mbstrlen(&ln.borrow().data) + 1;
-                    if ln.as_ptr() == bl.as_ptr() { break; }
+                    if ln.as_ptr() == bl.as_ptr() {
+                        break;
+                    }
                     cur = ln.borrow().next.clone();
                 }
             }
@@ -4640,8 +5202,18 @@ pub fn count_lines_words_and_characters() {
 
             (tl, tx, bl, bx, char_count)
         } else {
-            let filetop = with_state(|s| s.openfile.as_ref().and_then(|f| f.filetop.clone()).expect("a top line"));
-            let filebot = with_state(|s| s.openfile.as_ref().and_then(|f| f.filebot.clone()).expect("a bottom line"));
+            let filetop = with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.filetop.clone())
+                    .expect("a top line")
+            });
+            let filebot = with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.filebot.clone())
+                    .expect("a bottom line")
+            });
             let bot_x = filebot.borrow().data.len();
             let total = with_state(|s| s.openfile.as_ref().map(|f| f.totsize).unwrap_or(0));
             (filetop, 0, filebot, bot_x, total)
@@ -4676,8 +5248,12 @@ pub fn count_lines_words_and_characters() {
             (lineno, f.current_x)
         });
         let bot_lineno = botline.borrow().lineno;
-        if cur_lineno > bot_lineno { break; }
-        if cur_lineno == bot_lineno && cur_x >= bot_x { break; }
+        if cur_lineno > bot_lineno {
+            break;
+        }
+        if cur_lineno == bot_lineno && cur_x >= bot_x {
+            break;
+        }
         if crate::move_::do_next_word(false) {
             words += 1;
         }
@@ -4691,17 +5267,36 @@ pub fn count_lines_words_and_characters() {
         }
     });
 
-    let in_mark = with_state(|s| s.openfile.as_ref().map(|f| f.mark.is_some()).unwrap_or(false));
+    let in_mark = with_state(|s| {
+        s.openfile
+            .as_ref()
+            .map(|f| f.mark.is_some())
+            .unwrap_or(false)
+    });
     let prefix = if in_mark { tr!("In Selection:  ") } else { "" };
 
-    let line_word = if lines == 1 { tr!("line") } else { tr!("lines") };
-    let word_word = if words == 1 { tr!("word") } else { tr!("words") };
-    let char_word = if chars == 1 { tr!("character") } else { tr!("characters") };
+    let line_word = if lines == 1 {
+        tr!("line")
+    } else {
+        tr!("lines")
+    };
+    let word_word = if words == 1 {
+        tr!("word")
+    } else {
+        tr!("words")
+    };
+    let char_word = if chars == 1 {
+        tr!("character")
+    } else {
+        tr!("characters")
+    };
 
     statusline(
         MessageType::Info,
-        &format!("{}{} {},  {} {},  {} {}",
-            prefix, lines, line_word, words, word_word, chars, char_word),
+        &format!(
+            "{}{} {},  {} {},  {} {}",
+            prefix, lines, line_word, words, word_word, chars, char_word
+        ),
     );
 }
 
@@ -4767,18 +5362,19 @@ pub fn do_verbatim_input() {
 
 /* C: char *copy_completion(char *text) */
 #[cfg(feature = "wordcomp")]
-pub fn copy_completion(text: &str) -> String {
+pub fn copy_completion<T: AsRef<[u8]> + ?Sized>(text: &T) -> LineData {
+    let text = text.as_ref();
     let mut length = 0usize;
     while length < text.len() && is_word_char(&text[length..], false) {
         length = step_right(text, length);
     }
-    text[..length].to_string()
+    LineData::from_internal(text[..length].to_vec())
 }
 
 // Thread-local state for complete_a_word.
 #[cfg(feature = "wordcomp")]
 thread_local! {
-    static COMPLETIONS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static COMPLETIONS: RefCell<Vec<LineData>> = RefCell::new(Vec::new());
     static PLETION_X: RefCell<usize> = RefCell::new(0);
     #[cfg(feature = "multibuffer")]
     static SCOURING_ID: RefCell<usize> = RefCell::new(0);
@@ -4795,8 +5391,11 @@ fn next_completion_buffer_line() -> Option<LinePtr> {
 
         while *id < total {
             *id += 1;
-            if let Some(line) = with_state(|s| s.buffer_ring.get(*id - 1)
-                    .and_then(|buffer| buffer.filetop.clone())) {
+            if let Some(line) = with_state(|s| {
+                s.buffer_ring
+                    .get(*id - 1)
+                    .and_then(|buffer| buffer.filetop.clone())
+            }) {
                 return Some(line);
             }
         }
@@ -4837,15 +5436,23 @@ pub fn complete_a_word() {
     // Find word fragment before cursor.
     let (cur_data, current_x) = with_state(|s| {
         let f = s.openfile.as_ref().expect("an open buffer");
-        let data = f.current.as_ref().map(|c| c.borrow().data.clone()).unwrap_or_default();
+        let data = f
+            .current
+            .as_ref()
+            .map(|c| c.borrow().data.clone())
+            .unwrap_or_default();
         (data, f.current_x)
     });
 
     let mut start_of_shard = current_x;
     loop {
-        if start_of_shard == 0 { break; }
+        if start_of_shard == 0 {
+            break;
+        }
         let oneleft = step_left(&cur_data, start_of_shard);
-        if !is_word_char(&cur_data[oneleft..], false) { break; }
+        if !is_word_char(&cur_data[oneleft..], false) {
+            break;
+        }
         start_of_shard = oneleft;
     }
 
@@ -4855,7 +5462,7 @@ pub fn complete_a_word() {
         return;
     }
 
-    let shard = cur_data[start_of_shard..current_x].to_string();
+    let shard = LineData::from_internal(cur_data[start_of_shard..current_x].to_vec());
     let shard_length = shard.len();
 
     // Search through all lines for a completion.
@@ -4883,7 +5490,8 @@ pub fn complete_a_word() {
             }
 
             // Check remaining bytes.
-            if pl_data.len() < i + shard_length || &pl_data[i..i + shard_length] != shard.as_str() {
+            if pl_data.len() < i + shard_length || &pl_data[i..i + shard_length] != shard.as_bytes()
+            {
                 i += 1;
                 continue;
             }
@@ -4910,7 +5518,8 @@ pub fn complete_a_word() {
                 let f = s.openfile.as_ref()?;
                 let cur_ptr = f.current.as_ref()?.as_ptr();
                 Some(pl.as_ptr() == cur_ptr && i == current_x2.saturating_sub(shard_length))
-            }).unwrap_or(false);
+            })
+            .unwrap_or(false);
             if is_self {
                 i += 1;
                 continue;
@@ -4990,7 +5599,7 @@ mod tests {
 
     fn buffer_with_line(data: &str, current_x: usize) -> (Box<OpenFileStruct>, LinePtr) {
         let line = crate::nano::make_new_node(None);
-        line.borrow_mut().data = data.to_string();
+        line.borrow_mut().data = LineData::from_utf8(data);
 
         let mut buffer = Box::new(OpenFileStruct::default());
         buffer.filetop = Some(line.clone());
@@ -4998,9 +5607,8 @@ mod tests {
         buffer.edittop = Some(line.clone());
         buffer.current = Some(line.clone());
         buffer.current_x = current_x;
-        buffer.placewewant = crate::utils::wideness(
-            data, safe_char_boundary(data, current_x));
-        buffer.totsize = data.chars().count();
+        buffer.placewewant = crate::utils::wideness(data, safe_edit_boundary(data, current_x));
+        buffer.totsize = mbstrlen(data);
         // Avoid terminal title updates in unit tests.
         buffer.modified = true;
         (buffer, line)
@@ -5021,9 +5629,9 @@ mod tests {
     #[cfg(not(feature = "tiny"))]
     fn install_two_line_buffer(first_data: &str, second_data: &str) -> (LinePtr, LinePtr) {
         let first = crate::nano::make_new_node(None);
-        first.borrow_mut().data = first_data.to_owned();
+        first.borrow_mut().data = LineData::from_utf8(first_data);
         let second = crate::nano::make_new_node(Some(&first));
-        second.borrow_mut().data = second_data.to_owned();
+        second.borrow_mut().data = LineData::from_utf8(second_data);
         first.borrow_mut().next = Some(second.clone());
 
         let mut buffer = Box::new(OpenFileStruct::default());
@@ -5046,34 +5654,90 @@ mod tests {
     }
 
     #[cfg(not(feature = "tiny"))]
-    fn current_buffer_text() -> String {
+    fn current_buffer_text() -> LineData {
         let mut line = with_state(|s| {
-            s.openfile.as_ref().and_then(|buffer| buffer.filetop.clone())
+            s.openfile
+                .as_ref()
+                .and_then(|buffer| buffer.filetop.clone())
         });
-        let mut pieces = Vec::new();
+        let mut result = LineData::empty();
+        let mut first = true;
         while let Some(node) = line {
-            pieces.push(node.borrow().data.clone());
+            if !first {
+                result.push_byte(b'\n');
+            }
+            result.push_str(&node.borrow().data);
+            first = false;
             line = node.borrow().next.clone();
         }
-        pieces.join("\n")
+        result
     }
 
     #[test]
     fn inject_defends_utf8_boundaries_and_encodes_nul() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
         let line = install_buffer("éclair", 1);
         inject("X\0", 2);
 
         assert_eq!(line.borrow().data, "X\néclair");
         assert_eq!(state().openfile.as_ref().unwrap().current_x, 2);
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
     }
 
     #[test]
     fn inject_does_not_split_a_multibyte_burst() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
         let line = install_buffer("ok", 2);
         inject("é", 1);
 
         assert_eq!(line.borrow().data, "ok");
         assert_eq!(state().openfile.as_ref().unwrap().current_x, 2);
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
+    }
+
+    #[test]
+    fn malformed_bytes_are_individual_editing_units() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
+
+        let bytes = [0xFF, 0xC3, 0xA9];
+        assert_eq!(safe_edit_boundary(&bytes, 1), 1);
+        assert_eq!(safe_edit_boundary(&bytes, 2), 1);
+        assert_eq!(safe_edit_boundary_end(&bytes, 2), 3);
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn inject_undo_redo_preserves_invalid_bytes() {
+        let was_using_utf8 = state().using_utf8;
+        state_mut().using_utf8 = true;
+        crate::chars::remember_utf8(true);
+        let line = install_buffer("", 0);
+        let bytes = [0xFF, 0xC3];
+
+        inject(&bytes, bytes.len());
+        assert_eq!(line.borrow().data.as_bytes(), bytes);
+        assert_eq!(state().openfile.as_ref().unwrap().current_x, bytes.len());
+
+        do_undo();
+        assert!(line.borrow().data.is_empty());
+        do_redo();
+        assert_eq!(line.borrow().data.as_bytes(), bytes);
+
+        state_mut().using_utf8 = was_using_utf8;
+        crate::chars::remember_utf8(was_using_utf8);
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -5087,12 +5751,18 @@ mod tests {
 
         assert_eq!(line.borrow().data, "xyabzcd");
         let state_guard = state();
-        let top = state_guard.openfile.as_ref().unwrap().undotop.as_ref().unwrap();
+        let top = state_guard
+            .openfile
+            .as_ref()
+            .unwrap()
+            .undotop
+            .as_ref()
+            .unwrap();
         assert_eq!(top.r#type, UndoType::Add);
         assert_eq!((top.head_lineno, top.head_x), (1, 4));
         assert_eq!((top.tail_lineno, top.tail_x), (1, 5));
         let previous = top.next.as_ref().expect("separate prior ADD record");
-        assert_eq!(previous.strdata.as_deref(), Some("xy"));
+        assert_eq!(previous.payload.as_deref(), Some(b"xy".as_slice()));
         assert!(previous.next.is_none());
     }
 
@@ -5138,7 +5808,7 @@ mod tests {
         with_state_mut(|s| {
             let buffer = s.openfile.as_mut().unwrap();
             let top = buffer.undotop.as_deref_mut().unwrap();
-            top.strdata = Some("x".to_owned());
+            top.payload = Some(LineData::from_utf8("x"));
             buffer.current_undo = top as *mut UndoStruct;
         });
 
@@ -5151,7 +5821,10 @@ mod tests {
 
     #[cfg(all(not(feature = "tiny"), unix))]
     #[test]
-    #[cfg_attr(miri, ignore = "requires filesystem access; rerun Miri with isolation disabled")]
+    #[cfg_attr(
+        miri,
+        ignore = "requires filesystem access; rerun Miri with isolation disabled"
+    )]
     fn replacement_couple_is_undone_and_redone_as_one_action() {
         use std::io::Write;
 
@@ -5187,7 +5860,7 @@ mod tests {
         update_undo(UndoType::CutToEof);
 
         let replacement = crate::nano::make_new_node(None);
-        replacement.borrow_mut().data = "after".to_owned();
+        replacement.borrow_mut().data = LineData::from_utf8("after");
         add_undo(UndoType::Insert, None);
         ingraft_buffer(replacement);
         update_undo(UndoType::Insert);

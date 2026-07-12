@@ -1,12 +1,15 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/browser.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2015, 2016, 2020, 2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::global::{state, state_mut, with_state, KEY_ENTER};
-
+use crate::global::{KEY_ENTER, state, state_mut, with_state};
 
 // ---------------------------------------------------------------------------
 // Browser module-local state (replaces C file-scope statics)
@@ -30,11 +33,17 @@ thread_local! {
 // Helper macros for browser statics
 #[cfg(feature = "browser")]
 macro_rules! bl_get {
-    ($name:ident) => { $name.with(|v| *v.borrow()) };
+    ($name:ident) => {
+        $name.with(|v| *v.borrow())
+    };
 }
 #[cfg(feature = "browser")]
 macro_rules! bl_set {
-    ($name:ident, $val:expr) => { $name.with(|v| { *v.borrow_mut() = $val; }); };
+    ($name:ident, $val:expr) => {
+        $name.with(|v| {
+            *v.borrow_mut() = $val;
+        });
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -64,23 +73,32 @@ pub fn read_the_list(_path: &str, entries: Vec<String>) {
     // Reserve ten columns for blanks plus file size.
     let mut gauge = (widest + 10) as i32;
     // If needed, make room for ".. (parent dir)".
-    if gauge < 15 { gauge = 15; }
+    if gauge < 15 {
+        gauge = 15;
+    }
     // Make sure we're not wider than the window.
-    if gauge > cols { gauge = cols; }
+    if gauge > cols {
+        gauge = cols;
+    }
 
     let list_length = entries.len();
 
-    FILELIST.with(|fl| { *fl.borrow_mut() = entries; });
+    FILELIST.with(|fl| {
+        *fl.borrow_mut() = entries;
+    });
     bl_set!(LIST_LENGTH, list_length);
     bl_set!(GAUGE, gauge);
 
     // Calculate how many files fit on a line.
     // Feign room for two spaces beyond the right edge, two spaces padding between columns.
-    let piles = if gauge + 2 > 0 { (cols + 2) / (gauge + 2) } else { 1 };
+    let piles = if gauge + 2 > 0 {
+        (cols + 2) / (gauge + 2)
+    } else {
+        1
+    };
     bl_set!(PILES, piles.max(1));
 
-    let usable = editwinrows
-        .saturating_sub(if zero && lines > 1 { 1 } else { 0 }) as usize;
+    let usable = editwinrows.saturating_sub(if zero && lines > 1 { 1 } else { 0 }) as usize;
     bl_set!(USABLE_ROWS, usable.max(1));
 }
 
@@ -113,9 +131,9 @@ pub fn reselect(name: &str) {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn browser_refresh() {
-    use crate::utils::{breadth, tail, actual_x};
-    use crate::winio::{titlebar, blank_edit, display_string, apply_interface_color, reset_color};
-    use crossterm::{queue, cursor::MoveTo, style::Print};
+    use crate::utils::{actual_x, breadth, tail};
+    use crate::winio::{apply_interface_color, blank_edit, display_string, reset_color, titlebar};
+    use crossterm::{cursor::MoveTo, queue, style::Print};
     use std::io::Write;
 
     let present_path = state().present_path.clone();
@@ -165,7 +183,8 @@ pub fn browser_refresh() {
         // If this is the selected item, draw its highlighted bar upfront.
         if index == selected {
             apply_interface_color(selected_pair);
-            let _ = queue!(stdout,
+            let _ = queue!(
+                stdout,
                 MoveTo(abs_col, abs_row),
                 Print(format!("{:>width$}", " ", width = gauge)),
             );
@@ -188,7 +207,10 @@ pub fn browser_refresh() {
             let lstat_res = fs::symlink_metadata(filepath);
             let stat_res = fs::metadata(filepath);
 
-            let is_symlink = lstat_res.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            let is_symlink = lstat_res
+                .as_ref()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
 
             if is_symlink || lstat_res.is_err() {
                 // symlink or error
@@ -254,7 +276,8 @@ pub fn browser_refresh() {
 
     // If requested, put the cursor on the selected item and switch it on.
     if show_cursor {
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x + the_col as u16, midwin_y + the_row as u16),
         );
         // curs_set(1) equivalent — show cursor
@@ -271,9 +294,9 @@ pub fn browser_refresh() {
 #[cfg(feature = "browser")]
 pub fn findfile(needle: &str, forwards: bool) {
     use crate::chars::mbstrcasestr;
-    use crate::winio::{statusbar};
     use crate::search::not_found_msg;
     use crate::utils::tail;
+    use crate::winio::statusbar;
 
     let list_length = bl_get!(LIST_LENGTH);
     if list_length == 0 {
@@ -302,7 +325,10 @@ pub fn findfile(needle: &str, forwards: bool) {
 
         // When the needle occurs in the basename of the file, we have a match.
         let name = FILELIST.with(|fl| {
-            fl.borrow().get(selected).map(|s| s.clone()).unwrap_or_default()
+            fl.borrow()
+                .get(selected)
+                .map(|s| s.clone())
+                .unwrap_or_default()
         });
         let basename = tail(&name).to_string();
         if mbstrcasestr(&basename, needle).is_some() {
@@ -328,11 +354,11 @@ pub fn findfile(needle: &str, forwards: bool) {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn search_filename(forwards: bool) {
-    use crate::prompt::do_prompt;
-    use crate::winio::statusbar;
     use crate::history::HistoryKind;
+    use crate::prompt::do_prompt;
     use crate::utils::breadth;
     use crate::winio::display_string;
+    use crate::winio::statusbar;
 
     let last_search = state().last_search.clone();
     let cols = state().midwin.cols as usize;
@@ -348,7 +374,12 @@ pub fn search_filename(forwards: bool) {
 
     let backward_label = " [Backwards]";
     let search_label = "Search";
-    let msg = format!("{}{}{}", search_label, if !forwards { backward_label } else { "" }, thedefault);
+    let msg = format!(
+        "{}{}{}",
+        search_label,
+        if !forwards { backward_label } else { "" },
+        thedefault
+    );
 
     let response = do_prompt(
         MWHEREISFILE,
@@ -369,7 +400,7 @@ pub fn search_filename(forwards: bool) {
         state_mut().last_search = answer.clone();
         #[cfg(feature = "histories")]
         {
-            use crate::history::{update_history};
+            use crate::history::update_history;
             update_history(HistoryKind::Search, &answer, PRUNE_DUPLICATE);
         }
     }
@@ -393,9 +424,7 @@ pub fn research_filename(forwards: bool) {
         let last_search = state().last_search.clone();
         if last_search.is_empty() {
             // Take the last item from history.
-            let hist_last = with_state(|s| {
-                s.search_history_items.last().cloned()
-            });
+            let hist_last = with_state(|s| s.search_history_items.last().cloned());
             if let Some(item) = hist_last {
                 state_mut().last_search = item;
             }
@@ -476,7 +505,8 @@ fn is_root_path(path: &str) -> bool {
 fn shortcut_toggle_for(kbinput: i32) -> i32 {
     crate::global::with_state(|s| {
         let cm = s.currmenu;
-        s.sclist.iter()
+        s.sclist
+            .iter()
             .find(|sc| (sc.menus as u32 & cm) != 0 && sc.keycode == kbinput)
             .map(|sc| sc.toggle)
             .unwrap_or(0)
@@ -485,19 +515,18 @@ fn shortcut_toggle_for(kbinput: i32) -> i32 {
 
 #[cfg(feature = "browser")]
 pub fn browse(initial_path: String) -> Option<String> {
-    use crate::global::{with_state, interpret};
-    use crate::global::{
-        do_help, full_refresh, do_search_backward, do_search_forward,
-        do_findprevious, do_findnext, do_left, do_right, to_prev_word, to_next_word,
-        do_up, do_down, to_prev_block, to_next_block, do_page_up, do_page_down,
-        do_enter, do_exit, goto_dir,
-    };
-    use crate::winio::{statusline, statusbar, bottombars, titlebar, edit_refresh, get_kbinput};
     use crate::files::{
         confined_is_dir, confined_read_dir, expand_leading_tilde, get_full_path,
         outside_of_confinement,
     };
+    use crate::global::{
+        do_down, do_enter, do_exit, do_findnext, do_findprevious, do_help, do_left, do_page_down,
+        do_page_up, do_right, do_search_backward, do_search_forward, do_up, full_refresh, goto_dir,
+        to_next_block, to_next_word, to_prev_block, to_prev_word,
+    };
+    use crate::global::{interpret, with_state};
     use crate::utils::tail;
+    use crate::winio::{bottombars, edit_refresh, get_kbinput, statusbar, statusline, titlebar};
     use std::path::Path;
 
     let mut path = initial_path;
@@ -519,7 +548,9 @@ pub fn browse(initial_path: String) -> Option<String> {
             for entry in rd {
                 let name = entry.to_string_lossy().to_string();
                 // Skip the useless "." item.
-                if name == "." { continue; }
+                if name == "." {
+                    continue;
+                }
                 v.push(path_join_display(&path, &name));
             }
             Ok(v)
@@ -537,7 +568,9 @@ pub fn browse(initial_path: String) -> Option<String> {
                     return None;
                 }
                 // Fall back to current path.
-                let prev_path = state().present_path.clone()
+                let prev_path = state()
+                    .present_path
+                    .clone()
                     .unwrap_or_else(|| ".".to_string());
                 let fallback = FILELIST.with(|fl| {
                     let sel = bl_get!(SELECTED);
@@ -586,9 +619,7 @@ pub fn browse(initial_path: String) -> Option<String> {
             if crate::winio::consume_resize_request(None)
                 || crate::winio::resize_generation() != seen_resize_generation
             {
-                present_name = FILELIST.with(|fl| {
-                    fl.borrow().get(bl_get!(SELECTED)).cloned()
-                });
+                present_name = FILELIST.with(|fl| fl.borrow().get(bl_get!(SELECTED)).cloned());
                 continue 'reload;
             }
 
@@ -610,21 +641,20 @@ pub fn browse(initial_path: String) -> Option<String> {
             let kbinput = get_kbinput(show_cursor);
 
             if crate::winio::consume_resize_request(Some(kbinput)) {
-                present_name = FILELIST.with(|fl| {
-                    fl.borrow().get(bl_get!(SELECTED)).cloned()
-                });
+                present_name = FILELIST.with(|fl| fl.borrow().get(bl_get!(SELECTED)).cloned());
                 continue 'reload;
             }
 
             #[cfg(feature = "mouse")]
             {
-                use crate::winio::{get_mouseinput, KEY_MOUSE_CODE};
+                use crate::winio::{KEY_MOUSE_CODE, get_mouseinput};
                 if kbinput == KEY_MOUSE_CODE {
                     let mut mouse_x: i32 = 0;
                     let mut mouse_y: i32 = 0;
                     if get_mouseinput(&mut mouse_y, &mut mouse_x) == 0 {
                         // Check if click is in the midwin area.
-                        let (mid_y, mid_rows) = with_state(|s| (s.midwin.y as i32, s.midwin.rows as i32));
+                        let (mid_y, mid_rows) =
+                            with_state(|s| (s.midwin.y as i32, s.midwin.rows as i32));
                         if mouse_y >= mid_y && mouse_y < mid_y + mid_rows {
                             let usable_rows = bl_get!(USABLE_ROWS);
                             let piles = bl_get!(PILES) as usize;
@@ -673,9 +703,7 @@ pub fn browse(initial_path: String) -> Option<String> {
                 {
                     // Treat as resize.
                     // Remember selected file, re-read directory.
-                    present_name = FILELIST.with(|fl| {
-                        fl.borrow().get(selected).cloned()
-                    });
+                    present_name = FILELIST.with(|fl| fl.borrow().get(selected).cloned());
                     continue 'reload;
                 }
             } else if {
@@ -685,7 +713,9 @@ pub fn browse(initial_path: String) -> Option<String> {
                         && shortcut_toggle_for(kbinput) == NO_HELP as i32
                 }
                 #[cfg(feature = "tiny")]
-                { false }
+                {
+                    false
+                }
             } {
                 // M-X in the browser: toggle the help lines (C: do_toggle with
                 // toggle == NO_HELP), then treat it as a resize so the browser
@@ -717,7 +747,14 @@ pub fn browse(initial_path: String) -> Option<String> {
                 bl_set!(SELECTED, selected - (selected % piles));
             } else if function == Some(to_next_word as crate::definitions::FuncPtr) {
                 let new_sel = selected + piles - 1 - (selected % piles);
-                bl_set!(SELECTED, if new_sel >= list_length { list_length - 1 } else { new_sel });
+                bl_set!(
+                    SELECTED,
+                    if new_sel >= list_length {
+                        list_length - 1
+                    } else {
+                        new_sel
+                    }
+                );
             } else if function == Some(do_up as crate::definitions::FuncPtr) {
                 if selected >= piles {
                     bl_set!(SELECTED, selected - piles);
@@ -727,12 +764,14 @@ pub fn browse(initial_path: String) -> Option<String> {
                     bl_set!(SELECTED, selected + piles);
                 }
             } else if function == Some(to_prev_block as crate::definitions::FuncPtr) {
-                let new_sel = (selected / (usable_rows * piles)) * usable_rows * piles
-                    + selected % piles;
+                let new_sel =
+                    (selected / (usable_rows * piles)) * usable_rows * piles + selected % piles;
                 bl_set!(SELECTED, new_sel);
             } else if function == Some(to_next_block as crate::definitions::FuncPtr) {
                 let mut new_sel = (selected / (usable_rows * piles)) * usable_rows * piles
-                    + selected % piles + usable_rows * piles - piles;
+                    + selected % piles
+                    + usable_rows * piles
+                    - piles;
                 if new_sel >= list_length {
                     new_sel = (list_length / piles) * piles + selected % piles;
                 }
@@ -781,8 +820,7 @@ pub fn browse(initial_path: String) -> Option<String> {
 
                     // If the given path is relative, join it with the current path.
                     if !Path::new(&new_path).is_absolute() {
-                        let cur_path = state().present_path.clone()
-                            .unwrap_or_default();
+                        let cur_path = state().present_path.clone().unwrap_or_default();
                         new_path = path_join_display(&cur_path, &answer);
                     }
 
@@ -793,13 +831,14 @@ pub fn browse(initial_path: String) -> Option<String> {
                             if outside_of_confinement(&new_path, false) {
                                 let msg = format!("Can't go outside of {}", opdir);
                                 statusline(MessageType::Alert, &msg);
-                                path = state().present_path.clone()
+                                path = state()
+                                    .present_path
+                                    .clone()
                                     .unwrap_or_else(|| ".".to_string());
                                 // goto testresize — fall through
                                 if crate::winio::resize_generation() != seen_resize_generation {
-                                    present_name = FILELIST.with(|fl| {
-                                        fl.borrow().get(bl_get!(SELECTED)).cloned()
-                                    });
+                                    present_name = FILELIST
+                                        .with(|fl| fl.borrow().get(bl_get!(SELECTED)).cloned());
                                     continue 'reload;
                                 }
                                 continue;
@@ -824,9 +863,9 @@ pub fn browse(initial_path: String) -> Option<String> {
                     continue 'reload;
                 }
             } else if function == Some(do_enter as crate::definitions::FuncPtr) {
-                let selected_file = FILELIST.with(|fl| {
-                    fl.borrow().get(selected).cloned()
-                }).unwrap_or_default();
+                let selected_file = FILELIST
+                    .with(|fl| fl.borrow().get(selected).cloned())
+                    .unwrap_or_default();
 
                 // Can't move up from root.
                 if tail(&selected_file) == ".." && is_root_path(&path) {
@@ -876,13 +915,16 @@ pub fn browse(initial_path: String) -> Option<String> {
                 #[cfg(feature = "nanorc")]
                 {
                     use crate::winio::implant;
-                    
+
                     if let Some(func) = function {
                         // The C code: implant(first_sc_for(MBROWSER, function)->expansion)
                         // We look up the expansion and call implant.
                         if let Some(sc_info) = with_state(|s| {
-                            s.sclist.iter()
-                                .find(|sc| (sc.menus as u32 & MBROWSER) != 0 && sc.func == Some(func))
+                            s.sclist
+                                .iter()
+                                .find(|sc| {
+                                    (sc.menus as u32 & MBROWSER) != 0 && sc.func == Some(func)
+                                })
                                 .and_then(|sc| sc.expansion.clone())
                         }) {
                             implant(&sc_info);
@@ -907,16 +949,16 @@ pub fn browse(initial_path: String) -> Option<String> {
                 // Drain until END_OF_PASTE.
                 loop {
                     let k = get_kbinput(false);
-                    if k == END_OF_PASTE as i32 { break; }
+                    if k == END_OF_PASTE as i32 {
+                        break;
+                    }
                 }
                 statusline(MessageType::Ahem, "Paste is ignored");
             }
 
             // testresize: handle terminal resize.
             if crate::winio::resize_generation() != seen_resize_generation {
-                present_name = FILELIST.with(|fl| {
-                    fl.borrow().get(bl_get!(SELECTED)).cloned()
-                });
+                present_name = FILELIST.with(|fl| fl.borrow().get(bl_get!(SELECTED)).cloned());
                 continue 'reload;
             }
         } // inner loop
@@ -926,7 +968,9 @@ pub fn browse(initial_path: String) -> Option<String> {
     edit_refresh();
 
     // Clean up filelist.
-    FILELIST.with(|fl| { fl.borrow_mut().clear(); });
+    FILELIST.with(|fl| {
+        fl.borrow_mut().clear();
+    });
     bl_set!(LIST_LENGTH, 0);
 
     chosen
@@ -979,7 +1023,7 @@ fn browser_index_for_click(
 // ---------------------------------------------------------------------------
 #[cfg(feature = "browser")]
 pub fn browse_in(inpath: &str) -> Option<String> {
-    use crate::files::{confined_is_dir, outside_of_confinement, expand_leading_tilde};
+    use crate::files::{confined_is_dir, expand_leading_tilde, outside_of_confinement};
 
     let mut path = expand_leading_tilde(inpath);
 
@@ -996,8 +1040,8 @@ pub fn browse_in(inpath: &str) -> Option<String> {
             .unwrap_or(true);
 
         if still_not_dir {
-            
-            let cwd = std::env::current_dir().ok()
+            let cwd = std::env::current_dir()
+                .ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()));
             match cwd {
                 Some(p) => path = p,

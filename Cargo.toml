@@ -1,6 +1,6 @@
 [package]
 name = "nano"
-version = "0.0.13"
+version = "0.0.14"
 edition = "2024"
 
 [[bin]]
@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 crossterm = "0.29"
 cap-std = "4.0.2"
-regex-lite = "0.1"
+regex = { version = "1.13", default-features = false, features = ["std", "unicode"] }
 libc = "0.2"
 unicode-width = "0.2"
 magic = { version = "0.16.7", optional = true }
@@ -60,6 +60,12 @@ windows = { version = "0.62", features = [
 # Embeds Windows version metadata (media/nano.rc) via build.rs on Windows.
 [build-dependencies]
 embed-resource = "3"
+
+[dev-dependencies]
+proptest = "1"
+
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm-0.29.0" }
 
 # Size-tuned release build. opt-level="z" + panic="abort" trade run speed and
 # unwinding for a much smaller binary; crash-time emergency save uses SIGSEGV/

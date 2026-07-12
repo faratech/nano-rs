@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 use crate::definitions::*;
 use crate::global::STATE;
 
@@ -35,6 +39,7 @@ mod help_state {
 // ---------------------------------------------------------------------------
 #[cfg(feature = "help")]
 mod stubs {
+    use crate::definitions::LineData;
     use crate::global::STATE;
 
     /// Set the data of the current line in the open buffer.
@@ -43,7 +48,7 @@ mod stubs {
             let mut st = s.borrow_mut();
             if let Some(ref mut of) = st.openfile {
                 if let Some(ref cur) = of.current.clone() {
-                    cur.borrow_mut().data = data.to_string();
+                    cur.borrow_mut().data = LineData::from_utf8(data);
                 }
             }
         });
@@ -60,7 +65,7 @@ mod stubs {
             if let Some(cur) = current {
                 let lineno = cur.borrow().lineno + 1;
                 let new = st.lines.alloc(crate::definitions::LineNode {
-                    data: String::new(),
+                    data: LineData::empty(),
                     lineno,
                     next: None,
                     prev: Some(crate::definitions::LinePtr::downgrade(&cur)),
@@ -136,7 +141,9 @@ mod stubs {
         STATE.with(|s| {
             let st = s.borrow();
             let Some(ref of) = st.openfile else { return 0 };
-            let Some(ref edittop) = of.edittop else { return 0 };
+            let Some(ref edittop) = of.edittop else {
+                return 0;
+            };
             let mut sum = 0usize;
             let mut line = of.filetop.clone();
             while let Some(l) = line {
@@ -154,7 +161,8 @@ mod stubs {
     pub fn edittop_lineno() -> isize {
         STATE.with(|s| {
             let st = s.borrow();
-            st.openfile.as_ref()
+            st.openfile
+                .as_ref()
                 .and_then(|of| of.edittop.as_ref())
                 .map(|lp| lp.borrow().lineno as isize)
                 .unwrap_or(1)
@@ -165,7 +173,8 @@ mod stubs {
     pub fn filebot_lineno() -> isize {
         STATE.with(|s| {
             let st = s.borrow();
-            st.openfile.as_ref()
+            st.openfile
+                .as_ref()
                 .and_then(|of| of.filebot.as_ref())
                 .map(|lp| lp.borrow().lineno as isize)
                 .unwrap_or(1)
@@ -186,7 +195,6 @@ mod stubs {
 #[cfg(feature = "help")]
 pub fn help_init() {
     use help_state::*;
-    
 
     let currmenu: u32 = STATE.with(|s| s.borrow().currmenu);
 
@@ -334,9 +342,11 @@ command run by the shell into the current buffer (or \
 into a new buffer).  If the command is preceded by '|' \
 (the pipe symbol), the current contents of the buffer \
 (or marked region) will be piped to the command.  "),
-                Some(tr!("If you just need another blank buffer, do not enter any \
+                Some(tr!(
+                    "If you just need another blank buffer, do not enter any \
 command.\n\n You can also pick one of four tools, or cut a \
-large piece of the buffer, or put the editor to sleep.\n\n")),
+large piece of the buffer, or put the editor to sleep.\n\n"
+                )),
                 Some(tr!(" The following function keys \
 are available at this prompt:\n\n")),
             )
@@ -386,8 +396,12 @@ parentheses:\n\n")),
     // ------------------------------------------------------------------
     let mut text = String::new();
     text.push_str(htx0);
-    if let Some(h) = htx1 { text.push_str(h); }
-    if let Some(h) = htx2 { text.push_str(h); }
+    if let Some(h) = htx1 {
+        text.push_str(h);
+    }
+    if let Some(h) = htx2 {
+        text.push_str(h);
+    }
 
     // Remember the end-of-introduction offset.
     let intro_end = text.len();
@@ -418,10 +432,7 @@ parentheses:\n\n")),
 
             // Show the first two shortcuts (if any) for each function.
             for sc in &st.sclist {
-                if (sc.menus as u32 & currmenu) != 0
-                    && sc.func == f.func
-                    && !sc.keystr.is_empty()
-                {
+                if (sc.menus as u32 & currmenu) != 0 && sc.func == f.func && !sc.keystr.is_empty() {
                     let has_arrow = sc.keystr.contains('\u{2192}')
                         || sc.keystr.contains('\u{2190}')
                         || sc.keystr.contains('\u{2191}')
@@ -499,7 +510,9 @@ parentheses:\n\n")),
                         let epithet = crate::global::epithet_of_flag(sc2.toggle as u32);
                         text.push_str(&format!(
                             "{}\t\t {} {}\n",
-                            keystr, epithet, tr!("enable/disable")
+                            keystr,
+                            epithet,
+                            tr!("enable/disable")
                         ));
                         // Add a blank line between two groups (after NO_SYNTAX).
                         if sc2.toggle as u32 == NO_SYNTAX {
@@ -525,8 +538,6 @@ parentheses:\n\n")),
 pub fn wrap_help_text_into_buffer() {
     use help_state::*;
     use stubs::*;
-    
-    
 
     let text_opt = HELP_TEXT.with(|ht| ht.borrow().clone());
     let text = match text_opt {
@@ -535,27 +546,31 @@ pub fn wrap_help_text_into_buffer() {
     };
 
     let start_offset = START_OF_BODY_OFFSET.with(|s| *s.borrow());
-    let intro_end    = END_OF_INTRO_OFFSET.with(|e| *e.borrow());
+    let intro_end = END_OF_INTRO_OFFSET.with(|e| *e.borrow());
     let location_val = LOCATION.with(|l| *l.borrow());
 
-    let (cols, sidebar, minibar_set, empty_line_set, _editwinrows) =
-        STATE.with(|s| {
-            let st = s.borrow();
-            (
-                st.midwin.cols as usize,
-                st.sidebar as usize,
-                st.flag_isset(MINIBAR),
-                st.flag_isset(EMPTY_LINE),
-                st.editwinrows,
-            )
-        });
+    let (cols, sidebar, minibar_set, empty_line_set, _editwinrows) = STATE.with(|s| {
+        let st = s.borrow();
+        (
+            st.midwin.cols as usize,
+            st.sidebar as usize,
+            st.flag_isset(MINIBAR),
+            st.flag_isset(EMPTY_LINE),
+            st.editwinrows,
+        )
+    });
     let rows = crate::winio::screen_rows() as usize;
 
     // Avoid overtight and overwide paragraphs in the introductory text.
     // wrapping_point = ((COLS < 40) ? 40 : (COLS > 74) ? 74 : COLS) - sidebar
-    let mut wrapping_point: usize =
-        (if cols < 40 { 40 } else if cols > 74 { 74 } else { cols })
-            .saturating_sub(sidebar);
+    let mut wrapping_point: usize = (if cols < 40 {
+        40
+    } else if cols > 74 {
+        74
+    } else {
+        cols
+    })
+    .saturating_sub(sidebar);
 
     // Make a new buffer in AppState.
     crate::files::make_new_buffer();
@@ -574,9 +589,7 @@ pub fn wrap_help_text_into_buffer() {
     while pos < total {
         // Adjust wrapping point at end of intro.
         if pos == intro_end {
-            wrapping_point =
-                (if cols < 40 { 40 } else { cols })
-                    .saturating_sub(sidebar);
+            wrapping_point = (if cols < 40 { 40 } else { cols }).saturating_sub(sidebar);
         }
 
         let (oneline, length) = if pos < intro_end || (pos > 0 && bytes[pos - 1] == b'\n') {
@@ -584,7 +597,11 @@ pub fn wrap_help_text_into_buffer() {
             // faithful break_line (keystroke-area guard, step_left fallback, -1 case).
             let chunk = &text[pos..];
             let raw = crate::text::break_line(chunk, wrapping_point as isize, true);
-            let length = if raw < 0 { chunk.len() } else { (raw as usize).min(chunk.len()) };
+            let length = if raw < 0 {
+                chunk.len()
+            } else {
+                (raw as usize).min(chunk.len())
+            };
             // C: snprintf(oneline, length+shim, "%s", ptr) copies length+shim-1 bytes,
             // i.e. it drops the break char only when it is a space.
             let shim = if length > 0 && chunk.as_bytes().get(length - 1) == Some(&b' ') {
@@ -597,9 +614,17 @@ pub fn wrap_help_text_into_buffer() {
         } else {
             // Shortcut column: indented continuation.
             let chunk = &text[pos..];
-            let sc_wrap = (if cols < 40 { 22isize } else { cols as isize - 18 }) - sidebar as isize;
+            let sc_wrap = (if cols < 40 {
+                22isize
+            } else {
+                cols as isize - 18
+            }) - sidebar as isize;
             let raw = crate::text::break_line(chunk, sc_wrap, true);
-            let length = if raw < 0 { chunk.len() } else { (raw as usize).min(chunk.len()) };
+            let length = if raw < 0 {
+                chunk.len()
+            } else {
+                (raw as usize).min(chunk.len())
+            };
             (format!("\t\t  {}", &chunk[..length]), length)
         };
 
@@ -665,21 +690,16 @@ fn rebuild_help_after_resize() {
 /* C: void show_help(void) */
 #[cfg(feature = "help")]
 pub fn show_help() {
-    use help_state::*;
-    use stubs::*;
     use crate::definitions::FuncPtr;
     use crate::global::{
-        flag_index, flag_mask,
-        interpret,
-        do_left, do_right, do_up, do_down,
-        do_search_backward, do_search_forward,
-        do_findprevious, do_findnext,
-        do_scroll_up, do_scroll_down,
-        do_page_up, do_page_down,
-        to_first_line, to_last_line, do_exit,
+        do_down, do_exit, do_findnext, do_findprevious, do_left, do_page_down, do_page_up,
+        do_right, do_scroll_down, do_scroll_up, do_search_backward, do_search_forward, do_up,
+        flag_index, flag_mask, interpret, to_first_line, to_last_line,
     };
-    use crate::winio::{bottombars, titlebar, edit_refresh, blank_statusbar, get_kbinput};
     use crate::nano::window_init;
+    use crate::winio::{blank_statusbar, bottombars, edit_refresh, get_kbinput, titlebar};
+    use help_state::*;
+    use stubs::*;
 
     // Save state that we need to restore afterward.
     let (oldmenu, was_tabsize) = STATE.with(|s| {
@@ -707,7 +727,7 @@ pub fn show_help() {
         STATE.with(|s| {
             let mut st = s.borrow_mut();
             st.flags[flag_index(NO_HELP)] &= !flag_mask(NO_HELP);
-            st.flags[flag_index(ZERO)]    &= !flag_mask(ZERO);
+            st.flags[flag_index(ZERO)] &= !flag_mask(ZERO);
         });
         window_init();
     } else {
@@ -717,10 +737,10 @@ pub fn show_help() {
     // When searching, do it forward, case insensitive, and without regexes.
     STATE.with(|s| {
         let mut st = s.borrow_mut();
-        st.flags[flag_index(BACKWARDS_SEARCH)]   &= !flag_mask(BACKWARDS_SEARCH);
-        st.flags[flag_index(CASE_SENSITIVE)]      &= !flag_mask(CASE_SENSITIVE);
-        st.flags[flag_index(USE_REGEXP)]          &= !flag_mask(USE_REGEXP);
-        st.flags[flag_index(WHITESPACE_DISPLAY)]  &= !flag_mask(WHITESPACE_DISPLAY);
+        st.flags[flag_index(BACKWARDS_SEARCH)] &= !flag_mask(BACKWARDS_SEARCH);
+        st.flags[flag_index(CASE_SENSITIVE)] &= !flag_mask(CASE_SENSITIVE);
+        st.flags[flag_index(USE_REGEXP)] &= !flag_mask(USE_REGEXP);
+        st.flags[flag_index(WHITESPACE_DISPLAY)] &= !flag_mask(WHITESPACE_DISPLAY);
     });
 
     #[cfg(feature = "linenumbers")]
@@ -762,7 +782,11 @@ pub fn show_help() {
             // C: length = break_line(help_text, HIGHEST_POSITIVE, TRUE) returns the
             // index OF the '\n', so the title excludes the trailing newline.
             let raw = crate::text::break_line(text, isize::MAX, true);
-            let length = if raw < 0 { text.len() } else { (raw as usize).min(text.len()) };
+            let length = if raw < 0 {
+                text.len()
+            } else {
+                (raw as usize).min(text.len())
+            };
             text[..length].to_string()
         } else {
             String::new()
@@ -779,7 +803,11 @@ pub fn show_help() {
     let body_offset = HELP_TEXT.with(|ht| {
         if let Some(ref text) = *ht.borrow() {
             let raw = crate::text::break_line(text, isize::MAX, true);
-            let length = if raw < 0 { text.len() } else { (raw as usize).min(text.len()) };
+            let length = if raw < 0 {
+                text.len()
+            } else {
+                (raw as usize).min(text.len())
+            };
             let mut off = length;
             let bytes = text.as_bytes();
             while off < bytes.len() && bytes[off] == b'\n' {
@@ -842,10 +870,10 @@ pub fn show_help() {
                 || function == Some(do_up as FuncPtr)
                 || function == Some(do_down as FuncPtr))
         {
-            if let Some(f) = function { f(); }
-        } else if function == Some(do_up as FuncPtr)
-            || function == Some(do_scroll_up as FuncPtr)
-        {
+            if let Some(f) = function {
+                f();
+            }
+        } else if function == Some(do_up as FuncPtr) || function == Some(do_scroll_up as FuncPtr) {
             do_scroll_up();
         } else if function == Some(do_down as FuncPtr)
             || function == Some(do_scroll_down as FuncPtr)
@@ -860,20 +888,26 @@ pub fn show_help() {
             || function == Some(to_first_line as FuncPtr)
             || function == Some(to_last_line as FuncPtr)
         {
-            if let Some(f) = function { f(); }
+            if let Some(f) = function {
+                f();
+            }
         } else if function == Some(do_search_backward as FuncPtr)
             || function == Some(do_search_forward as FuncPtr)
             || function == Some(do_findprevious as FuncPtr)
             || function == Some(do_findnext as FuncPtr)
         {
-            if let Some(f) = function { f(); }
+            if let Some(f) = function {
+                f();
+            }
             bottombars(MHELP);
         } else {
             // Handle implant (nanorc string bind).
             #[cfg(feature = "nanorc")]
             if let Some(func) = function {
                 if let Some(expansion) = STATE.with(|s| {
-                    s.borrow().sclist.iter()
+                    s.borrow()
+                        .sclist
+                        .iter()
                         .find(|sc| (sc.menus as u32 & MHELP) != 0 && sc.func == Some(func))
                         .and_then(|sc| sc.expansion.clone())
                 }) {
@@ -982,7 +1016,7 @@ pub fn show_help() {
 #[cfg(feature = "help")]
 fn handle_unrecognized_input(kbinput: i32, function: Option<FuncPtr>) {
     use crate::definitions::FuncPtr;
-    use crate::global::{full_refresh, do_exit};
+    use crate::global::{do_exit, full_refresh};
 
     if function == Some(full_refresh as FuncPtr) {
         full_refresh();
@@ -994,7 +1028,9 @@ fn handle_unrecognized_input(kbinput: i32, function: Option<FuncPtr>) {
         if kbinput == START_OF_PASTE as i32 {
             loop {
                 let k = crate::winio::get_kbinput(false);
-                if k == END_OF_PASTE as i32 { break; }
+                if k == END_OF_PASTE as i32 {
+                    break;
+                }
             }
             crate::winio::statusline(MessageType::Ahem, tr!("Paste is ignored"));
             return;
@@ -1027,10 +1063,7 @@ pub fn do_help() {
     {
         let currmenu: u32 = STATE.with(|s| s.borrow().currmenu);
         if (currmenu & (MMAIN | MBROWSER)) != 0 {
-            crate::winio::statusline(
-                MessageType::Info,
-                tr!("^W = Ctrl+W    M-W = Alt+W"),
-            );
+            crate::winio::statusline(MessageType::Info, tr!("^W = Ctrl+W    M-W = Alt+W"));
         } else {
             // beep — stub
         }

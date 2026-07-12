@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 //! Installation and update functionality for nano-rs.
 //!
 //! Supports self-install / self-update on both Windows and Unix:
@@ -9,28 +13,23 @@
 //! Release assets are named per-platform: nano-<arch>.exe on Windows and
 //! nano-linux-<arch> on Linux/Unix (arch is amd64 or arm64).
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::Win32::Foundation::GetLastError;
 #[cfg(windows)]
 use windows::Win32::Networking::WinHttp::{
-    WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_FLAG_SECURE,
-    URL_COMPONENTS,
-    WINHTTP_INTERNET_SCHEME_HTTPS,
-    WINHTTP_OPEN_REQUEST_FLAGS,
-    WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE,
+    URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+    WINHTTP_INTERNET_SCHEME_HTTPS, WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen,
+    WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData,
+    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
 #[cfg(windows)]
-use windows::Win32::Foundation::GetLastError;
+use windows::core::{PCWSTR, PWSTR, w};
 
 /// GitHub repository for releases
 const GITHUB_REPO: &str = "faratech/nano-rs";
@@ -53,7 +52,10 @@ fn cache_dir() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     let dir = base.join("nano-rs");
-    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir);
     // Tighten perms in case the directory pre-existed with looser modes.
     let _ = fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     Some(dir)
@@ -74,7 +76,11 @@ fn cache_dir() -> Option<PathBuf> {
 /// pending file is trusted and applied over the running executable, so it must
 /// only ever come from a directory only this user can write.
 fn update_temp_path() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "nano-update.exe" } else { "nano-update" };
+    let name = if cfg!(windows) {
+        "nano-update.exe"
+    } else {
+        "nano-update"
+    };
     Some(cache_dir()?.join(name))
 }
 
@@ -115,8 +121,10 @@ impl PendingManifest {
                 "version" if version.is_none() => version = Some(value.to_string()),
                 "target" if target.is_none() => target = Some(value.to_string()),
                 "asset" if asset.is_none() => asset = Some(value.to_string()),
-                "sha256" if sha256.is_none() && value.len() == 64
-                    && value.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                "sha256"
+                    if sha256.is_none()
+                        && value.len() == 64
+                        && value.bytes().all(|b| b.is_ascii_hexdigit()) =>
                 {
                     sha256 = Some(value.to_ascii_lowercase())
                 }
@@ -148,7 +156,11 @@ fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn validate_artifact(bytes: &[u8], target: &str) -> bool {
@@ -164,16 +176,20 @@ fn validate_artifact(bytes: &[u8], target: &str) -> bool {
             if bytes.len() < 64 || &bytes[..2] != b"MZ" {
                 return false;
             }
-            let pe_offset = u32::from_le_bytes([
-                bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f],
-            ]) as usize;
+            let pe_offset =
+                u32::from_le_bytes([bytes[0x3c], bytes[0x3d], bytes[0x3e], bytes[0x3f]]) as usize;
             if pe_offset.checked_add(6).is_none_or(|end| end > bytes.len())
                 || &bytes[pe_offset..pe_offset + 4] != b"PE\0\0"
             {
                 return false;
             }
             let machine = u16::from_le_bytes([bytes[pe_offset + 4], bytes[pe_offset + 5]]);
-            machine == if target == "windows-x86_64" { 0x8664 } else { 0xaa64 }
+            machine
+                == if target == "windows-x86_64" {
+                    0x8664
+                } else {
+                    0xaa64
+                }
         }
         _ => false,
     }
@@ -197,10 +213,10 @@ fn store_pending_update(
     if !validate_artifact(body, target) {
         return Err(format!("downloaded asset is not a valid executable for {target}").into());
     }
-    let update_path = update_temp_path()
-        .ok_or("could not determine private update cache directory")?;
-    let manifest_path = update_manifest_path()
-        .ok_or("could not determine private update cache directory")?;
+    let update_path =
+        update_temp_path().ok_or("could not determine private update cache directory")?;
+    let manifest_path =
+        update_manifest_path().ok_or("could not determine private update cache directory")?;
     let actual_sha256 = sha256_bytes(body);
     if actual_sha256 != expected_sha256.to_ascii_lowercase() {
         return Err("downloaded asset does not match the published SHA-256 digest".into());
@@ -226,7 +242,8 @@ fn load_valid_pending_update() -> Result<(PathBuf, PendingManifest), Box<dyn std
     let update_path = update_temp_path().ok_or("private update cache unavailable")?;
     let manifest_path = update_manifest_path().ok_or("private update cache unavailable")?;
     let manifest_text = fs::read_to_string(&manifest_path)?;
-    let manifest = PendingManifest::decode(&manifest_text).ok_or("invalid pending-update manifest")?;
+    let manifest =
+        PendingManifest::decode(&manifest_text).ok_or("invalid pending-update manifest")?;
     let expected_target = target_id()?;
     if manifest.target != expected_target
         || manifest.asset != target_asset_name()?
@@ -247,8 +264,7 @@ fn load_valid_pending_update() -> Result<(PathBuf, PendingManifest), Box<dyn std
     }
 
     let bytes = fs::read(&update_path)?;
-    if !validate_artifact(&bytes, expected_target)
-        || sha256_file(&update_path)? != manifest.sha256
+    if !validate_artifact(&bytes, expected_target) || sha256_file(&update_path)? != manifest.sha256
     {
         return Err("pending update failed format or digest validation".into());
     }
@@ -262,7 +278,9 @@ fn last_check_path() -> Option<PathBuf> {
 
 /// Whether the background check ran within the last 24h.
 fn checked_recently() -> bool {
-    let Some(p) = last_check_path() else { return false };
+    let Some(p) = last_check_path() else {
+        return false;
+    };
     if let Ok(md) = fs::metadata(&p) {
         if let Ok(modified) = md.modified() {
             if let Ok(elapsed) = modified.elapsed() {
@@ -332,7 +350,9 @@ fn write_bytes_atomic(path: &Path, body: &[u8]) -> Result<(), Box<dyn std::error
 }
 
 fn copy_file_atomic(source: &Path, target: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = target.parent().ok_or("target path has no parent directory")?;
+    let parent = target
+        .parent()
+        .ok_or("target path has no parent directory")?;
     fs::create_dir_all(parent)?;
     let mut source_file = fs::File::open(source)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -480,9 +500,15 @@ pub fn install_to_path(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let target_path = get_install_path()?;
 
     // Avoid copying a file onto itself (running the already-installed binary).
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(&current_exe), fs::canonicalize(&target_path)) {
+    if let (Ok(a), Ok(b)) = (
+        fs::canonicalize(&current_exe),
+        fs::canonicalize(&target_path),
+    ) {
         if a == b {
-            println!("nano {} is already installed at this location.", current_version);
+            println!(
+                "nano {} is already installed at this location.",
+                current_version
+            );
             println!("Location: {}", target_path.display());
             return Ok(());
         }
@@ -496,12 +522,18 @@ pub fn install_to_path(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     if target_path.exists() && !force {
         if let Some(installed_version) = get_installed_version() {
             if installed_version == current_version {
-                println!("nano {} is already installed and up to date.", current_version);
+                println!(
+                    "nano {} is already installed and up to date.",
+                    current_version
+                );
                 println!("Location: {}", target_path.display());
                 println!("\nUse --force to reinstall anyway.");
-                return Ok(())
+                return Ok(());
             } else {
-                println!("Updating nano from {} to {}...", installed_version, current_version);
+                println!(
+                    "Updating nano from {} to {}...",
+                    installed_version, current_version
+                );
             }
         } else {
             println!("Reinstalling nano {}...", current_version);
@@ -518,7 +550,10 @@ pub fn install_to_path(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("Location: {}", target_path.display());
     println!("\nYou can now run 'nano' from any terminal.");
     #[cfg(not(windows))]
-    println!("(Ensure {:?} is on your PATH.)", target_path.parent().unwrap_or(Path::new("~/.local/bin")));
+    println!(
+        "(Ensure {:?} is on your PATH.)",
+        target_path.parent().unwrap_or(Path::new("~/.local/bin"))
+    );
     Ok(())
 }
 
@@ -552,7 +587,9 @@ struct HandleGuard(*mut std::ffi::c_void);
 impl Drop for HandleGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            unsafe { let _ = WinHttpCloseHandle(self.0); }
+            unsafe {
+                let _ = WinHttpCloseHandle(self.0);
+            }
         }
     }
 }
@@ -595,7 +632,7 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         };
 
         if WinHttpCrackUrl(&url_wide, 0, &mut components).is_err() {
-             return Err(format!("WinHttpCrackUrl failed: {:?}", GetLastError()).into());
+            return Err(format!("WinHttpCrackUrl failed: {:?}", GetLastError()).into());
         }
 
         // 3. Connect
@@ -611,7 +648,11 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let _connect_guard = HandleGuard(connect);
 
         // 4. Open Request
-        let flags = if components.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
+        let flags = if components.nScheme == WINHTTP_INTERNET_SCHEME_HTTPS {
+            WINHTTP_FLAG_SECURE
+        } else {
+            WINHTTP_OPEN_REQUEST_FLAGS(0)
+        };
         let request = WinHttpOpenRequest(
             connect,
             w!("GET"),
@@ -627,14 +668,7 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let _request_guard = HandleGuard(request);
 
         // 5. Send Request
-        if WinHttpSendRequest(
-            request,
-            None,
-            None,
-            0,
-            0,
-            0,
-        ).is_err() {
+        if WinHttpSendRequest(request, None, None, 0, 0, 0).is_err() {
             return Err(format!("WinHttpSendRequest failed: {:?}", GetLastError()).into());
         }
 
@@ -675,7 +709,9 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             // a mid-stream failure must NOT be reported as a complete download, or a
             // corrupt partial .exe could be installed over the working one.
             if WinHttpQueryDataAvailable(request, &mut bytes_read).is_err() {
-                return Err(format!("WinHttpQueryDataAvailable failed: {:?}", GetLastError()).into());
+                return Err(
+                    format!("WinHttpQueryDataAvailable failed: {:?}", GetLastError()).into(),
+                );
             }
             if bytes_read == 0 {
                 break;
@@ -689,7 +725,9 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
                 buffer.as_mut_ptr() as *mut c_void,
                 to_read,
                 &mut read_now,
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return Err(format!("WinHttpReadData failed: {:?}", GetLastError()).into());
             }
 
@@ -719,11 +757,16 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     match Command::new("curl")
         .args([
             "-fsSL",
-            "--connect-timeout", "10",
-            "--max-time", "60",
-            "--speed-limit", "1",
-            "--speed-time", "15",
-            "-A", USER_AGENT,
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "60",
+            "--speed-limit",
+            "1",
+            "--speed-time",
+            "15",
+            "-A",
+            USER_AGENT,
             url,
         ])
         .output()
@@ -740,8 +783,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             "--connect-timeout=10",
             "--timeout=60",
             "--tries=1",
-            "-U", USER_AGENT,
-            "-O", "-",
+            "-U",
+            USER_AGENT,
+            "-O",
+            "-",
             url,
         ])
         .output()
@@ -778,20 +823,28 @@ fn target_asset_name() -> Result<&'static str, Box<dyn std::error::Error>> {
 /// Get the latest version info from GitHub
 /// Returns (version, download_url) or None if check fails
 pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::error::Error>> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
 
     // Fetch JSON from GitHub API
     let body = native_http_get(&url)?;
-    let json_text = String::from_utf8(body)
-        .map_err(|_| "GitHub API returned invalid UTF-8")?;
+    let json_text = String::from_utf8(body).map_err(|_| "GitHub API returned invalid UTF-8")?;
 
     // Parse JSON manually to avoid complex deps
     // We look for "tag_name": "vX.Y.Z"
-    let version = json_text.split("\"tag_name\"")
+    let version = json_text
+        .split("\"tag_name\"")
         .nth(1)
         .and_then(|s| s.split(':').nth(1))
         .and_then(|s| s.split("\"").nth(1))
-        .ok_or_else(|| format!("Failed to parse tag_name from GitHub API response (body length: {} bytes)", json_text.len()))?
+        .ok_or_else(|| {
+            format!(
+                "Failed to parse tag_name from GitHub API response (body length: {} bytes)",
+                json_text.len()
+            )
+        })?
         .trim_start_matches('v')
         .to_string();
 
@@ -824,7 +877,8 @@ pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::err
         return Err(format!(
             "release {version} has no exact asset {target_suffix} for {}",
             target_id()?
-        ).into());
+        )
+        .into());
     }
 
     Ok((version, download_url, checksums_url))
@@ -854,8 +908,8 @@ fn download_verified_release(
         return Err("release has no nano-checksums.txt; refusing an unverified update".into());
     }
     let checksum_body = native_http_get(checksums_url)?;
-    let checksum_text = String::from_utf8(checksum_body)
-        .map_err(|_| "release checksum manifest is not UTF-8")?;
+    let checksum_text =
+        String::from_utf8(checksum_body).map_err(|_| "release checksum manifest is not UTF-8")?;
     let expected = published_checksum(&checksum_text, target_asset_name()?)
         .ok_or("release checksum manifest has no valid entry for this target")?;
     let body = native_http_get(download_url)?;
@@ -887,23 +941,28 @@ pub fn update_from_github(force: bool) -> Result<(), Box<dyn std::error::Error>>
     if !force && !is_newer_version(&latest_version, current_version) {
         println!("nano {} is already the latest version.", current_version);
         println!("\nUse --force to reinstall anyway.");
-        return Ok(())
+        return Ok(());
     }
 
     if force && !is_newer_version(&latest_version, current_version) {
         println!("Force reinstalling nano {} from GitHub...", latest_version);
     } else {
-        println!("New version available: {} -> {}", current_version, latest_version);
+        println!(
+            "New version available: {} -> {}",
+            current_version, latest_version
+        );
     }
     println!("Downloading from GitHub...");
 
     // Download to temp file
-    let temp_file = update_temp_path()
-        .ok_or("could not determine a private cache directory (is HOME set?)")?;
+    let temp_file =
+        update_temp_path().ok_or("could not determine a private cache directory (is HOME set?)")?;
 
     let (body, _expected_sha256) = download_verified_release(&download_url, &checksums_url)?;
     if !validate_artifact(&body, target_id()?) {
-        return Err("downloaded release asset has the wrong executable format or architecture".into());
+        return Err(
+            "downloaded release asset has the wrong executable format or architecture".into(),
+        );
     }
     write_bytes_atomic(&temp_file, &body)?;
 
@@ -1011,7 +1070,7 @@ pub fn check_and_download_update() -> UpdateStatus {
             } else {
                 UpdateStatus::None
             }
-        },
+        }
         _ => UpdateStatus::None,
     }
 }
@@ -1086,17 +1145,25 @@ mod tests {
             sha256: "ab".repeat(32),
         };
         assert_eq!(PendingManifest::decode(&manifest.encode()), Some(manifest));
-        assert!(PendingManifest::decode(
-            "version=1.2.3\ntarget=linux-x86_64\nasset=nano-linux-amd64\nsha256=bad\n"
-        ).is_none());
-        assert!(PendingManifest::decode(
-            &format!("{}unexpected=value\n", PendingManifest {
-                version: "1.2.3".to_string(),
-                target: "linux-x86_64".to_string(),
-                asset: "nano-linux-amd64".to_string(),
-                sha256: "ab".repeat(32),
-            }.encode())
-        ).is_none());
+        assert!(
+            PendingManifest::decode(
+                "version=1.2.3\ntarget=linux-x86_64\nasset=nano-linux-amd64\nsha256=bad\n"
+            )
+            .is_none()
+        );
+        assert!(
+            PendingManifest::decode(&format!(
+                "{}unexpected=value\n",
+                PendingManifest {
+                    version: "1.2.3".to_string(),
+                    target: "linux-x86_64".to_string(),
+                    asset: "nano-linux-amd64".to_string(),
+                    sha256: "ab".repeat(32),
+                }
+                .encode()
+            ))
+            .is_none()
+        );
     }
 
     #[test]
@@ -1149,12 +1216,12 @@ mod tests {
             "{digest}  nano-linux-amd64\n{}  nano-linux-arm64\n",
             "34".repeat(32)
         );
-        assert_eq!(
-            published_checksum(&text, "nano-linux-amd64"),
-            Some(digest)
-        );
+        assert_eq!(published_checksum(&text, "nano-linux-amd64"), Some(digest));
         assert_eq!(published_checksum(&text, "nano-amd64.exe"), None);
-        assert_eq!(published_checksum("not-a-digest  nano-linux-amd64", "nano-linux-amd64"), None);
+        assert_eq!(
+            published_checksum("not-a-digest  nano-linux-amd64", "nano-linux-amd64"),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -1164,10 +1231,8 @@ mod tests {
         command.arg("-c").arg("sleep 2 & printf 'nano-rs 1.2.3\\n'");
         let started = std::time::Instant::now();
 
-        let output = command_output_with_timeout(
-            command,
-            std::time::Duration::from_millis(500),
-        ).unwrap();
+        let output =
+            command_output_with_timeout(command, std::time::Duration::from_millis(500)).unwrap();
 
         assert!(output.status.success());
         assert_eq!(output.stdout, b"nano-rs 1.2.3\n");

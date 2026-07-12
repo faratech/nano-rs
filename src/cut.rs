@@ -1,13 +1,17 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/cut.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014 Mark Majeres
 //             Copyright (C) 2016, 2018-2020 Benno Schulenberg
 
-#[cfg(not(feature = "tiny"))]
-use std::cell::RefCell;
 use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
+#[cfg(not(feature = "tiny"))]
+use std::cell::RefCell;
 
 // ---------------------------------------------------------------------------
 // Forward stubs for functions not yet ported to Rust.
@@ -18,33 +22,45 @@ use crate::global::{state, state_mut, with_state, with_state_mut};
 /// Defined in text.c — records a new undo item.
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn add_undo(action: UndoType, msg: Option<&str>) { crate::text::add_undo(action, msg) }
+fn add_undo(action: UndoType, msg: Option<&str>) {
+    crate::text::add_undo(action, msg)
+}
 
 /// C: void update_undo(undo_type action)
 /// Defined in text.c — merges the current action into the last undo item.
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn update_undo(action: UndoType) { crate::text::update_undo(action) }
+fn update_undo(action: UndoType) {
+    crate::text::update_undo(action)
+}
 
 /// C: void set_modified(void)
 /// Defined in files.c — marks the buffer as modified (also refreshes titlebar).
 #[inline]
-fn set_modified() { crate::files::set_modified() }
+fn set_modified() {
+    crate::files::set_modified()
+}
 
 /// C: void wipe_statusbar(void)
 /// Defined in winio.c — clears the status-bar message.
 #[inline]
-fn wipe_statusbar() { crate::winio::wipe_statusbar() }
+fn wipe_statusbar() {
+    crate::winio::wipe_statusbar()
+}
 
 /// C: void statusbar(const char *msg)
 /// Defined in winio.c — shows a status-bar message (NOTICE level).
 #[inline]
-fn statusbar(msg: &str) { crate::winio::statusbar(msg) }
+fn statusbar(msg: &str) {
+    crate::winio::statusbar(msg)
+}
 
 /// C: void statusline(message_type type, const char *msg)
 /// Defined in winio.c — shows a typed status-bar message.
 #[inline]
-fn statusline(kind: MessageType, msg: &str) { crate::winio::statusline(kind, msg) }
+fn statusline(kind: MessageType, msg: &str) {
+    crate::winio::statusline(kind, msg)
+}
 
 /// C: void edit_redraw(linestruct *old_current, update_type manner)
 /// Defined in winio.c — redraws the edit window after cursor movement.
@@ -64,12 +80,16 @@ fn update_line(line: &LinePtr, index: usize) -> i32 {
 /// Defined in color.c — refreshes multiline-color state for one line.
 #[cfg(feature = "color")]
 #[inline]
-fn check_the_multis(line: &LinePtr) { crate::color::check_the_multis(line) }
+fn check_the_multis(line: &LinePtr) {
+    crate::color::check_the_multis(line)
+}
 
 /// C: void adjust_viewport(update_type manner)
 /// Defined in winio.c — adjusts the viewport after edittop changes.
 #[inline]
-fn adjust_viewport(manner: UpdateType) { crate::winio::adjust_viewport(manner) }
+fn adjust_viewport(manner: UpdateType) {
+    crate::winio::adjust_viewport(manner)
+}
 
 /// C: size_t extra_chunks_in(linestruct *line)
 /// Defined in winio.c — number of soft-wrap continuation chunks in a line.
@@ -102,30 +122,40 @@ fn less_than_a_screenful(was_lineno: isize, was_leftedge: usize) -> bool {
 /// Defined in color.c — pre-calculates multiline highlighting for the whole buffer.
 #[cfg(feature = "color")]
 #[inline]
-fn precalc_multicolorinfo() { crate::color::precalc_multicolorinfo() }
+fn precalc_multicolorinfo() {
+    crate::color::precalc_multicolorinfo()
+}
 
 /// C: void do_wrap(void)
 /// Defined in text.c — performs hard-wrapping on the current line.
 #[cfg(feature = "wrapping")]
 #[inline]
-fn do_wrap() { crate::text::do_wrap() }
+fn do_wrap() {
+    crate::text::do_wrap()
+}
 
 /// C: void do_left(void)
 /// Defined in move.c — moves the cursor one character to the left.
 #[inline]
-fn do_left() { crate::move_::do_left() }
+fn do_left() {
+    crate::move_::do_left()
+}
 
 /// C: void do_prev_word(void)
 /// Defined in move.c — moves the cursor to the start of the previous word.
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn do_prev_word() { crate::move_::do_prev_word() }
+fn do_prev_word() {
+    crate::move_::do_prev_word()
+}
 
 /// C: void do_next_word(bool after_ends)
 /// Defined in move.c — moves the cursor to the start of the next word (returns bool, discarded).
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn do_next_word(after_ends: bool) { let _ = crate::move_::do_next_word(after_ends); }
+fn do_next_word(after_ends: bool) {
+    let _ = crate::move_::do_next_word(after_ends);
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers — count characters in a LinePtr chain (replaces the
@@ -349,7 +379,9 @@ pub fn expunge(action: UndoType) {
             if let Some(ref mut of) = s.openfile {
                 of.totsize = of.totsize.saturating_sub(1);
                 if !of.current_undo.is_null() {
-                    unsafe { (*of.current_undo).newsize = of.totsize; }
+                    unsafe {
+                        (*of.current_undo).newsize = of.totsize;
+                    }
                 }
             }
         });
@@ -359,7 +391,6 @@ pub fn expunge(action: UndoType) {
                 of.totsize = of.totsize.saturating_sub(1);
             }
         });
-
     } else {
         // Cursor is at the end of the line — try to join with the next line.
 
@@ -369,10 +400,14 @@ pub fn expunge(action: UndoType) {
                 if let Some(ref cur) = of.current {
                     let next = cur.borrow().next.clone();
                     if let Some(ref nxt) = next {
-                        let is_filebot = of.filebot.as_ref()
+                        let is_filebot = of
+                            .filebot
+                            .as_ref()
                             .map(|fb| LinePtr::ptr_eq(fb, nxt))
                             .unwrap_or(false);
-                        let current_is_filebot = of.filebot.as_ref()
+                        let current_is_filebot = of
+                            .filebot
+                            .as_ref()
                             .map(|fb| LinePtr::ptr_eq(fb, cur))
                             .unwrap_or(false);
                         if current_is_filebot {
@@ -417,7 +452,7 @@ pub fn expunge(action: UndoType) {
                     }
                 }
             }
-            (None, String::new())
+            (None, LineData::empty())
         });
 
         if let Some(ref joining_node) = joining {
@@ -460,9 +495,7 @@ pub fn expunge(action: UndoType) {
             // (unlink_node also moves filebot back when joining was filebot.)
             unlink_node(joining_node);
 
-            let cur_clone = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
+            let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
             // Renumber and refresh.
             if let Some(ref cur) = cur_clone {
@@ -476,7 +509,9 @@ pub fn expunge(action: UndoType) {
                     of.totsize = of.totsize.saturating_sub(1);
                     #[cfg(not(feature = "tiny"))]
                     if !of.current_undo.is_null() {
-                        unsafe { (*of.current_undo).newsize = of.totsize; }
+                        unsafe {
+                            (*of.current_undo).newsize = of.totsize;
+                        }
                     }
                 }
             });
@@ -493,19 +528,13 @@ pub fn expunge(action: UndoType) {
     if !refresh_needed {
         #[cfg(feature = "color")]
         {
-            let cur_clone = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
+            let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
             if let Some(ref cur) = cur_clone {
                 check_the_multis(cur);
             }
         }
-        let cur_clone = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.current.clone())
-        });
-        let cur_x = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
-        });
+        let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
+        let cur_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
         if let Some(ref cur) = cur_clone {
             update_line(cur, cur_x);
         }
@@ -522,7 +551,8 @@ pub fn do_delete() {
     #[cfg(not(feature = "tiny"))]
     {
         let should_zap = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .map(|of| of.mark.is_some())
                 .unwrap_or(false)
                 && s.flag_isset(LET_THEM_ZAP)
@@ -567,7 +597,8 @@ pub fn do_backspace() {
     #[cfg(not(feature = "tiny"))]
     {
         let should_zap = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .map(|of| of.mark.is_some())
                 .unwrap_or(false)
                 && s.flag_isset(LET_THEM_ZAP)
@@ -578,9 +609,7 @@ pub fn do_backspace() {
         }
     }
 
-    let current_x = with_state(|s| {
-        s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
-    });
+    let current_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
 
     if current_x > 0 {
         // Move cursor one character to the left and delete.
@@ -602,11 +631,14 @@ pub fn do_backspace() {
     } else {
         // At column 0 — go to end of previous line and join.
         let is_filetop = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| {
-                let cur = of.current.as_ref()?;
-                let top = of.filetop.as_ref()?;
-                Some(LinePtr::ptr_eq(cur, top))
-            }).unwrap_or(true)
+            s.openfile
+                .as_ref()
+                .and_then(|of| {
+                    let cur = of.current.as_ref()?;
+                    let top = of.filetop.as_ref()?;
+                    Some(LinePtr::ptr_eq(cur, top))
+                })
+                .unwrap_or(true)
         });
         if !is_filetop {
             do_left();
@@ -705,7 +737,9 @@ fn chop_word(forward: bool) {
         do_prev_word();
         // If we moved to a different line, clamp to line edge.
         let moved_line = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.current.clone())
+            s.openfile
+                .as_ref()
+                .and_then(|of| of.current.clone())
                 .zip(was_current.clone())
                 .map(|(cur, was)| !LinePtr::ptr_eq(&cur, &was))
                 .unwrap_or(false)
@@ -721,7 +755,8 @@ fn chop_word(forward: bool) {
             } else {
                 // Move x to end of current (new) line.
                 let new_len = with_state(|s| {
-                    s.openfile.as_ref()
+                    s.openfile
+                        .as_ref()
                         .and_then(|of| of.current.as_ref())
                         .map(|cur| cur.borrow().data.len())
                         .unwrap_or(0)
@@ -737,11 +772,15 @@ fn chop_word(forward: bool) {
         let after_ends = state().flag_isset(AFTER_ENDS);
         do_next_word(after_ends);
         let (moved_line, was_char_at_x) = with_state(|s| {
-            let moved = s.openfile.as_ref().and_then(|of| of.current.clone())
+            let moved = s
+                .openfile
+                .as_ref()
+                .and_then(|of| of.current.clone())
                 .zip(was_current.clone())
                 .map(|(cur, was)| !LinePtr::ptr_eq(&cur, &was))
                 .unwrap_or(false);
-            let had_char = was_current.as_ref()
+            let had_char = was_current
+                .as_ref()
                 .map(|wc| {
                     let data = wc.borrow().data.clone();
                     data.as_bytes().get(was_x).copied().unwrap_or(0) != 0
@@ -750,7 +789,8 @@ fn chop_word(forward: bool) {
             (moved, had_char)
         });
         if moved_line && was_char_at_x {
-            let was_len = was_current.as_ref()
+            let was_len = was_current
+                .as_ref()
                 .map(|wc| wc.borrow().data.len())
                 .unwrap_or(0);
             with_state_mut(|s| {
@@ -806,13 +846,17 @@ fn chop_word(forward: bool) {
 #[cfg(not(feature = "tiny"))]
 pub fn chop_previous_word() {
     let at_start = with_state(|s| {
-        s.openfile.as_ref().map(|of| {
-            of.current.as_ref()
-                .zip(of.filetop.as_ref())
-                .map(|(cur, top)| LinePtr::ptr_eq(cur, top))
-                .unwrap_or(false)
-                && of.current_x == 0
-        }).unwrap_or(false)
+        s.openfile
+            .as_ref()
+            .map(|of| {
+                of.current
+                    .as_ref()
+                    .zip(of.filetop.as_ref())
+                    .map(|(cur, top)| LinePtr::ptr_eq(cur, top))
+                    .unwrap_or(false)
+                    && of.current_x == 0
+            })
+            .unwrap_or(false)
     });
 
     if at_start {
@@ -860,11 +904,15 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
 
     #[cfg(not(feature = "tiny"))]
     let (same_line, post_marked) = with_state(|s| {
-        let same = s.openfile.as_ref()
+        let same = s
+            .openfile
+            .as_ref()
             .and_then(|of| of.mark.as_ref())
             .map(|m| LinePtr::ptr_eq(m, &top))
             .unwrap_or(false);
-        let post = s.openfile.as_ref()
+        let post = s
+            .openfile
+            .as_ref()
             .and_then(|of| of.mark.as_ref())
             .map(|m| {
                 let m_no = m.borrow().lineno;
@@ -929,7 +977,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
         let node = make_new_node();
         {
             let top_data = top.borrow().data.clone();
-            let extracted = top_data[top_x..bot_x].to_string();
+            let extracted = LineData::from_internal(top_data[top_x..bot_x].to_vec());
             node.borrow_mut().data = extracted;
         }
         // Remove the range from top's data.
@@ -961,7 +1009,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
                 bp.borrow_mut().next = Some(last_node.clone());
             }
         }
-        last_node.borrow_mut().data = String::new();
+        last_node.borrow_mut().data = LineData::empty();
 
         // Reattach bot to top's predecessor.
         let top_prev_weak = top.borrow().prev.clone();
@@ -996,7 +1044,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
         // Case 3: excise across multiple lines, with top_x != 0 or bot_x != 0.
         let new_taken = make_new_node();
         {
-            let top_data = top.borrow().data[top_x..].to_string();
+            let top_data = LineData::from_internal(top.borrow().data[top_x..].to_vec());
             new_taken.borrow_mut().data = top_data;
         }
         // Hook taken between top->next.
@@ -1015,7 +1063,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
 
         // Truncate top->data to top_x and append bot->data[bot_x..].
         {
-            let bot_tail = bot.borrow().data[bot_x..].to_string();
+            let bot_tail = LineData::from_internal(bot.borrow().data[bot_x..].to_vec());
             let mut top_node = top.borrow_mut();
             top_node.data.truncate(top_x);
             top_node.data.push_str(&bot_tail);
@@ -1059,7 +1107,11 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
     } else {
         // Append: concatenate taken->data onto cutbottom->data, then chain the rest.
         let (_cutbottom_data, taken_data) = with_state(|s| {
-            let cb = s.cutbottom.as_ref().map(|cb| cb.borrow().data.clone()).unwrap_or_default();
+            let cb = s
+                .cutbottom
+                .as_ref()
+                .map(|cb| cb.borrow().data.clone())
+                .unwrap_or_default();
             let td = taken.borrow().data.clone();
             (cb, td)
         });
@@ -1092,9 +1144,8 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
         delete_node(taken);
 
         // Update cutbottom and fix back-link.
-        let new_cutbottom_next = with_state(|s| {
-            s.cutbottom.as_ref().and_then(|cb| cb.borrow().next.clone())
-        });
+        let new_cutbottom_next =
+            with_state(|s| s.cutbottom.as_ref().and_then(|cb| cb.borrow().next.clone()));
         if let Some(ref ncbn) = new_cutbottom_next {
             let cb = state().cutbottom.clone();
             if let Some(ref cb_node) = cb {
@@ -1124,12 +1175,8 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
 
         // Adjust mark.
         if post_marked || same_line {
-            let cur_clone = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
-            let cur_x = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
-            });
+            let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
+            let cur_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
                     of.mark = cur_clone;
@@ -1143,15 +1190,14 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
 
     // Update filebot if bot was the last line.
     let bot_was_filebot = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.filebot.as_ref())
             .map(|fb| LinePtr::ptr_eq(fb, &bot))
             .unwrap_or(false)
     });
     if bot_was_filebot {
-        let cur_clone = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.current.clone())
-        });
+        let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
                 of.filebot = cur_clone;
@@ -1160,9 +1206,7 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
     }
 
     // Renumber from current.
-    let cur_clone = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.current.clone())
-    });
+    let cur_clone = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
     if let Some(ref cur) = cur_clone {
         renumber_from(cur);
     }
@@ -1175,10 +1219,12 @@ pub fn extract_segment(top: LinePtr, top_x: usize, bot: LinePtr, bot_x: usize) {
 
     // Ensure the buffer ends with a newline if required.
     let needs_magic = with_state(|s| {
-        !s.flag_isset(NO_NEWLINES) && s.openfile.as_ref()
-            .and_then(|of| of.filebot.as_ref())
-            .map(|fb| !fb.borrow().data.is_empty())
-            .unwrap_or(false)
+        !s.flag_isset(NO_NEWLINES)
+            && s.openfile
+                .as_ref()
+                .and_then(|of| of.filebot.as_ref())
+                .map(|fb| !fb.borrow().data.is_empty())
+                .unwrap_or(false)
     });
     if needs_magic {
         crate::utils::new_magicline();
@@ -1196,7 +1242,7 @@ pub fn ingraft_buffer(topline: LinePtr) {
         let cur = of.current.as_ref().expect("current").clone();
         let data = cur.borrow().data.clone();
         let x = of.current_x;
-        let tail = data[x..].to_string();
+        let tail = LineData::from_internal(data[x..].to_vec());
         let len = data.len();
         (cur, len, x, tail)
     });
@@ -1210,7 +1256,8 @@ pub fn ingraft_buffer(topline: LinePtr) {
         }
         // mark is on the same line as cursor.
         Some(!crate::utils::mark_is_before_cursor())
-    }).unwrap_or(false);
+    })
+    .unwrap_or(false);
 
     // Find botline (last node of the topline chain).
     let mut botline = topline.clone();
@@ -1241,7 +1288,7 @@ pub fn ingraft_buffer(topline: LinePtr) {
         {
             let mut node = line.borrow_mut();
             // Make room: move data after xpos aside, then insert.
-            let original_tail = node.data[xpos..].to_string();
+            let original_tail = LineData::from_internal(node.data[xpos..].to_vec());
             node.data.truncate(xpos);
             node.data.push_str(&insert_text);
             if is_single {
@@ -1304,9 +1351,7 @@ pub fn ingraft_buffer(topline: LinePtr) {
         // Adjust mark when it follows the cursor on the same original line.
         #[cfg(not(feature = "tiny"))]
         if mark_follows {
-            let mark_x = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.mark_x).unwrap_or(0)
-            });
+            let mark_x = with_state(|s| s.openfile.as_ref().map(|of| of.mark_x).unwrap_or(0));
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
                     of.mark = Some(botline.clone());
@@ -1340,10 +1385,12 @@ pub fn ingraft_buffer(topline: LinePtr) {
 
     // Ensure buffer ends with a newline if required.
     let needs_magic = with_state(|s| {
-        !s.flag_isset(NO_NEWLINES) && s.openfile.as_ref()
-            .and_then(|of| of.filebot.as_ref())
-            .map(|fb| !fb.borrow().data.is_empty())
-            .unwrap_or(false)
+        !s.flag_isset(NO_NEWLINES)
+            && s.openfile
+                .as_ref()
+                .and_then(|of| of.filebot.as_ref())
+                .map(|fb| !fb.borrow().data.is_empty())
+                .unwrap_or(false)
     });
     if needs_magic {
         crate::utils::new_magicline();
@@ -1357,10 +1404,13 @@ pub fn ingraft_buffer(topline: LinePtr) {
 fn copy_from_buffer(somebuffer: &LinePtr) {
     #[cfg(feature = "color")]
     let threshold = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.edittop.as_ref())
+        s.openfile
+            .as_ref()
+            .and_then(|of| of.edittop.as_ref())
             .map(|et| et.borrow().lineno)
             .unwrap_or(0)
-            + state().editwinrows as isize - 1
+            + state().editwinrows as isize
+            - 1
     });
 
     let the_copy = copy_buffer(somebuffer);
@@ -1369,7 +1419,8 @@ fn copy_from_buffer(somebuffer: &LinePtr) {
     #[cfg(feature = "color")]
     {
         let cur_lineno = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|c| c.borrow().lineno)
                 .unwrap_or(0)
@@ -1419,14 +1470,15 @@ fn cut_marked_region() {
 // ---------------------------------------------------------------------------
 /* C: void do_snip(bool marked, bool until_eof, bool append) */
 pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
-    let _line = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.current.clone())
-    });
+    let _line = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     #[cfg(not(feature = "tiny"))]
     {
         let last_was_copy = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.last_action == UndoType::Copy).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| of.last_action == UndoType::Copy)
+                .unwrap_or(false)
         });
         with_state_mut(|s| {
             s.keep_cutbuffer &= !last_was_copy;
@@ -1457,7 +1509,10 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
             extract_segment(cur, cur_x, filebot, filebot_len);
         } else {
             let has_mark = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.mark.is_some())
+                    .unwrap_or(false)
             });
             if has_mark {
                 cut_marked_region();
@@ -1467,22 +1522,26 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
                     }
                 });
             } else if state().flag_isset(CUT_FROM_CURSOR) {
-                let (line_clone, cur_x, has_data, _next_is_filebot, is_filebot) =
-                    with_state(|s| {
-                        let of = s.openfile.as_ref().expect("openfile");
-                        let cur = of.current.as_ref().expect("current").clone();
-                        let x = of.current_x;
-                        let data = cur.borrow().data.clone();
-                        let has_data = x < data.len() && data.as_bytes()[x] != 0;
-                        let next_fb = cur.borrow().next.as_ref()
-                            .zip(of.filebot.as_ref())
-                            .map(|(n, fb)| LinePtr::ptr_eq(n, fb))
-                            .unwrap_or(false);
-                        let is_fb = of.filebot.as_ref()
-                            .map(|fb| LinePtr::ptr_eq(fb, &cur))
-                            .unwrap_or(false);
-                        (cur, x, has_data, next_fb, is_fb)
-                    });
+                let (line_clone, cur_x, has_data, _next_is_filebot, is_filebot) = with_state(|s| {
+                    let of = s.openfile.as_ref().expect("openfile");
+                    let cur = of.current.as_ref().expect("current").clone();
+                    let x = of.current_x;
+                    let data = cur.borrow().data.clone();
+                    let has_data = x < data.len() && data.as_bytes()[x] != 0;
+                    let next_fb = cur
+                        .borrow()
+                        .next
+                        .as_ref()
+                        .zip(of.filebot.as_ref())
+                        .map(|(n, fb)| LinePtr::ptr_eq(n, fb))
+                        .unwrap_or(false);
+                    let is_fb = of
+                        .filebot
+                        .as_ref()
+                        .map(|fb| LinePtr::ptr_eq(fb, &cur))
+                        .unwrap_or(false);
+                    (cur, x, has_data, next_fb, is_fb)
+                });
                 if has_data {
                     let data_len = line_clone.borrow().data.len();
                     extract_segment(line_clone.clone(), cur_x, line_clone, data_len);
@@ -1501,7 +1560,9 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
                 let (line_clone, is_filebot, data_len) = with_state(|s| {
                     let of = s.openfile.as_ref().expect("openfile");
                     let cur = of.current.as_ref().expect("current").clone();
-                    let is_fb = of.filebot.as_ref()
+                    let is_fb = of
+                        .filebot
+                        .as_ref()
                         .map(|fb| LinePtr::ptr_eq(fb, &cur))
                         .unwrap_or(false);
                     let len = cur.borrow().data.len();
@@ -1527,7 +1588,9 @@ pub fn do_snip(marked: bool, until_eof: bool, append: bool) {
         let (line_clone, is_filebot, data_len) = with_state(|s| {
             let of = s.openfile.as_ref().expect("openfile");
             let cur = of.current.as_ref().expect("current").clone();
-            let is_fb = of.filebot.as_ref()
+            let is_fb = of
+                .filebot
+                .as_ref()
                 .map(|fb| LinePtr::ptr_eq(fb, &cur))
                 .unwrap_or(false);
             let len = cur.borrow().data.len();
@@ -1567,7 +1630,10 @@ pub fn cut_text() {
     {
         let test_cliff = with_state(|s| {
             s.flag_isset(CUT_FROM_CURSOR)
-                && s.openfile.as_ref().map(|of| of.mark.is_none()).unwrap_or(true)
+                && s.openfile
+                    .as_ref()
+                    .map(|of| of.mark.is_none())
+                    .unwrap_or(true)
         });
         if !is_cuttable(test_cliff) {
             return;
@@ -1583,7 +1649,10 @@ pub fn cut_text() {
         }
 
         let has_mark = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| of.mark.is_some())
+                .unwrap_or(false)
         });
         do_snip(has_mark, false, false);
         update_undo(UndoType::Cut);
@@ -1656,7 +1725,10 @@ pub fn zap_text() {
 
     let test_cliff = with_state(|s| {
         s.flag_isset(CUT_FROM_CURSOR)
-            && s.openfile.as_ref().map(|of| of.mark.is_none()).unwrap_or(true)
+            && s.openfile
+                .as_ref()
+                .map(|of| of.mark.is_none())
+                .unwrap_or(true)
     });
     if !is_cuttable(test_cliff) {
         return;
@@ -1681,7 +1753,10 @@ pub fn zap_text() {
     set_cutbuffer_state(undo_cutbuffer);
 
     let has_mark = with_state(|s| {
-        s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
+        s.openfile
+            .as_ref()
+            .map(|of| of.mark.is_some())
+            .unwrap_or(false)
     });
     do_snip(has_mark, false, true);
 
@@ -1747,7 +1822,7 @@ fn copy_marked_region() {
     botline.borrow_mut().data.truncate(bot_x);
     {
         let mut top_node = topline.borrow_mut();
-        let moved = top_node.data[top_x..].to_string();
+        let moved = LineData::from_internal(top_node.data[top_x..].to_vec());
         top_node.data = moved;
     }
 
@@ -1806,7 +1881,10 @@ pub fn copy_text() {
     #[cfg(not(feature = "tiny"))]
     {
         let has_mark = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.mark.is_some()).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| of.mark.is_some())
+                .unwrap_or(false)
         });
         if has_mark {
             copy_marked_region();
@@ -1820,8 +1898,7 @@ pub fn copy_text() {
         let cur = of.current.as_ref().expect("current");
         let no_next = cur.borrow().next.is_none();
         let cutbuf_exists = s.cutbuffer.is_some();
-        no_next && at_eol
-            && (s.flag_isset(CUT_FROM_CURSOR) || of.current_x == 0 || cutbuf_exists)
+        no_next && at_eol && (s.flag_isset(CUT_FROM_CURSOR) || of.current_x == 0 || cutbuf_exists)
     });
     if nothing_to_copy {
         statusbar(&crate::tr!("Copied nothing"));
@@ -1832,7 +1909,7 @@ pub fn copy_text() {
     let addition = make_new_node();
     {
         let cur_data = was_current.borrow().data.clone();
-        addition.borrow_mut().data = cur_data[from_x..].to_string();
+        addition.borrow_mut().data = LineData::from_internal(cur_data[from_x..].to_vec());
     }
 
     let sans_newline = if state().flag_isset(CUT_FROM_CURSOR) {
@@ -1914,7 +1991,8 @@ pub fn copy_text() {
 
     if move_to_next {
         let next_line = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .and_then(|cur| cur.borrow().next.clone())
         });
@@ -1926,7 +2004,8 @@ pub fn copy_text() {
         });
     } else {
         let end_x = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|cur| cur.borrow().data.len())
                 .unwrap_or(0)
@@ -1962,20 +2041,20 @@ pub fn paste_text() {
     }
 
     #[cfg(any(feature = "wrapping", not(feature = "tiny")))]
-    let was_current = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.current.clone())
-    });
+    let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     #[cfg(not(feature = "tiny"))]
     let had_anchor = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|cur| cur.borrow().has_anchor)
             .unwrap_or(false)
     });
 
     let was_lineno = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|cur| cur.borrow().lineno)
             .unwrap_or(0)
@@ -1988,9 +2067,7 @@ pub fn paste_text() {
 
         if state().flag_isset(SOFTWRAP) {
             let col = crate::utils::xplustabs();
-            let line = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
+            let line = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
             if let Some(ref ln) = line {
                 was_leftedge = leftedge_for(col, ln);
             }
@@ -2006,7 +2083,8 @@ pub fn paste_text() {
         // Wipe anchors from the pasted region.
         if let Some(ref wc) = was_current {
             let _cur_next = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|cur| cur.borrow().next.clone())
             });
@@ -2014,7 +2092,8 @@ pub fn paste_text() {
             loop {
                 line.borrow_mut().has_anchor = false;
                 let at_end = with_state(|s| {
-                    s.openfile.as_ref()
+                    s.openfile
+                        .as_ref()
                         .and_then(|of| of.current.clone())
                         .map(|cur| LinePtr::ptr_eq(&line, &cur))
                         .unwrap_or(false)
@@ -2038,7 +2117,8 @@ pub fn paste_text() {
     #[cfg(feature = "wrapping")]
     {
         let same_line = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.clone())
                 .zip(was_current.as_ref().cloned())
                 .map(|(cur, wc)| LinePtr::ptr_eq(&cur, &wc))
@@ -2131,7 +2211,7 @@ mod tests {
         let mut nodes: Vec<LinePtr> = Vec::new();
         for text in lines {
             let node = make_new_node();
-            node.borrow_mut().data = (*text).to_owned();
+            node.borrow_mut().data = LineData::from_utf8(text);
             if let Some(prev) = nodes.last() {
                 node.borrow_mut().lineno = prev.borrow().lineno + 1;
                 node.borrow_mut().prev = Some(LinePtr::downgrade(prev));
@@ -2153,8 +2233,8 @@ mod tests {
         buffer.edittop = nodes.first().cloned();
         buffer.current = nodes.first().cloned();
         buffer.current_x = 0;
-        buffer.totsize = lines.iter().map(|l| l.chars().count()).sum::<usize>()
-            + lines.len().saturating_sub(1);
+        buffer.totsize =
+            lines.iter().map(|l| l.chars().count()).sum::<usize>() + lines.len().saturating_sub(1);
         // Avoid terminal title updates in unit tests.
         buffer.modified = true;
 
@@ -2178,30 +2258,47 @@ mod tests {
         let mut collected: Vec<String> = Vec::new();
         let mut current = head.clone();
         loop {
-            collected.push(current.borrow().data.clone());
+            collected.push(
+                current
+                    .borrow()
+                    .data
+                    .as_utf8()
+                    .expect("test fixture is valid UTF-8")
+                    .to_owned(),
+            );
             let next = current.borrow().next.clone();
             match next {
                 Some(next_node) => {
-                    let back = next_node.borrow().prev.clone()
+                    let back = next_node
+                        .borrow()
+                        .prev
+                        .clone()
                         .expect("every non-head node must keep a prev link")
                         .upgrade()
                         .expect("a prev link must stay alive while the chain does");
-                    assert!(LinePtr::ptr_eq(&back, &current),
-                        "a node's prev must point back at its predecessor");
+                    assert!(
+                        LinePtr::ptr_eq(&back, &current),
+                        "a node's prev must point back at its predecessor"
+                    );
                     current = next_node;
                 }
                 None => break,
             }
         }
-        assert!(LinePtr::ptr_eq(&current, tail),
-            "the declared tail must terminate the chain");
+        assert!(
+            LinePtr::ptr_eq(&current, tail),
+            "the declared tail must terminate the chain"
+        );
         assert_eq!(collected, expected);
     }
 
     /// Assert the cutbuffer holds exactly `expected` with intact head/tail links.
     fn assert_cutbuffer_is(expected: &[&str]) {
         let head = state().cutbuffer.clone().expect("a non-empty cutbuffer");
-        let tail = state().cutbottom.clone().expect("a cutbottom for the cutbuffer");
+        let tail = state()
+            .cutbottom
+            .clone()
+            .expect("a cutbottom for the cutbuffer");
         assert_chain_invariants(&head, &tail, expected);
     }
 
@@ -2210,14 +2307,21 @@ mod tests {
     fn assert_buffer_is(expected: &[&str]) {
         let (head, tail) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.filetop.clone().expect("a filetop"), of.filebot.clone().expect("a filebot"))
+            (
+                of.filetop.clone().expect("a filetop"),
+                of.filebot.clone().expect("a filebot"),
+            )
         });
         assert_chain_invariants(&head, &tail, expected);
 
         let mut line = Some(head);
         let mut lineno: isize = 1;
         while let Some(node) = line {
-            assert_eq!(node.borrow().lineno, lineno, "line numbers must be consecutive");
+            assert_eq!(
+                node.borrow().lineno,
+                lineno,
+                "line numbers must be consecutive"
+            );
             lineno += 1;
             line = node.borrow().next.clone();
         }
@@ -2235,7 +2339,10 @@ mod tests {
         let state_guard = state();
         let of = state_guard.openfile.as_ref().unwrap();
         assert_eq!(of.current_x, 0);
-        assert!(LinePtr::ptr_eq(of.current.as_ref().unwrap(), of.filetop.as_ref().unwrap()));
+        assert!(LinePtr::ptr_eq(
+            of.current.as_ref().unwrap(),
+            of.filetop.as_ref().unwrap()
+        ));
         assert_eq!(of.totsize, "beta\ngamma".chars().count());
         drop(state_guard);
         assert!(state().keep_cutbuffer, "line cuts must stay cumulative");
@@ -2270,8 +2377,10 @@ mod tests {
         });
         cut_text();
 
-        assert!(weak_head.upgrade().is_none(),
-            "replaced cutbuffer lines must be freed");
+        assert!(
+            weak_head.upgrade().is_none(),
+            "replaced cutbuffer lines must be freed"
+        );
         assert_buffer_is(&["gamma"]);
         assert_cutbuffer_is(&["beta", ""]);
     }
@@ -2287,7 +2396,10 @@ mod tests {
         assert_buffer_is(&["alpha", "beta"]);
         // Pasting grafts a copy; the cutbuffer itself must stay intact.
         assert_cutbuffer_is(&["alpha", ""]);
-        assert_eq!(state().openfile.as_ref().unwrap().totsize, "alpha\nbeta".chars().count());
+        assert_eq!(
+            state().openfile.as_ref().unwrap().totsize,
+            "alpha\nbeta".chars().count()
+        );
     }
 
     #[cfg(not(feature = "tiny"))]
@@ -2338,7 +2450,10 @@ mod tests {
         let of = state_guard.openfile.as_ref().unwrap();
         assert!(of.mark.is_none(), "cutting must consume the mark");
         assert_eq!(of.current_x, 2);
-        assert!(LinePtr::ptr_eq(of.current.as_ref().unwrap(), of.filetop.as_ref().unwrap()));
+        assert!(LinePtr::ptr_eq(
+            of.current.as_ref().unwrap(),
+            of.filetop.as_ref().unwrap()
+        ));
         drop(state_guard);
 
         paste_text();

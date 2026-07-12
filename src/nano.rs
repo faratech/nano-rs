@@ -1,18 +1,23 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/nano.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::io::Write as _;
 use std::process;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use crate::definitions::*;
-use crate::global::{state, state_mut, with_state, with_state_mut};
-#[allow(unused_imports)] // some of these are used only under feature gates
-use crate::{winio, files, search, history, rcfile, color, prompt};
-use crate::{ISSET, SET, UNSET};
 #[cfg(not(feature = "tiny"))]
 use crate::TOGGLE;
+use crate::definitions::*;
+use crate::global::{state, state_mut, with_state, with_state_mut};
+use crate::{ISSET, SET, UNSET};
+#[allow(unused_imports)] // some of these are used only under feature gates
+use crate::{color, files, history, prompt, rcfile, search, winio};
 
 // ---------------------------------------------------------------------------
 // Atomic signal flags (replacing volatile sig_atomic_t globals in C)
@@ -46,7 +51,7 @@ pub fn make_new_node(prev: Option<&LinePtr>) -> LinePtr {
     let prev_link = prev.map(LinePtr::downgrade);
     // Allocate after dropping any read guard so the slab may grow freely.
     state_mut().lines.alloc(LineNode {
-        data: String::new(),
+        data: LineData::empty(),
         lineno,
         next: None,
         prev: prev_link,
@@ -77,7 +82,9 @@ pub fn splice_node(afterthis: &LinePtr, newnode: LinePtr) {
     // (C compares pointers, so a cutbuffer node can never match.)
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
-            let is_filebot = of.filebot.as_ref()
+            let is_filebot = of
+                .filebot
+                .as_ref()
                 .map(|b| LinePtr::ptr_eq(b, afterthis))
                 .unwrap_or(false);
             if is_filebot {
@@ -95,18 +102,21 @@ pub fn delete_node(line: &LinePtr) {
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             // If the first line on the screen gets deleted, step one back.
-            let is_edittop = of.edittop.as_ref()
+            let is_edittop = of
+                .edittop
+                .as_ref()
                 .map(|e| LinePtr::ptr_eq(e, line))
                 .unwrap_or(false);
             if is_edittop {
-                let prev = line.borrow().prev.clone()
-                    .and_then(|w| w.upgrade());
+                let prev = line.borrow().prev.clone().and_then(|w| w.upgrade());
                 of.edittop = prev;
             }
             // ENABLE_WRAPPING: if this is spillage_line, clear it
             #[cfg(feature = "wrapping")]
             {
-                let is_spillage = of.spillage_line.as_ref()
+                let is_spillage = of
+                    .spillage_line
+                    .as_ref()
                     .map(|sl| LinePtr::ptr_eq(sl, line))
                     .unwrap_or(false);
                 if is_spillage {
@@ -125,7 +135,7 @@ pub fn delete_node(line: &LinePtr) {
 /* C: void unlink_node(linestruct *line) */
 pub fn unlink_node(line: &LinePtr) {
     let prev_weak = line.borrow().prev.clone();
-    let next_opt  = line.borrow().next.clone();
+    let next_opt = line.borrow().next.clone();
 
     if let Some(ref prev_w) = prev_weak {
         if let Some(ref prev) = prev_w.upgrade() {
@@ -139,7 +149,9 @@ pub fn unlink_node(line: &LinePtr) {
     // Update filebot when removing a node at the end of file.
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
-            let is_filebot = of.filebot.as_ref()
+            let is_filebot = of
+                .filebot
+                .as_ref()
                 .map(|b| LinePtr::ptr_eq(b, line))
                 .unwrap_or(false);
             if is_filebot {
@@ -217,7 +229,8 @@ pub fn renumber_from(start: &LinePtr) {
         if b.prev.is_none() {
             0isize
         } else {
-            b.prev.as_ref()
+            b.prev
+                .as_ref()
                 .and_then(|w| w.upgrade())
                 .map(|p| p.borrow().lineno)
                 .unwrap_or(0)
@@ -247,7 +260,10 @@ pub fn print_view_warning() {
 /* C: bool in_restricted_mode(void) */
 pub fn in_restricted_mode() -> bool {
     if ISSET!(RESTRICTED) {
-        winio::statusline(MessageType::Ahem, "This function is disabled in restricted mode");
+        winio::statusline(
+            MessageType::Ahem,
+            "This function is disabled in restricted mode",
+        );
         winio::beep();
         true
     } else {
@@ -265,12 +281,18 @@ pub fn suggest_ctrlT_ctrlZ() {
     {
         use crate::global::first_sc_for;
         // Check if ^T is bound to do_execute and ^Z is bound to do_suspend in MEXECUTE.
-        let exec_bound = first_sc_for(MMAIN, crate::global::do_execute as crate::definitions::FuncPtr)
-            .map(|(kc, _)| kc == 0x14)
-            .unwrap_or(false);
-        let susp_bound = first_sc_for(MEXECUTE, crate::nano::do_suspend as crate::definitions::FuncPtr)
-            .map(|(kc, _)| kc == 0x1A)
-            .unwrap_or(false);
+        let exec_bound = first_sc_for(
+            MMAIN,
+            crate::global::do_execute as crate::definitions::FuncPtr,
+        )
+        .map(|(kc, _)| kc == 0x14)
+        .unwrap_or(false);
+        let susp_bound = first_sc_for(
+            MEXECUTE,
+            crate::nano::do_suspend as crate::definitions::FuncPtr,
+        )
+        .map(|(kc, _)| kc == 0x1A)
+        .unwrap_or(false);
         if exec_bound && susp_bound {
             winio::statusline(MessageType::Ahem, "To suspend, type ^T^Z");
         }
@@ -327,11 +349,13 @@ pub fn finish() {
 pub fn close_and_go() {
     #[cfg(not(feature = "tiny"))]
     {
-        let (lock_filename, lock_path, lock_file) = with_state_mut(|s| {
-            match s.openfile.as_mut() {
-                Some(of) => (of.lock_filename.take(), of.lock_path.take(), of.lock_file.take()),
-                None => (None, None, None),
-            }
+        let (lock_filename, lock_path, lock_file) = with_state_mut(|s| match s.openfile.as_mut() {
+            Some(of) => (
+                of.lock_filename.take(),
+                of.lock_path.take(),
+                of.lock_file.take(),
+            ),
+            None => (None, None, None),
         });
         if let Some(ref lp) = lock_path {
             files::delete_lockfile(lp, lock_file.as_ref());
@@ -344,7 +368,8 @@ pub fn close_and_go() {
     #[cfg(feature = "histories")]
     {
         let has_filename = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .map(|of| !of.filename.is_empty())
                 .unwrap_or(false)
         });
@@ -395,9 +420,11 @@ pub fn do_exit() {
         let of = s.openfile.as_ref();
         let modified = of.map(|f| f.modified).unwrap_or(false);
         let view_mode = (s.flags[crate::global::flag_index(VIEW_MODE)]
-            & crate::global::flag_mask(VIEW_MODE)) != 0;
+            & crate::global::flag_mask(VIEW_MODE))
+            != 0;
         let save_on_exit = (s.flags[crate::global::flag_index(SAVE_ON_EXIT)]
-            & crate::global::flag_mask(SAVE_ON_EXIT)) != 0;
+            & crate::global::flag_mask(SAVE_ON_EXIT))
+            != 0;
         let has_filename = of.map(|f| !f.filename.is_empty()).unwrap_or(false);
         (modified, view_mode, save_on_exit, has_filename)
     });
@@ -424,17 +451,17 @@ pub fn do_exit() {
 // emergency_save — save the buffer to filename.save
 // ---------------------------------------------------------------------------
 /* C: void emergency_save(const char *filename) */
-pub fn emergency_save(filename: &str) {
-    let plainname = if filename.is_empty() {
-        format!("nano.{}", std::process::id())
+pub fn emergency_save(filename: &std::path::Path) {
+    let plainname = if filename.as_os_str().is_empty() {
+        std::path::PathBuf::from(format!("nano.{}", std::process::id()))
     } else {
-        filename.to_string()
+        filename.to_path_buf()
     };
 
-    let targetname = files::get_next_filename(&plainname, ".save");
+    let targetname = files::get_next_filename_path(&plainname, ".save");
 
-    if targetname.is_empty() {
-        eprintln!("\nToo many .save files");
+    if targetname.as_os_str().is_empty() {
+        let _ = writeln!(std::io::stderr().lock(), "\nToo many .save files");
     } else if files::write_file(
         &targetname,
         None,
@@ -442,7 +469,11 @@ pub fn emergency_save(filename: &str) {
         KindOfWritingType::Emergency,
         NONOTES,
     ) {
-        eprintln!("\nBuffer written to {}", targetname);
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "\nBuffer written to {}",
+            targetname.display(),
+        );
     }
 }
 
@@ -459,18 +490,36 @@ fn save_all_modified_buffers() {
     // emergency_save writes the *current* buffer, so rotate each one in.
     let total = {
         #[cfg(feature = "multibuffer")]
-        { with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some())) }
+        {
+            with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some()))
+        }
         #[cfg(not(feature = "multibuffer"))]
-        { usize::from(state().openfile.is_some()) }
+        {
+            usize::from(state().openfile.is_some())
+        }
     };
 
     for _ in 0..total {
         let (lock, lock_path, lock_file, save, filename) = with_state_mut(|s| {
             let save = s.openfile.as_ref().map(|f| f.modified).unwrap_or(false) && !restricted;
-            let filename = s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default();
+            let filename = s
+                .openfile
+                .as_ref()
+                .map(|f| {
+                    if f.filename_path.as_os_str().is_empty() {
+                        std::path::PathBuf::from(&f.filename)
+                    } else {
+                        f.filename_path.clone()
+                    }
+                })
+                .unwrap_or_default();
             #[cfg(not(feature = "tiny"))]
             let (lock, lock_path, lock_file) = match s.openfile.as_mut() {
-                Some(file) => (file.lock_filename.take(), file.lock_path.take(), file.lock_file.take()),
+                Some(file) => (
+                    file.lock_filename.take(),
+                    file.lock_path.take(),
+                    file.lock_file.take(),
+                ),
                 None => (None, None, None),
             };
             #[cfg(feature = "tiny")]
@@ -513,12 +562,14 @@ pub fn die(msg: &str) -> ! {
 
     restore_terminal();
 
+    // A dead PTY makes stderr writes fail with EIO.  Save first, and never let
+    // diagnostics panic before the emergency copy reaches disk.
+    save_all_modified_buffers();
+
     #[cfg(feature = "nanorc")]
     rcfile::display_rcfile_errors();
 
-    eprintln!("{}", msg);
-
-    save_all_modified_buffers();
+    let _ = writeln!(std::io::stderr().lock(), "{}", msg);
 
     process::exit(1);
 }
@@ -538,13 +589,13 @@ pub fn window_init() {
 #[cfg(feature = "mouse")]
 pub fn disable_mouse_support() {
     // crossterm: mouse support is toggled via event::DisableMouseCapture
-    use crossterm::{execute, event::DisableMouseCapture};
+    use crossterm::{event::DisableMouseCapture, execute};
     let _ = execute!(crate::winio::out(), DisableMouseCapture);
 }
 
 #[cfg(feature = "mouse")]
 pub fn enable_mouse_support() {
-    use crossterm::{execute, event::EnableMouseCapture};
+    use crossterm::{event::EnableMouseCapture, execute};
     let _ = execute!(crate::winio::out(), EnableMouseCapture);
 }
 
@@ -562,7 +613,7 @@ pub fn mouse_init() {
 // ---------------------------------------------------------------------------
 /* C: void print_opt(const char *shortflag, const char *longflag, const char *description) */
 pub fn print_opt(shortflag: &str, longflag: &str, description: &str) {
-    let firstwidth  = shortflag.len();
+    let firstwidth = shortflag.len();
     let secondwidth = longflag.len();
 
     print!(" {}", shortflag);
@@ -591,8 +642,11 @@ pub fn usage() {
         print_opt("-A", "--smarthome", "Enable smart home key");
         if !ISSET!(RESTRICTED) {
             print_opt("-B", "--backup", "Save backups of existing files");
-            print_opt("-C <dir>", "--backupdir=<dir>",
-                      "Directory for saving unique backup files");
+            print_opt(
+                "-C <dir>",
+                "--backupdir=<dir>",
+                "Directory for saving unique backup files",
+            );
         }
     }
     print_opt("-D", "--boldtext", "Use bold instead of reverse video text");
@@ -601,7 +655,11 @@ pub fn usage() {
     #[cfg(feature = "multibuffer")]
     {
         if !ISSET!(RESTRICTED) {
-            print_opt("-F", "--multibuffer", "Read a file into a new buffer by default");
+            print_opt(
+                "-F",
+                "--multibuffer",
+                "Read a file into a new buffer by default",
+            );
         }
     }
     #[cfg(not(feature = "tiny"))]
@@ -609,14 +667,26 @@ pub fn usage() {
     #[cfg(feature = "histories")]
     {
         if !ISSET!(RESTRICTED) {
-            print_opt("-H", "--historylog", "Save & reload old search/replace strings");
+            print_opt(
+                "-H",
+                "--historylog",
+                "Save & reload old search/replace strings",
+            );
         }
     }
     #[cfg(feature = "nanorc")]
     print_opt("-I", "--ignorercfiles", "Don't look at nanorc files");
     #[cfg(not(feature = "tiny"))]
-    print_opt("-J <number>", "--guidestripe=<number>", "Show a guiding bar at this column");
-    print_opt("-K", "--rawsequences", "Fix numeric keypad key confusion problem");
+    print_opt(
+        "-J <number>",
+        "--guidestripe=<number>",
+        "Show a guiding bar at this column",
+    );
+    print_opt(
+        "-K",
+        "--rawsequences",
+        "Fix numeric keypad key confusion problem",
+    );
     #[cfg(not(feature = "tiny"))]
     print_opt("-L", "--nonewlines", "Don't add an automatic newline");
     #[cfg(any(feature = "wrapping", feature = "justify"))]
@@ -624,77 +694,148 @@ pub fn usage() {
     #[cfg(not(feature = "tiny"))]
     {
         print_opt("-N", "--noconvert", "Don't convert files from DOS format");
-        print_opt("-O", "--bookstyle", "Leading whitespace means new paragraph");
+        print_opt(
+            "-O",
+            "--bookstyle",
+            "Leading whitespace means new paragraph",
+        );
     }
     #[cfg(feature = "histories")]
     {
         if !ISSET!(RESTRICTED) {
-            print_opt("-P", "--positionlog", "Save & restore position of the cursor");
+            print_opt(
+                "-P",
+                "--positionlog",
+                "Save & restore position of the cursor",
+            );
         }
     }
     #[cfg(feature = "justify")]
-    print_opt("-Q <regex>", "--quotestr=<regex>", "Regular expression to match quoting");
+    print_opt(
+        "-Q <regex>",
+        "--quotestr=<regex>",
+        "Regular expression to match quoting",
+    );
     if !ISSET!(RESTRICTED) {
         print_opt("-R", "--restricted", "Restrict access to the filesystem");
     }
     #[cfg(not(feature = "tiny"))]
     {
-        print_opt("-S", "--softwrap", "Display overlong lines on multiple rows");
-        print_opt("-T <number>", "--tabsize=<number>",
-                  "Make a tab this number of columns wide");
+        print_opt(
+            "-S",
+            "--softwrap",
+            "Display overlong lines on multiple rows",
+        );
+        print_opt(
+            "-T <number>",
+            "--tabsize=<number>",
+            "Make a tab this number of columns wide",
+        );
     }
     print_opt("-U", "--quickblank", "Wipe status bar upon next keystroke");
     print_opt("-V", "--version", "Print version information and exit");
     #[cfg(not(feature = "tiny"))]
     {
-        print_opt("-W", "--wordbounds", "Detect word boundaries more accurately");
-        print_opt("-X <string>", "--wordchars=<string>",
-                  "Which other characters are word parts");
+        print_opt(
+            "-W",
+            "--wordbounds",
+            "Detect word boundaries more accurately",
+        );
+        print_opt(
+            "-X <string>",
+            "--wordchars=<string>",
+            "Which other characters are word parts",
+        );
     }
     #[cfg(feature = "color")]
-    print_opt("-Y <name>", "--syntax=<name>", "Syntax definition to use for coloring");
+    print_opt(
+        "-Y <name>",
+        "--syntax=<name>",
+        "Syntax definition to use for coloring",
+    );
     #[cfg(not(feature = "tiny"))]
     {
         print_opt("-Z", "--zap", "Let Bsp and Del erase a marked region");
-        print_opt("-a", "--atblanks", "When soft-wrapping, do it at whitespace");
+        print_opt(
+            "-a",
+            "--atblanks",
+            "When soft-wrapping, do it at whitespace",
+        );
     }
     #[cfg(feature = "wrapping")]
-    print_opt("-b", "--breaklonglines", "Automatically hard-wrap overlong lines");
+    print_opt(
+        "-b",
+        "--breaklonglines",
+        "Automatically hard-wrap overlong lines",
+    );
     print_opt("-c", "--constantshow", "Constantly show cursor position");
-    print_opt("-d", "--rebinddelete", "Fix Backspace/Delete confusion problem");
+    print_opt(
+        "-d",
+        "--rebinddelete",
+        "Fix Backspace/Delete confusion problem",
+    );
     #[cfg(not(feature = "tiny"))]
-    print_opt("-e", "--emptyline", "Keep the line below the title bar empty");
+    print_opt(
+        "-e",
+        "--emptyline",
+        "Keep the line below the title bar empty",
+    );
     #[cfg(feature = "nanorc")]
-    print_opt("-f <file>", "--rcfile=<file>",
-              "Use only this file for configuring nano");
+    print_opt(
+        "-f <file>",
+        "--rcfile=<file>",
+        "Use only this file for configuring nano",
+    );
     #[cfg(any(feature = "browser", feature = "help"))]
-    print_opt("-g", "--showcursor", "Show cursor in file browser & help text");
+    print_opt(
+        "-g",
+        "--showcursor",
+        "Show cursor in file browser & help text",
+    );
     print_opt("-h", "--help", "Show this help text and exit");
     #[cfg(not(feature = "tiny"))]
     {
         print_opt("-i", "--autoindent", "Automatically indent new lines");
-        print_opt("-j", "--jumpyscrolling", "Scroll per half-screen, not per line");
+        print_opt(
+            "-j",
+            "--jumpyscrolling",
+            "Scroll per half-screen, not per line",
+        );
         print_opt("-k", "--cutfromcursor", "Cut from cursor to end of line");
     }
     #[cfg(feature = "linenumbers")]
-    print_opt("-l", "--linenumbers", "Show line numbers in front of the text");
+    print_opt(
+        "-l",
+        "--linenumbers",
+        "Show line numbers in front of the text",
+    );
     #[cfg(feature = "mouse")]
     print_opt("-m", "--mouse", "Enable the use of the mouse");
     #[cfg(not(feature = "tiny"))]
     print_opt("-n", "--noread", "Do not read the file (only write it)");
     #[cfg(feature = "operatingdir")]
-    print_opt("-o <dir>", "--operatingdir=<dir>", "Set operating directory");
+    print_opt(
+        "-o <dir>",
+        "--operatingdir=<dir>",
+        "Set operating directory",
+    );
     print_opt("-p", "--preserve", "Preserve XON (^Q) and XOFF (^S) keys");
     #[cfg(not(feature = "tiny"))]
     print_opt("-q", "--indicator", "Show a position+portion indicator");
     #[cfg(any(feature = "wrapping", feature = "justify"))]
-    print_opt("-r <number>", "--fill=<number>",
-              "Set width for hard-wrap and justify");
+    print_opt(
+        "-r <number>",
+        "--fill=<number>",
+        "Set width for hard-wrap and justify",
+    );
     #[cfg(feature = "speller")]
     {
         if !ISSET!(RESTRICTED) {
-            print_opt("-s <program>", "--speller=<program>",
-                      "Use this alternative spell checker");
+            print_opt(
+                "-s <program>",
+                "--speller=<program>",
+                "Use this alternative spell checker",
+            );
         }
     }
     print_opt("-t", "--saveonexit", "Save changes on exit, don't prompt");
@@ -707,21 +848,41 @@ pub fn usage() {
     #[cfg(not(feature = "tiny"))]
     print_opt("-y", "--afterends", "Make Ctrl+Right stop at word ends");
     #[cfg(feature = "color")]
-    print_opt("-z", "--listsyntaxes", "List the names of available syntaxes");
+    print_opt(
+        "-z",
+        "--listsyntaxes",
+        "List the names of available syntaxes",
+    );
     #[cfg(feature = "libmagic")]
     print_opt("-!", "--magic", "Also try magic to determine syntax");
     #[cfg(not(feature = "tiny"))]
     {
-        print_opt("-@", "--colonparsing", "Accept 'filename:linenumber' notation");
+        print_opt(
+            "-@",
+            "--colonparsing",
+            "Accept 'filename:linenumber' notation",
+        );
         print_opt("-%", "--stateflags", "Show some states on the title bar");
         print_opt("-_", "--minibar", "Show a feedback bar at the bottom");
         print_opt("-0", "--zero", "Hide all bars, use whole terminal");
-        print_opt("-1", "--solosidescroll", "Scroll only the current line sideways");
+        print_opt(
+            "-1",
+            "--solosidescroll",
+            "Scroll only the current line sideways",
+        );
     }
     print_opt("-/", "--modernbindings", "Use better-known key bindings");
     print_opt("", "--install", "Install nano to a directory on your PATH");
-    print_opt("", "--update", "Download and install the latest release from GitHub");
-    print_opt("", "--force", "With --install/--update: act even if up to date");
+    print_opt(
+        "",
+        "--update",
+        "Download and install the latest release from GitHub",
+    );
+    print_opt(
+        "",
+        "--force",
+        "With --install/--update: act even if up to date",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +891,10 @@ pub fn usage() {
 /* C: void version(void) */
 pub fn version() {
     println!(" GNU nano, version {}", GNU_NANO_VERSION);
-    println!(" nano-rs {} (Rust port) \u{2014} https://github.com/faratech/nano-rs", env!("CARGO_PKG_VERSION"));
+    println!(
+        " nano-rs {} (Rust port) \u{2014} https://github.com/faratech/nano-rs",
+        env!("CARGO_PKG_VERSION")
+    );
     #[cfg(not(feature = "tiny"))]
     println!(" (C) 2026 the Free Software Foundation and various contributors");
     print!(" Compiled options:");
@@ -738,46 +902,82 @@ pub fn version() {
     #[cfg(feature = "tiny")]
     {
         print!(" --enable-tiny");
-        #[cfg(feature = "browser")]   print!(" --enable-browser");
-        #[cfg(feature = "color")]     print!(" --enable-color");
-        #[cfg(feature = "formatter")] print!(" --enable-formatter");
-        #[cfg(feature = "help")]      print!(" --enable-help");
-        #[cfg(feature = "histories")] print!(" --enable-histories");
-        #[cfg(feature = "justify")]   print!(" --enable-justify");
-        #[cfg(feature = "libmagic")]  print!(" --enable-libmagic");
-        #[cfg(feature = "linenumbers")] print!(" --enable-linenumbers");
-        #[cfg(feature = "linter")]    print!(" --enable-linter");
-        #[cfg(feature = "mouse")]     print!(" --enable-mouse");
-        #[cfg(feature = "nanorc")]    print!(" --enable-nanorc");
-        #[cfg(feature = "multibuffer")] print!(" --enable-multibuffer");
-        #[cfg(feature = "operatingdir")] print!(" --enable-operatingdir");
-        #[cfg(feature = "speller")]   print!(" --enable-speller");
-        #[cfg(feature = "tabcomp")]   print!(" --enable-tabcomp");
-        #[cfg(feature = "wrapping")]  print!(" --enable-wrapping");
+        #[cfg(feature = "browser")]
+        print!(" --enable-browser");
+        #[cfg(feature = "color")]
+        print!(" --enable-color");
+        #[cfg(feature = "formatter")]
+        print!(" --enable-formatter");
+        #[cfg(feature = "help")]
+        print!(" --enable-help");
+        #[cfg(feature = "histories")]
+        print!(" --enable-histories");
+        #[cfg(feature = "justify")]
+        print!(" --enable-justify");
+        #[cfg(feature = "libmagic")]
+        print!(" --enable-libmagic");
+        #[cfg(feature = "linenumbers")]
+        print!(" --enable-linenumbers");
+        #[cfg(feature = "linter")]
+        print!(" --enable-linter");
+        #[cfg(feature = "mouse")]
+        print!(" --enable-mouse");
+        #[cfg(feature = "nanorc")]
+        print!(" --enable-nanorc");
+        #[cfg(feature = "multibuffer")]
+        print!(" --enable-multibuffer");
+        #[cfg(feature = "operatingdir")]
+        print!(" --enable-operatingdir");
+        #[cfg(feature = "speller")]
+        print!(" --enable-speller");
+        #[cfg(feature = "tabcomp")]
+        print!(" --enable-tabcomp");
+        #[cfg(feature = "wrapping")]
+        print!(" --enable-wrapping");
     }
     #[cfg(not(feature = "tiny"))]
     {
-        #[cfg(not(feature = "browser"))]    print!(" --disable-browser");
-        #[cfg(not(feature = "color"))]      print!(" --disable-color");
-        #[cfg(not(feature = "comment"))]    print!(" --disable-comment");
-        #[cfg(not(feature = "formatter"))]  print!(" --disable-formatter");
-        #[cfg(not(feature = "help"))]       print!(" --disable-help");
-        #[cfg(not(feature = "histories"))]  print!(" --disable-histories");
-        #[cfg(not(feature = "justify"))]    print!(" --disable-justify");
-        #[cfg(not(feature = "libmagic"))]   print!(" --disable-libmagic");
-        #[cfg(not(feature = "linenumbers"))] print!(" --disable-linenumbers");
-        #[cfg(not(feature = "linter"))]     print!(" --disable-linter");
-        #[cfg(not(feature = "mouse"))]      print!(" --disable-mouse");
-        #[cfg(not(feature = "multibuffer"))] print!(" --disable-multibuffer");
-        #[cfg(not(feature = "nanorc"))]     print!(" --disable-nanorc");
-        #[cfg(not(feature = "operatingdir"))] print!(" --disable-operatingdir");
-        #[cfg(not(feature = "speller"))]    print!(" --disable-speller");
-        #[cfg(not(feature = "tabcomp"))]    print!(" --disable-tabcomp");
-        #[cfg(not(feature = "wordcomp"))]   print!(" --disable-wordcomp");
-        #[cfg(not(feature = "wrapping"))]   print!(" --disable-wrapping");
+        #[cfg(not(feature = "browser"))]
+        print!(" --disable-browser");
+        #[cfg(not(feature = "color"))]
+        print!(" --disable-color");
+        #[cfg(not(feature = "comment"))]
+        print!(" --disable-comment");
+        #[cfg(not(feature = "formatter"))]
+        print!(" --disable-formatter");
+        #[cfg(not(feature = "help"))]
+        print!(" --disable-help");
+        #[cfg(not(feature = "histories"))]
+        print!(" --disable-histories");
+        #[cfg(not(feature = "justify"))]
+        print!(" --disable-justify");
+        #[cfg(not(feature = "libmagic"))]
+        print!(" --disable-libmagic");
+        #[cfg(not(feature = "linenumbers"))]
+        print!(" --disable-linenumbers");
+        #[cfg(not(feature = "linter"))]
+        print!(" --disable-linter");
+        #[cfg(not(feature = "mouse"))]
+        print!(" --disable-mouse");
+        #[cfg(not(feature = "multibuffer"))]
+        print!(" --disable-multibuffer");
+        #[cfg(not(feature = "nanorc"))]
+        print!(" --disable-nanorc");
+        #[cfg(not(feature = "operatingdir"))]
+        print!(" --disable-operatingdir");
+        #[cfg(not(feature = "speller"))]
+        print!(" --disable-speller");
+        #[cfg(not(feature = "tabcomp"))]
+        print!(" --disable-tabcomp");
+        #[cfg(not(feature = "wordcomp"))]
+        print!(" --disable-wordcomp");
+        #[cfg(not(feature = "wrapping"))]
+        print!(" --disable-wrapping");
     }
-    #[cfg(not(feature = "utf8"))]  print!(" --disable-utf8");
-    #[cfg(feature = "utf8")]       print!(" --enable-utf8");
+    #[cfg(not(feature = "utf8"))]
+    print!(" --disable-utf8");
+    #[cfg(feature = "utf8")]
+    print!(" --enable-utf8");
     println!();
 }
 
@@ -869,7 +1069,7 @@ pub fn reconnect_and_store_state() {
     {
         use std::os::windows::io::IntoRawHandle;
         use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::Console::{SetStdHandle, STD_INPUT_HANDLE};
+        use windows::Win32::System::Console::{STD_INPUT_HANDLE, SetStdHandle};
 
         let console = match std::fs::File::open("CONIN$") {
             Ok(file) => file,
@@ -920,9 +1120,7 @@ fn scoop_stdin_from<R: std::io::Read>(reader: R, stdin_is_terminal: bool) -> boo
     color::find_and_prime_applicable_syntax();
 
     if !ISSET!(VIEW_MODE) {
-        let totsize = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.totsize).unwrap_or(0)
-        });
+        let totsize = with_state(|s| s.openfile.as_ref().map(|of| of.totsize).unwrap_or(0));
         if totsize > 0 {
             files::set_modified();
         }
@@ -1060,7 +1258,11 @@ pub fn block_sigwinch(blockit: bool) {
         libc::sigemptyset(&mut winch);
         libc::sigaddset(&mut winch, libc::SIGWINCH);
         libc::sigprocmask(
-            if blockit { libc::SIG_BLOCK } else { libc::SIG_UNBLOCK },
+            if blockit {
+                libc::SIG_BLOCK
+            } else {
+                libc::SIG_UNBLOCK
+            },
             &winch,
             std::ptr::null_mut(),
         );
@@ -1093,26 +1295,44 @@ pub fn set_up_signal_handlers() {
     #[cfg(unix)]
     unsafe {
         // Trap SIGINT and SIGQUIT (ignore them).
-        libc::signal(libc::SIGINT,  libc::SIG_IGN);
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
         // Don't die when a pipe we write to (e.g. the spell checker) closes.
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         // SIGHUP and SIGTERM.
-        libc::signal(libc::SIGHUP,  handle_hupterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_hupterm as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGHUP,
+            handle_hupterm as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_hupterm as *const () as libc::sighandler_t,
+        );
         // SIGTSTP / suspend.
         #[cfg(not(feature = "tiny"))]
         {
-            libc::signal(libc::SIGTSTP, request_suspend as *const () as libc::sighandler_t);
+            libc::signal(
+                libc::SIGTSTP,
+                request_suspend as *const () as libc::sighandler_t,
+            );
         }
         // SIGCONT.
-        libc::signal(libc::SIGCONT, continue_nano as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGCONT,
+            continue_nano as *const () as libc::sighandler_t,
+        );
         // SIGSEGV / SIGABRT crash handler (not debug, not tiny).
         #[cfg(all(not(feature = "tiny"), not(debug_assertions)))]
         {
             if std::env::var("NANO_NOCATCH").is_err() {
-                libc::signal(libc::SIGSEGV, handle_crash as *const () as libc::sighandler_t);
-                libc::signal(libc::SIGABRT, handle_crash as *const () as libc::sighandler_t);
+                libc::signal(
+                    libc::SIGSEGV,
+                    handle_crash as *const () as libc::sighandler_t,
+                );
+                libc::signal(
+                    libc::SIGABRT,
+                    handle_crash as *const () as libc::sighandler_t,
+                );
             }
         }
     }
@@ -1222,7 +1442,9 @@ pub fn confirm_margin() {
     // subtracted it twice) and, at the first call, read the 12345 margin sentinel.
     let cols = winio::terminal_size().0 as i32;
     let needed_margin = with_state(|s| {
-        let last_lineno = s.openfile.as_ref()
+        let last_lineno = s
+            .openfile
+            .as_ref()
             .and_then(|of| of.filebot.as_ref())
             .map(|bot| bot.borrow().lineno)
             .unwrap_or(1);
@@ -1292,8 +1514,10 @@ pub fn unbound_key(code: i32) {
             #[cfg(not(feature = "tiny"))]
             {
                 if code < 0x20 {
-                    winio::statusline(MessageType::Ahem,
-                        &format!("Unbindable key: M-^{}", (code + 0x40) as u8 as char));
+                    winio::statusline(
+                        MessageType::Ahem,
+                        &format!("Unbindable key: M-^{}", (code + 0x40) as u8 as char),
+                    );
                     winio::set_blankdelay_to_one();
                     return;
                 }
@@ -1302,8 +1526,10 @@ pub fn unbound_key(code: i32) {
             {
                 let shifted = state().shifted_metas;
                 if shifted && code >= b'A' as i32 && code <= b'Z' as i32 {
-                    winio::statusline(MessageType::Ahem,
-                        &format!("Unbound key: Sh-M-{}", code as u8 as char));
+                    winio::statusline(
+                        MessageType::Ahem,
+                        &format!("Unbound key: Sh-M-{}", code as u8 as char),
+                    );
                     winio::set_blankdelay_to_one();
                     return;
                 }
@@ -1313,13 +1539,17 @@ pub fn unbound_key(code: i32) {
         } else if code == ESC_CODE as i32 {
             winio::statusline(MessageType::Ahem, "Unbindable key: ^[");
         } else if code < 0x20 {
-            winio::statusline(MessageType::Ahem,
-                &format!("Unbound key: ^{}", (code + 0x40) as u8 as char));
+            winio::statusline(
+                MessageType::Ahem,
+                &format!("Unbound key: ^{}", (code + 0x40) as u8 as char),
+            );
         } else {
             #[cfg(any(feature = "browser", feature = "help"))]
             {
-                winio::statusline(MessageType::Ahem,
-                    &format!("Unbound key: {}", code as u8 as char));
+                winio::statusline(
+                    MessageType::Ahem,
+                    &format!("Unbound key: {}", code as u8 as char),
+                );
             }
         }
     }
@@ -1341,9 +1571,7 @@ pub fn process_click() -> i32 {
         return retval;
     }
 
-    let (editwin_rows, editwin_y) = with_state(|s| {
-        (s.editwinrows as i32, s.midwin.y as i32)
-    });
+    let (editwin_rows, editwin_y) = with_state(|s| (s.editwinrows as i32, s.midwin.y as i32));
 
     // If the click was in the edit window, put the cursor in that spot.
     if click_row >= editwin_y && click_row < editwin_y + editwin_rows {
@@ -1393,7 +1621,10 @@ pub fn process_click() -> i32 {
             // Clamp the click column to >= 0 before the usize cast: clicking in
             // the line-number margin yields a negative column, which would wrap to
             // a huge usize and panic in actual_last_column.
-            crate::utils::actual_x(&b.data, winio::actual_last_column(leftedge, click_col.max(0) as usize))
+            crate::utils::actual_x(
+                &b.data,
+                winio::actual_last_column(leftedge, click_col.max(0) as usize),
+            )
         };
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
@@ -1483,9 +1714,7 @@ pub fn changes_something(f: FuncPtr) -> bool {
         return true;
     }
     #[cfg(feature = "justify")]
-    if f == crate::global::do_justify as FuncPtr
-        || f == crate::global::do_full_justify as FuncPtr
-    {
+    if f == crate::global::do_justify as FuncPtr || f == crate::global::do_full_justify as FuncPtr {
         return true;
     }
     #[cfg(feature = "comment")]
@@ -1518,7 +1747,7 @@ pub fn suck_up_input_and_paste_it() {
 
     // Create a new line node as start of paste buffer.
     let head = state_mut().lines.alloc(LineNode {
-        data: String::new(),
+        data: LineData::empty(),
         lineno: 1,
         next: None,
         prev: None,
@@ -1539,8 +1768,7 @@ pub fn suck_up_input_and_paste_it() {
         if pending.is_empty() {
             return;
         }
-        let text = String::from_utf8_lossy(pending).into_owned();
-        line.borrow_mut().data.push_str(&text);
+        line.borrow_mut().data.extend_external(pending);
         pending.clear();
     }
 
@@ -1555,7 +1783,7 @@ pub fn suck_up_input_and_paste_it() {
             let lineno = line.borrow().lineno + 1;
             let prev_link = Some(LinePtr::downgrade(&line));
             let new_line = state_mut().lines.alloc(LineNode {
-                data: String::new(),
+                data: LineData::empty(),
                 lineno,
                 next: None,
                 prev: prev_link,
@@ -1597,7 +1825,10 @@ pub fn suck_up_input_and_paste_it() {
 /* C: void inject(char *burst, size_t count) */
 pub fn inject(burst: &[u8]) {
     // Encode embedded NUL bytes as 0x0A.
-    let data: Vec<u8> = burst.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
+    let data: Vec<u8> = burst
+        .iter()
+        .map(|&b| if b == 0 { b'\n' } else { b })
+        .collect();
     let count = data.len();
 
     let (_datalen, lineno, current_x) = with_state(|s| {
@@ -1649,14 +1880,9 @@ pub fn inject(burst: &[u8]) {
         let of = s.openfile.as_mut().expect("an open buffer");
         let cur = of.current.as_ref().expect("a current line").clone();
         let mut b = cur.borrow_mut();
-        let insert_str = String::from_utf8_lossy(&data).into_owned();
-        // Clamp current_x to a valid UTF-8 char boundary so insert_str never panics.
-        let safe_x = {
-            let pos = of.current_x.min(b.data.len());
-            (0..=pos).rev().find(|&i| b.data.is_char_boundary(i)).unwrap_or(0)
-        };
+        let safe_x = of.current_x.min(b.data.len());
         of.current_x = safe_x;
-        b.data.insert_str(safe_x, &insert_str);
+        b.data.insert_bytes(safe_x, &data);
         // Update mark position if needed.
         #[cfg(not(feature = "tiny"))]
         {
@@ -1688,7 +1914,7 @@ pub fn inject(burst: &[u8]) {
     }
 
     // totsize counts CHARACTERS, not bytes (C: openfile->totsize += mbstrlen(burst)).
-    let char_count = String::from_utf8_lossy(&data).chars().count();
+    let char_count = crate::chars::mbstrlen(&data);
     with_state_mut(|s| {
         let of = s.openfile.as_mut().expect("an open buffer");
         of.current_x += count;
@@ -1784,7 +2010,11 @@ pub fn regenerate_screen() {
 
     let (cols, lines) = winio::terminal_size();
     with_state_mut(|s| {
-        s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 { 1 } else { 0 };
+        s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 {
+            1
+        } else {
+            0
+        };
         let needed = lines as usize;
         s.bardata.resize(needed, 0);
         s.editwincols = cols as i32 - s.margin - s.sidebar;
@@ -1833,7 +2063,13 @@ pub fn toggle_this(flag: u32) {
             // editwinrows + midwin.y, which omits the footer rows.
             let lines = winio::terminal_size().1 as i32;
             let (zero, minibar) = with_state(|s| (s.flag_isset(ZERO), s.flag_isset(MINIBAR)));
-            let minimum = if zero { 3 } else if minibar { 4 } else { 5 };
+            let minimum = if zero {
+                3
+            } else if minibar {
+                4
+            } else {
+                5
+            };
             if lines < minimum {
                 winio::statusline(MessageType::Ahem, "Too tiny");
                 TOGGLE!(flag);
@@ -1878,7 +2114,8 @@ pub fn toggle_this(flag: u32) {
         #[cfg(feature = "color")]
         f if f == TABS_TO_SPACES => {
             let has_tabstring = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.syntax)
                     .map(|sx| unsafe { (*sx).tabstring.is_some() })
                     .unwrap_or(false)
@@ -1898,7 +2135,11 @@ pub fn toggle_this(flag: u32) {
 
     if flag == AUTOINDENT || flag == BREAK_LONG_LINES || flag == SOFTWRAP {
         let (minibar, zero, stateflags) = with_state(|s| {
-            (s.flag_isset(MINIBAR), s.flag_isset(ZERO), s.flag_isset(STATEFLAGS))
+            (
+                s.flag_isset(MINIBAR),
+                s.flag_isset(ZERO),
+                s.flag_isset(STATEFLAGS),
+            )
         });
         if minibar && !zero && stateflags {
             return;
@@ -1969,9 +2210,7 @@ pub fn process_a_keystroke() {
     }
 
     #[cfg(not(feature = "tiny"))]
-    let was_mark = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.mark.clone())
-    });
+    let was_mark = with_state(|s| s.openfile.as_ref().and_then(|of| of.mark.clone()));
 
     // Look up shortcut.
     let function: Option<FuncPtr> = crate::global::get_shortcut(input);
@@ -1980,26 +2219,32 @@ pub fn process_a_keystroke() {
     #[cfg(not(feature = "tiny"))]
     let shortcut_toggle: i32 = if let Some(f) = function {
         with_state(|s| {
-            s.sclist.iter()
-                .find(|sc| sc.func == Some(f)
-                    && (sc.menus as u32 & s.currmenu) != 0
-                    && sc.keycode == input)
+            s.sclist
+                .iter()
+                .find(|sc| {
+                    sc.func == Some(f) && (sc.menus as u32 & s.currmenu) != 0 && sc.keycode == input
+                })
                 .map(|sc| sc.toggle)
                 .unwrap_or(0)
         })
-    } else { 0 };
+    } else {
+        0
+    };
 
     // Look up expansion for string-bind shortcuts (nanorc only).
     #[cfg(feature = "nanorc")]
     let shortcut_expansion: Option<String> = if let Some(f) = function {
         with_state(|s| {
-            s.sclist.iter()
-                .find(|sc| sc.func == Some(f)
-                    && (sc.menus as u32 & s.currmenu) != 0
-                    && sc.keycode == input)
+            s.sclist
+                .iter()
+                .find(|sc| {
+                    sc.func == Some(f) && (sc.menus as u32 & s.currmenu) != 0 && sc.keycode == input
+                })
                 .and_then(|sc| sc.expansion.clone())
         })
-    } else { None };
+    } else {
+        None
+    };
 
     // If not a command, handle as character or unknown.
     if function.is_none() {
@@ -2012,7 +2257,8 @@ pub fn process_a_keystroke() {
             #[cfg(not(feature = "tiny"))]
             {
                 let softmark = with_state(|s| {
-                    s.openfile.as_ref()
+                    s.openfile
+                        .as_ref()
                         .map(|of| of.mark.is_some() && of.softmark)
                         .unwrap_or(false)
                 });
@@ -2067,14 +2313,21 @@ pub fn process_a_keystroke() {
         let give = *hint.borrow();
         let meta = state().meta_key;
         let at_top_empty = with_state(|s| {
-            s.openfile.as_ref().map(|of| {
-                of.current_x == 0
-                    && of.current.as_ref()
-                        .and_then(|c| of.filetop.as_ref().map(|ft| {
-                            c.borrow().lineno == ft.borrow().lineno
-                        }))
-                        .unwrap_or(false)
-            }).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| {
+                    of.current_x == 0
+                        && of
+                            .current
+                            .as_ref()
+                            .and_then(|c| {
+                                of.filetop
+                                    .as_ref()
+                                    .map(|ft| c.borrow().lineno == ft.borrow().lineno)
+                            })
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false)
         });
         let nohelp = ISSET!(NO_HELP);
         if input == b'\x08' as i32 && give && at_top_empty && !nohelp {
@@ -2108,9 +2361,7 @@ pub fn process_a_keystroke() {
     }
 
     // When not cutting or copying, drop the cutbuffer next time.
-    if func != crate::global::cut_text as FuncPtr
-        && func != crate::global::copy_text as FuncPtr
-    {
+    if func != crate::global::cut_text as FuncPtr && func != crate::global::copy_text as FuncPtr {
         #[cfg(not(feature = "tiny"))]
         {
             if func != crate::global::zap_text as FuncPtr
@@ -2142,7 +2393,10 @@ pub fn process_a_keystroke() {
     {
         let shift_held = state().shift_held;
         let mark_is_none = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.mark.is_none()).unwrap_or(true)
+            s.openfile
+                .as_ref()
+                .map(|of| of.mark.is_none())
+                .unwrap_or(true)
         });
         if shift_held && mark_is_none {
             with_state_mut(|s| {
@@ -2171,9 +2425,10 @@ pub fn process_a_keystroke() {
             (ln, of.current_x)
         });
 
-        if mark_some && softmark && !shift_held
-            && (cur_lineno != was_current_lineno || cur_x != was_x
-                || wanted_to_move(func))
+        if mark_some
+            && softmark
+            && !shift_held
+            && (cur_lineno != was_current_lineno || cur_x != was_x || wanted_to_move(func))
         {
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
@@ -2210,7 +2465,9 @@ fn parse_position_numbers(spec: &str) -> Result<(isize, isize), ()> {
     }
     let separator = spec.find([',', '.', ':']);
     match separator {
-        None => crate::utils::parse_num(spec).map(|line| (line, 0)).ok_or(()),
+        None => crate::utils::parse_num(spec)
+            .map(|line| (line, 0))
+            .ok_or(()),
         Some(index) => {
             let line = if index == 0 {
                 0
@@ -2225,12 +2482,11 @@ fn parse_position_numbers(spec: &str) -> Result<(isize, isize), ()> {
 
 fn long_option_is_available(option: &str) -> bool {
     match option {
-        "smarthome" | "backup" | "backupdir" | "tabstospaces" | "locking"
-        | "guidestripe" | "nonewlines" | "noconvert" | "bookstyle" | "softwrap"
-        | "tabsize" | "wordbounds" | "wordchars" | "zap" | "atblanks" | "emptyline"
-        | "autoindent" | "jumpyscrolling" | "cutfromcursor" | "noread" | "indicator"
-        | "unix" | "afterends" | "whitespacedisplay" | "colonparsing" | "stateflags"
-        | "minibar" | "zero" => !cfg!(feature = "tiny"),
+        "smarthome" | "backup" | "backupdir" | "tabstospaces" | "locking" | "guidestripe"
+        | "nonewlines" | "noconvert" | "bookstyle" | "softwrap" | "tabsize" | "wordbounds"
+        | "wordchars" | "zap" | "atblanks" | "emptyline" | "autoindent" | "jumpyscrolling"
+        | "cutfromcursor" | "noread" | "indicator" | "unix" | "afterends" | "whitespacedisplay"
+        | "colonparsing" | "stateflags" | "minibar" | "zero" => !cfg!(feature = "tiny"),
         "multibuffer" => cfg!(feature = "multibuffer"),
         "historylog" | "positionlog" => cfg!(feature = "histories"),
         "ignorercfiles" | "rcfile" => cfg!(feature = "nanorc"),
@@ -2250,9 +2506,10 @@ fn long_option_is_available(option: &str) -> bool {
 
 fn short_option_is_available(option: char) -> bool {
     match option {
-        'A' | 'B' | 'C' | 'E' | 'G' | 'J' | 'L' | 'N' | 'O' | 'S' | 'T' | 'W'
-        | 'X' | 'Z' | 'a' | 'e' | 'i' | 'j' | 'k' | 'n' | 'q' | 'u' | 'y' | '@'
-        | '%' | '_' | '0' => !cfg!(feature = "tiny"),
+        'A' | 'B' | 'C' | 'E' | 'G' | 'J' | 'L' | 'N' | 'O' | 'S' | 'T' | 'W' | 'X' | 'Z' | 'a'
+        | 'e' | 'i' | 'j' | 'k' | 'n' | 'q' | 'u' | 'y' | '@' | '%' | '_' | '0' => {
+            !cfg!(feature = "tiny")
+        }
         'F' => cfg!(feature = "multibuffer"),
         'H' | 'P' => cfg!(feature = "histories"),
         'I' | 'f' => cfg!(feature = "nanorc"),
@@ -2318,7 +2575,8 @@ pub fn nano_main() {
     // arguments; positional FILE arguments keep their exact OS bytes, while
     // option words themselves are required to be valid UTF-8.
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let argv0: String = args.first()
+    let argv0: String = args
+        .first()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "nano".to_string());
 
@@ -2410,8 +2668,7 @@ pub fn nano_main() {
         // (A bare "-" means "read from standard input", not an option.)
         // The dash test uses the lossy form; '-' is ASCII, so an invalid
         // leading byte can never masquerade as an option.
-        let looks_like_option =
-            arg_os.to_string_lossy().starts_with('-') && arg_os != "-";
+        let looks_like_option = arg_os.to_string_lossy().starts_with('-') && arg_os != "-";
         if done_with_options || !looks_like_option {
             // Positional FILE arguments are preserved byte for byte.
             file_args.push(arg_os.clone());
@@ -2423,8 +2680,7 @@ pub fn nano_main() {
         let arg: &str = match arg_os.to_str() {
             Some(arg) => arg,
             None => {
-                eprintln!("Option '{}' is not valid UTF-8.",
-                    arg_os.to_string_lossy());
+                eprintln!("Option '{}' is not valid UTF-8.", arg_os.to_string_lossy());
                 process::exit(1);
             }
         };
@@ -2432,7 +2688,7 @@ pub fn nano_main() {
         // Long option.
         if arg.starts_with("--") {
             let (opt, val) = if let Some(eq) = arg.find('=') {
-                (arg[2..eq].to_string(), Some(arg[eq+1..].to_string()))
+                (arg[2..eq].to_string(), Some(arg[eq + 1..].to_string()))
             } else {
                 (arg[2..].to_string(), None)
             };
@@ -2444,8 +2700,10 @@ pub fn nano_main() {
                     Some(value) => match value.to_str() {
                         Some(value) => value.to_string(),
                         None => {
-                            eprintln!("Option argument '{}' is not valid UTF-8.",
-                                value.to_string_lossy());
+                            eprintln!(
+                                "Option argument '{}' is not valid UTF-8.",
+                                value.to_string_lossy()
+                            );
                             process::exit(1);
                         }
                     },
@@ -2457,22 +2715,49 @@ pub fn nano_main() {
             }
 
             match opt.as_str() {
-                "smarthome"      => { #[cfg(not(feature="tiny"))] SET!(SMART_HOME); }
-                "backup"         => { #[cfg(not(feature="tiny"))] SET!(MAKE_BACKUP); }
-                "backupdir"      => {
-                    #[cfg(not(feature="tiny"))] {
+                "smarthome" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(SMART_HOME);
+                }
+                "backup" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MAKE_BACKUP);
+                }
+                "backupdir" => {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().backup_dir = Some(v);
                     }
                 }
-                "boldtext"       => { SET!(BOLD_TEXT); }
-                "tabstospaces"   => { #[cfg(not(feature="tiny"))] SET!(TABS_TO_SPACES); }
-                "multibuffer"    => { #[cfg(feature="multibuffer")] SET!(MULTIBUFFER); }
-                "locking"        => { #[cfg(not(feature="tiny"))] SET!(LOCKING); }
-                "historylog"     => { #[cfg(feature="histories")] SET!(HISTORYLOG); }
-                "ignorercfiles"  => { #[cfg(feature="nanorc")] { ignore_rcfiles = true; } }
-                "guidestripe"    => {
-                    #[cfg(not(feature="tiny"))] {
+                "boldtext" => {
+                    SET!(BOLD_TEXT);
+                }
+                "tabstospaces" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(TABS_TO_SPACES);
+                }
+                "multibuffer" => {
+                    #[cfg(feature = "multibuffer")]
+                    SET!(MULTIBUFFER);
+                }
+                "locking" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(LOCKING);
+                }
+                "historylog" => {
+                    #[cfg(feature = "histories")]
+                    SET!(HISTORYLOG);
+                }
+                "ignorercfiles" => {
+                    #[cfg(feature = "nanorc")]
+                    {
+                        ignore_rcfiles = true;
+                    }
+                }
+                "guidestripe" => {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
                             Some(n) if n > 0 => state_mut().stripe_column = n,
@@ -2483,22 +2768,46 @@ pub fn nano_main() {
                         }
                     }
                 }
-                "rawsequences"   => { SET!(RAW_SEQUENCES); }
-                "nonewlines"     => { #[cfg(not(feature="tiny"))] SET!(NO_NEWLINES); }
-                "trimblanks"     => { #[cfg(any(feature="wrapping",feature="justify"))] SET!(TRIM_BLANKS); }
-                "noconvert"      => { #[cfg(not(feature="tiny"))] SET!(NO_CONVERT); }
-                "bookstyle"      => { #[cfg(not(feature="tiny"))] SET!(BOOKSTYLE); }
-                "positionlog"    => { #[cfg(feature="histories")] SET!(POSITIONLOG); }
-                "quotestr"       => {
-                    #[cfg(feature="justify")] {
+                "rawsequences" => {
+                    SET!(RAW_SEQUENCES);
+                }
+                "nonewlines" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NO_NEWLINES);
+                }
+                "trimblanks" => {
+                    #[cfg(any(feature = "wrapping", feature = "justify"))]
+                    SET!(TRIM_BLANKS);
+                }
+                "noconvert" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NO_CONVERT);
+                }
+                "bookstyle" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(BOOKSTYLE);
+                }
+                "positionlog" => {
+                    #[cfg(feature = "histories")]
+                    SET!(POSITIONLOG);
+                }
+                "quotestr" => {
+                    #[cfg(feature = "justify")]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().quotestr = Some(v);
                     }
                 }
-                "restricted"     => { SET!(RESTRICTED); }
-                "softwrap"       => { #[cfg(not(feature="tiny"))] SET!(SOFTWRAP); }
-                "tabsize"        => {
-                    #[cfg(not(feature="tiny"))] {
+                "restricted" => {
+                    SET!(RESTRICTED);
+                }
+                "softwrap" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(SOFTWRAP);
+                }
+                "tabsize" => {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
                             Some(n) if n > 0 => state_mut().tabsize = n,
@@ -2509,58 +2818,119 @@ pub fn nano_main() {
                         }
                     }
                 }
-                "quickblank"     => { SET!(QUICK_BLANK); }
-                "version"        => { version(); process::exit(0); }
-                "wordbounds"     => { #[cfg(not(feature="tiny"))] SET!(WORD_BOUNDS); }
-                "wordchars"      => {
-                    #[cfg(not(feature="tiny"))] {
+                "quickblank" => {
+                    SET!(QUICK_BLANK);
+                }
+                "version" => {
+                    version();
+                    process::exit(0);
+                }
+                "wordbounds" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(WORD_BOUNDS);
+                }
+                "wordchars" => {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().word_chars = Some(v);
                     }
                 }
-                "syntax"         => {
-                    #[cfg(feature="color")] {
+                "syntax" => {
+                    #[cfg(feature = "color")]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().syntaxstr = Some(v);
                     }
                 }
-                "zap"            => { #[cfg(not(feature="tiny"))] SET!(LET_THEM_ZAP); }
-                "atblanks"       => { #[cfg(not(feature="tiny"))] SET!(AT_BLANKS); }
-                "breaklonglines" => { #[cfg(feature="wrapping")] { hardwrap = 1; } }
-                "constantshow"   => { SET!(CONSTANT_SHOW); }
-                "rebinddelete"   => { SET!(REBIND_DELETE); }
-                "emptyline"      => { #[cfg(not(feature="tiny"))] SET!(EMPTY_LINE); }
-                "rcfile"         => {
-                    #[cfg(feature="nanorc")] {
+                "zap" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(LET_THEM_ZAP);
+                }
+                "atblanks" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AT_BLANKS);
+                }
+                "breaklonglines" => {
+                    #[cfg(feature = "wrapping")]
+                    {
+                        hardwrap = 1;
+                    }
+                }
+                "constantshow" => {
+                    SET!(CONSTANT_SHOW);
+                }
+                "rebinddelete" => {
+                    SET!(REBIND_DELETE);
+                }
+                "emptyline" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(EMPTY_LINE);
+                }
+                "rcfile" => {
+                    #[cfg(feature = "nanorc")]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().custom_nanorc = Some(v);
                     }
                 }
-                "showcursor"     => {
-                    #[cfg(any(feature="browser",feature="help"))] SET!(SHOW_CURSOR);
+                "showcursor" => {
+                    #[cfg(any(feature = "browser", feature = "help"))]
+                    SET!(SHOW_CURSOR);
                 }
-                "help"           => { usage(); process::exit(0); }
-                "autoindent"     => { #[cfg(not(feature="tiny"))] SET!(AUTOINDENT); }
-                "jumpyscrolling" => { #[cfg(not(feature="tiny"))] SET!(JUMPY_SCROLLING); }
-                "cutfromcursor"  => { #[cfg(not(feature="tiny"))] SET!(CUT_FROM_CURSOR); }
-                "linenumbers"    => { #[cfg(feature="linenumbers")] SET!(LINE_NUMBERS); }
-                "mouse"          => { #[cfg(feature="mouse")] SET!(USE_MOUSE); }
-                "noread"         => { #[cfg(not(feature="tiny"))] SET!(NOREAD_MODE); }
-                "operatingdir"   => {
-                    #[cfg(feature="operatingdir")] {
+                "help" => {
+                    usage();
+                    process::exit(0);
+                }
+                "autoindent" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AUTOINDENT);
+                }
+                "jumpyscrolling" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(JUMPY_SCROLLING);
+                }
+                "cutfromcursor" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(CUT_FROM_CURSOR);
+                }
+                "linenumbers" => {
+                    #[cfg(feature = "linenumbers")]
+                    SET!(LINE_NUMBERS);
+                }
+                "mouse" => {
+                    #[cfg(feature = "mouse")]
+                    SET!(USE_MOUSE);
+                }
+                "noread" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NOREAD_MODE);
+                }
+                "operatingdir" => {
+                    #[cfg(feature = "operatingdir")]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().operating_dir = Some(v);
                     }
                 }
-                "preserve"       => { SET!(PRESERVE); }
-                "indicator"      => { #[cfg(not(feature="tiny"))] SET!(INDICATOR); }
-                "fill"           => {
-                    #[cfg(any(feature="wrapping",feature="justify"))] {
+                "preserve" => {
+                    SET!(PRESERVE);
+                }
+                "indicator" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(INDICATOR);
+                }
+                "fill" => {
+                    #[cfg(any(feature = "wrapping", feature = "justify"))]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         match crate::utils::parse_num(&v) {
                             Some(n) => {
                                 state_mut().fill = n;
-                                #[cfg(feature="nanorc")] { fill_used = true; }
+                                #[cfg(feature = "nanorc")]
+                                {
+                                    fill_used = true;
+                                }
                             }
                             None => {
                                 eprintln!("Requested fill size \"{}\" is invalid", v);
@@ -2569,54 +2939,105 @@ pub fn nano_main() {
                         }
                     }
                 }
-                "speller"        => {
-                    #[cfg(feature="speller")] {
+                "speller" => {
+                    #[cfg(feature = "speller")]
+                    {
                         let v = val.unwrap_or_else(|| next_val(&mut idx));
                         state_mut().alt_speller = Some(v);
                     }
                 }
-                "saveonexit"     => { SET!(SAVE_ON_EXIT); }
-                "unix"           => { #[cfg(not(feature="tiny"))] SET!(MAKE_IT_UNIX); }
-                "view"           => { SET!(VIEW_MODE); }
-                "nowrap"         => { #[cfg(feature="wrapping")] { hardwrap = 0; } }
-                "nohelp"         => { SET!(NO_HELP); }
-                "afterends"      => { #[cfg(not(feature="tiny"))] SET!(AFTER_ENDS); }
-                "listsyntaxes"   => {
-                    #[cfg(feature="color")] {
-                        #[cfg(feature="nanorc")]
-                        if !ignore_rcfiles { rcfile::do_rcfiles(); }
-                        #[cfg(not(feature="nanorc"))]
-                        { let _ = (); }
+                "saveonexit" => {
+                    SET!(SAVE_ON_EXIT);
+                }
+                "unix" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MAKE_IT_UNIX);
+                }
+                "view" => {
+                    SET!(VIEW_MODE);
+                }
+                "nowrap" => {
+                    #[cfg(feature = "wrapping")]
+                    {
+                        hardwrap = 0;
+                    }
+                }
+                "nohelp" => {
+                    SET!(NO_HELP);
+                }
+                "afterends" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AFTER_ENDS);
+                }
+                "listsyntaxes" => {
+                    #[cfg(feature = "color")]
+                    {
+                        #[cfg(feature = "nanorc")]
+                        if !ignore_rcfiles {
+                            rcfile::do_rcfiles();
+                        }
+                        #[cfg(not(feature = "nanorc"))]
+                        {
+                            let _ = ();
+                        }
                         list_syntax_names();
                         process::exit(0);
                     }
                 }
-                "magic"          => { #[cfg(feature="libmagic")] SET!(USE_MAGIC); }
-                "whitespacedisplay" => { #[cfg(not(feature="tiny"))] SET!(WHITESPACE_DISPLAY); }
-                "colonparsing"   => { #[cfg(not(feature="tiny"))] SET!(COLON_PARSING); }
-                "stateflags"     => { #[cfg(not(feature="tiny"))] SET!(STATEFLAGS); }
-                "minibar"        => { #[cfg(not(feature="tiny"))] SET!(MINIBAR); }
-                "zero"           => { #[cfg(not(feature="tiny"))] SET!(ZERO); }
-                "solosidescroll" => { with_state_mut(|s| {
-                    s.flags[crate::global::flag_index(SOLO_SIDESCROLL)]
-                        |= crate::global::flag_mask(SOLO_SIDESCROLL);
-                }); }
-                "install"        => {
+                "magic" => {
+                    #[cfg(feature = "libmagic")]
+                    SET!(USE_MAGIC);
+                }
+                "whitespacedisplay" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(WHITESPACE_DISPLAY);
+                }
+                "colonparsing" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(COLON_PARSING);
+                }
+                "stateflags" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(STATEFLAGS);
+                }
+                "minibar" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MINIBAR);
+                }
+                "zero" => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(ZERO);
+                }
+                "solosidescroll" => {
+                    with_state_mut(|s| {
+                        s.flags[crate::global::flag_index(SOLO_SIDESCROLL)] |=
+                            crate::global::flag_mask(SOLO_SIDESCROLL);
+                    });
+                }
+                "install" => {
                     let force = std::env::args_os().any(|a| a == "--force");
                     match crate::installer::install_to_path(force) {
                         Ok(()) => process::exit(0),
-                        Err(e) => { eprintln!("nano: install failed: {}", e); process::exit(1); }
+                        Err(e) => {
+                            eprintln!("nano: install failed: {}", e);
+                            process::exit(1);
+                        }
                     }
                 }
-                "update"         => {
+                "update" => {
                     let force = std::env::args_os().any(|a| a == "--force");
                     match crate::installer::update_from_github(force) {
                         Ok(()) => process::exit(0),
-                        Err(e) => { eprintln!("nano: update failed: {}", e); process::exit(1); }
+                        Err(e) => {
+                            eprintln!("nano: update failed: {}", e);
+                            process::exit(1);
+                        }
                     }
                 }
-                "force"          => { /* consumed by --install / --update via env scan */ }
-                "modernbindings" => { SET!(MODERN_BINDINGS); }
+                "force" => { /* consumed by --install / --update via env scan */ }
+                "modernbindings" => {
+                    SET!(MODERN_BINDINGS);
+                }
                 _other => {
                     eprintln!("Type '{} -h' for a list of available options.", argv0);
                     process::exit(1);
@@ -2635,12 +3056,17 @@ pub fn nano_main() {
                 reject_unavailable_option(&argv0, &format!("-{c}"));
             }
             // Helper: get next argument (either rest of this arg or next argv).
-            let next_arg = |ci: &mut usize, chars: &Vec<char>, idx: &mut usize,
-                            args: &Vec<std::ffi::OsString>| -> String {
+            let next_arg = |ci: &mut usize,
+                            chars: &Vec<char>,
+                            idx: &mut usize,
+                            args: &Vec<std::ffi::OsString>|
+             -> String {
                 *ci += 1;
                 if *ci < chars.len() {
                     // Rest of current arg.
-                    chars[*ci..].iter().collect::<String>()
+                    chars[*ci..]
+                        .iter()
+                        .collect::<String>()
                         .also(|_| *ci = chars.len())
                 } else {
                     *idx += 1;
@@ -2649,8 +3075,10 @@ pub fn nano_main() {
                         Some(value) => match value.to_str() {
                             Some(value) => value.to_string(),
                             None => {
-                                eprintln!("Option argument '{}' is not valid UTF-8.",
-                                    value.to_string_lossy());
+                                eprintln!(
+                                    "Option argument '{}' is not valid UTF-8.",
+                                    value.to_string_lossy()
+                                );
                                 process::exit(1);
                             }
                         },
@@ -2659,22 +3087,49 @@ pub fn nano_main() {
             };
 
             match c {
-                'A' => { #[cfg(not(feature="tiny"))] SET!(SMART_HOME); }
-                'B' => { #[cfg(not(feature="tiny"))] SET!(MAKE_BACKUP); }
+                'A' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(SMART_HOME);
+                }
+                'B' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MAKE_BACKUP);
+                }
                 'C' => {
-                    #[cfg(not(feature="tiny"))] {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().backup_dir = Some(v);
                     }
                 }
-                'D' => { SET!(BOLD_TEXT); }
-                'E' => { #[cfg(not(feature="tiny"))] SET!(TABS_TO_SPACES); }
-                'F' => { #[cfg(feature="multibuffer")] SET!(MULTIBUFFER); }
-                'G' => { #[cfg(not(feature="tiny"))] SET!(LOCKING); }
-                'H' => { #[cfg(feature="histories")] SET!(HISTORYLOG); }
-                'I' => { #[cfg(feature="nanorc")] { ignore_rcfiles = true; } }
+                'D' => {
+                    SET!(BOLD_TEXT);
+                }
+                'E' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(TABS_TO_SPACES);
+                }
+                'F' => {
+                    #[cfg(feature = "multibuffer")]
+                    SET!(MULTIBUFFER);
+                }
+                'G' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(LOCKING);
+                }
+                'H' => {
+                    #[cfg(feature = "histories")]
+                    SET!(HISTORYLOG);
+                }
+                'I' => {
+                    #[cfg(feature = "nanorc")]
+                    {
+                        ignore_rcfiles = true;
+                    }
+                }
                 'J' => {
-                    #[cfg(not(feature="tiny"))] {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
                             Some(n) if n > 0 => state_mut().stripe_column = n,
@@ -2685,22 +3140,46 @@ pub fn nano_main() {
                         }
                     }
                 }
-                'K' => { SET!(RAW_SEQUENCES); }
-                'L' => { #[cfg(not(feature="tiny"))] SET!(NO_NEWLINES); }
-                'M' => { #[cfg(any(feature="wrapping",feature="justify"))] SET!(TRIM_BLANKS); }
-                'N' => { #[cfg(not(feature="tiny"))] SET!(NO_CONVERT); }
-                'O' => { #[cfg(not(feature="tiny"))] SET!(BOOKSTYLE); }
-                'P' => { #[cfg(feature="histories")] SET!(POSITIONLOG); }
+                'K' => {
+                    SET!(RAW_SEQUENCES);
+                }
+                'L' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NO_NEWLINES);
+                }
+                'M' => {
+                    #[cfg(any(feature = "wrapping", feature = "justify"))]
+                    SET!(TRIM_BLANKS);
+                }
+                'N' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NO_CONVERT);
+                }
+                'O' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(BOOKSTYLE);
+                }
+                'P' => {
+                    #[cfg(feature = "histories")]
+                    SET!(POSITIONLOG);
+                }
                 'Q' => {
-                    #[cfg(feature="justify")] {
+                    #[cfg(feature = "justify")]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().quotestr = Some(v);
                     }
                 }
-                'R' => { SET!(RESTRICTED); }
-                'S' => { #[cfg(not(feature="tiny"))] SET!(SOFTWRAP); }
+                'R' => {
+                    SET!(RESTRICTED);
+                }
+                'S' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(SOFTWRAP);
+                }
                 'T' => {
-                    #[cfg(not(feature="tiny"))] {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
                             Some(n) if n > 0 => state_mut().tabsize = n,
@@ -2711,58 +3190,119 @@ pub fn nano_main() {
                         }
                     }
                 }
-                'U' => { SET!(QUICK_BLANK); }
-                'V' => { version(); process::exit(0); }
-                'W' => { #[cfg(not(feature="tiny"))] SET!(WORD_BOUNDS); }
+                'U' => {
+                    SET!(QUICK_BLANK);
+                }
+                'V' => {
+                    version();
+                    process::exit(0);
+                }
+                'W' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(WORD_BOUNDS);
+                }
                 'X' => {
-                    #[cfg(not(feature="tiny"))] {
+                    #[cfg(not(feature = "tiny"))]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().word_chars = Some(v);
                     }
                 }
                 'Y' => {
-                    #[cfg(feature="color")] {
+                    #[cfg(feature = "color")]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().syntaxstr = Some(v);
                     }
                 }
-                'Z' => { #[cfg(not(feature="tiny"))] SET!(LET_THEM_ZAP); }
-                'a' => { #[cfg(not(feature="tiny"))] SET!(AT_BLANKS); }
-                'b' => { #[cfg(feature="wrapping")] { hardwrap = 1; } }
-                'c' => { SET!(CONSTANT_SHOW); }
-                'd' => { SET!(REBIND_DELETE); }
-                'e' => { #[cfg(not(feature="tiny"))] SET!(EMPTY_LINE); }
+                'Z' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(LET_THEM_ZAP);
+                }
+                'a' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AT_BLANKS);
+                }
+                'b' => {
+                    #[cfg(feature = "wrapping")]
+                    {
+                        hardwrap = 1;
+                    }
+                }
+                'c' => {
+                    SET!(CONSTANT_SHOW);
+                }
+                'd' => {
+                    SET!(REBIND_DELETE);
+                }
+                'e' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(EMPTY_LINE);
+                }
                 'f' => {
-                    #[cfg(feature="nanorc")] {
+                    #[cfg(feature = "nanorc")]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().custom_nanorc = Some(v);
                     }
                 }
                 'g' => {
-                    #[cfg(any(feature="browser",feature="help"))] SET!(SHOW_CURSOR);
+                    #[cfg(any(feature = "browser", feature = "help"))]
+                    SET!(SHOW_CURSOR);
                 }
-                'h' => { usage(); process::exit(0); }
-                'i' => { #[cfg(not(feature="tiny"))] SET!(AUTOINDENT); }
-                'j' => { #[cfg(not(feature="tiny"))] SET!(JUMPY_SCROLLING); }
-                'k' => { #[cfg(not(feature="tiny"))] SET!(CUT_FROM_CURSOR); }
-                'l' => { #[cfg(feature="linenumbers")] SET!(LINE_NUMBERS); }
-                'm' => { #[cfg(feature="mouse")] SET!(USE_MOUSE); }
-                'n' => { #[cfg(not(feature="tiny"))] SET!(NOREAD_MODE); }
+                'h' => {
+                    usage();
+                    process::exit(0);
+                }
+                'i' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AUTOINDENT);
+                }
+                'j' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(JUMPY_SCROLLING);
+                }
+                'k' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(CUT_FROM_CURSOR);
+                }
+                'l' => {
+                    #[cfg(feature = "linenumbers")]
+                    SET!(LINE_NUMBERS);
+                }
+                'm' => {
+                    #[cfg(feature = "mouse")]
+                    SET!(USE_MOUSE);
+                }
+                'n' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(NOREAD_MODE);
+                }
                 'o' => {
-                    #[cfg(feature="operatingdir")] {
+                    #[cfg(feature = "operatingdir")]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().operating_dir = Some(v);
                     }
                 }
-                'p' => { SET!(PRESERVE); }
-                'q' => { #[cfg(not(feature="tiny"))] SET!(INDICATOR); }
+                'p' => {
+                    SET!(PRESERVE);
+                }
+                'q' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(INDICATOR);
+                }
                 'r' => {
-                    #[cfg(any(feature="wrapping",feature="justify"))] {
+                    #[cfg(any(feature = "wrapping", feature = "justify"))]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         match crate::utils::parse_num(&v) {
                             Some(n) => {
                                 state_mut().fill = n;
-                                #[cfg(feature="nanorc")] { fill_used = true; }
+                                #[cfg(feature = "nanorc")]
+                                {
+                                    fill_used = true;
+                                }
                             }
                             None => {
                                 eprintln!("Requested fill size \"{}\" is invalid", v);
@@ -2772,37 +3312,75 @@ pub fn nano_main() {
                     }
                 }
                 's' => {
-                    #[cfg(feature="speller")] {
+                    #[cfg(feature = "speller")]
+                    {
                         let v = next_arg(&mut ci, &chars, &mut idx, &args);
                         state_mut().alt_speller = Some(v);
                     }
                 }
-                't' => { SET!(SAVE_ON_EXIT); }
-                'u' => { #[cfg(not(feature="tiny"))] SET!(MAKE_IT_UNIX); }
-                'v' => { SET!(VIEW_MODE); }
-                'w' => { #[cfg(feature="wrapping")] { hardwrap = 0; } }
-                'x' => { SET!(NO_HELP); }
-                'y' => { #[cfg(not(feature="tiny"))] SET!(AFTER_ENDS); }
+                't' => {
+                    SET!(SAVE_ON_EXIT);
+                }
+                'u' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MAKE_IT_UNIX);
+                }
+                'v' => {
+                    SET!(VIEW_MODE);
+                }
+                'w' => {
+                    #[cfg(feature = "wrapping")]
+                    {
+                        hardwrap = 0;
+                    }
+                }
+                'x' => {
+                    SET!(NO_HELP);
+                }
+                'y' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(AFTER_ENDS);
+                }
                 'z' => {
-                    #[cfg(feature="color")] {
-                        #[cfg(feature="nanorc")]
-                        if !ignore_rcfiles { rcfile::do_rcfiles(); }
+                    #[cfg(feature = "color")]
+                    {
+                        #[cfg(feature = "nanorc")]
+                        if !ignore_rcfiles {
+                            rcfile::do_rcfiles();
+                        }
                         list_syntax_names();
                         process::exit(0);
                     }
                 }
-                '!' => { #[cfg(feature="libmagic")] SET!(USE_MAGIC); }
-                '@' => { #[cfg(not(feature="tiny"))] SET!(COLON_PARSING); }
-                '%' => { #[cfg(not(feature="tiny"))] SET!(STATEFLAGS); }
-                '_' => { #[cfg(not(feature="tiny"))] SET!(MINIBAR); }
-                '0' => { #[cfg(not(feature="tiny"))] SET!(ZERO); }
+                '!' => {
+                    #[cfg(feature = "libmagic")]
+                    SET!(USE_MAGIC);
+                }
+                '@' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(COLON_PARSING);
+                }
+                '%' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(STATEFLAGS);
+                }
+                '_' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(MINIBAR);
+                }
+                '0' => {
+                    #[cfg(not(feature = "tiny"))]
+                    SET!(ZERO);
+                }
                 '1' => {
                     with_state_mut(|s| {
-                        s.flags[crate::global::flag_index(SOLO_SIDESCROLL)]
-                            |= crate::global::flag_mask(SOLO_SIDESCROLL);
+                        s.flags[crate::global::flag_index(SOLO_SIDESCROLL)] |=
+                            crate::global::flag_mask(SOLO_SIDESCROLL);
                     });
                 }
-                '/' => { SET!(MODERN_BINDINGS); }
+                '/' => {
+                    SET!(MODERN_BINDINGS);
+                }
                 _ => {
                     eprintln!("Type '{} -h' for a list of available options.", argv0);
                     process::exit(1);
@@ -2823,7 +3401,9 @@ pub fn nano_main() {
     // Ensure TERM is set.
     if std::env::var("TERM").is_err() {
         // Safe: single-threaded startup, before any threads are spawned.
-        unsafe { std::env::set_var("TERM", "vt220"); }
+        unsafe {
+            std::env::set_var("TERM", "vt220");
+        }
     }
 
     #[cfg(feature = "color")]
@@ -3019,7 +3599,11 @@ pub fn nano_main() {
 
         // Compile quoting regex.
         let quotestr = state().quotestr.clone().unwrap_or_default();
-        match regex_lite::Regex::new(&quotestr) {
+        match regex::bytes::RegexBuilder::new(&quotestr)
+            .unicode(crate::chars::using_utf8())
+            .dot_matches_new_line(true)
+            .build()
+        {
             Ok(re) => state_mut().quotereg = Some(re),
             Err(e) => {
                 die(&format!("Bad quoting regex \"{}\": {}", quotestr, e));
@@ -3118,7 +3702,11 @@ pub fn nano_main() {
     {
         let (cols, lines) = winio::terminal_size();
         with_state_mut(|s| {
-            s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 { 1 } else { 0 };
+            s.sidebar = if s.flag_isset(INDICATOR) && lines > 5 && cols > 9 {
+                1
+            } else {
+                0
+            };
             let needed = lines as usize;
             s.bardata.resize(needed, 0);
         });
@@ -3140,40 +3728,40 @@ pub fn nano_main() {
     // Key code assignments for modified keys
     // ----------------------------------------------------------------
     with_state_mut(|s| {
-        s.controlleft  = get_keycode("kLFT5", CONTROL_LEFT as i32);
+        s.controlleft = get_keycode("kLFT5", CONTROL_LEFT as i32);
         s.controlright = get_keycode("kRIT5", CONTROL_RIGHT as i32);
-        s.controlup    = get_keycode("kUP5",  CONTROL_UP as i32);
-        s.controldown  = get_keycode("kDN5",  CONTROL_DOWN as i32);
-        s.controlhome  = get_keycode("kHOM5", CONTROL_HOME as i32);
-        s.controlend   = get_keycode("kEND5", CONTROL_END as i32);
+        s.controlup = get_keycode("kUP5", CONTROL_UP as i32);
+        s.controldown = get_keycode("kDN5", CONTROL_DOWN as i32);
+        s.controlhome = get_keycode("kHOM5", CONTROL_HOME as i32);
+        s.controlend = get_keycode("kEND5", CONTROL_END as i32);
         #[cfg(not(feature = "tiny"))]
         {
-            s.controldelete       = get_keycode("kDC5", CONTROL_DELETE as i32);
-            s.controlshiftdelete  = get_keycode("kDC6", CONTROL_SHIFT_DELETE as i32);
-            s.shiftup             = get_keycode("kUP",  SHIFT_UP as i32);
-            s.shiftdown           = get_keycode("kDN",  SHIFT_DOWN as i32);
-            s.shiftcontrolleft    = get_keycode("kLFT6", SHIFT_CONTROL_LEFT as i32);
-            s.shiftcontrolright   = get_keycode("kRIT6", SHIFT_CONTROL_RIGHT as i32);
-            s.shiftcontrolup      = get_keycode("kUP6",  SHIFT_CONTROL_UP as i32);
-            s.shiftcontroldown    = get_keycode("kDN6",  SHIFT_CONTROL_DOWN as i32);
-            s.shiftcontrolhome    = get_keycode("kHOM6", SHIFT_CONTROL_HOME as i32);
-            s.shiftcontrolend     = get_keycode("kEND6", SHIFT_CONTROL_END as i32);
-            s.altleft      = get_keycode("kLFT3", ALT_LEFT as i32);
-            s.altright     = get_keycode("kRIT3", ALT_RIGHT as i32);
-            s.altup        = get_keycode("kUP3",  ALT_UP as i32);
-            s.altdown      = get_keycode("kDN3",  ALT_DOWN as i32);
-            s.althome      = get_keycode("kHOM3", ALT_HOME as i32);
-            s.altend       = get_keycode("kEND3", ALT_END as i32);
-            s.altpageup    = get_keycode("kPRV3", ALT_PAGEUP as i32);
-            s.altpagedown  = get_keycode("kNXT3", ALT_PAGEDOWN as i32);
-            s.altinsert    = get_keycode("kIC3",  ALT_INSERT as i32);
-            s.altdelete    = get_keycode("kDC3",  ALT_DELETE as i32);
-            s.shiftaltleft  = get_keycode("kLFT4", SHIFT_ALT_LEFT as i32);
+            s.controldelete = get_keycode("kDC5", CONTROL_DELETE as i32);
+            s.controlshiftdelete = get_keycode("kDC6", CONTROL_SHIFT_DELETE as i32);
+            s.shiftup = get_keycode("kUP", SHIFT_UP as i32);
+            s.shiftdown = get_keycode("kDN", SHIFT_DOWN as i32);
+            s.shiftcontrolleft = get_keycode("kLFT6", SHIFT_CONTROL_LEFT as i32);
+            s.shiftcontrolright = get_keycode("kRIT6", SHIFT_CONTROL_RIGHT as i32);
+            s.shiftcontrolup = get_keycode("kUP6", SHIFT_CONTROL_UP as i32);
+            s.shiftcontroldown = get_keycode("kDN6", SHIFT_CONTROL_DOWN as i32);
+            s.shiftcontrolhome = get_keycode("kHOM6", SHIFT_CONTROL_HOME as i32);
+            s.shiftcontrolend = get_keycode("kEND6", SHIFT_CONTROL_END as i32);
+            s.altleft = get_keycode("kLFT3", ALT_LEFT as i32);
+            s.altright = get_keycode("kRIT3", ALT_RIGHT as i32);
+            s.altup = get_keycode("kUP3", ALT_UP as i32);
+            s.altdown = get_keycode("kDN3", ALT_DOWN as i32);
+            s.althome = get_keycode("kHOM3", ALT_HOME as i32);
+            s.altend = get_keycode("kEND3", ALT_END as i32);
+            s.altpageup = get_keycode("kPRV3", ALT_PAGEUP as i32);
+            s.altpagedown = get_keycode("kNXT3", ALT_PAGEDOWN as i32);
+            s.altinsert = get_keycode("kIC3", ALT_INSERT as i32);
+            s.altdelete = get_keycode("kDC3", ALT_DELETE as i32);
+            s.shiftaltleft = get_keycode("kLFT4", SHIFT_ALT_LEFT as i32);
             s.shiftaltright = get_keycode("kRIT4", SHIFT_ALT_RIGHT as i32);
-            s.shiftaltup    = get_keycode("kUP4",  SHIFT_ALT_UP as i32);
-            s.shiftaltdown  = get_keycode("kDN4",  SHIFT_ALT_DOWN as i32);
+            s.shiftaltup = get_keycode("kUP4", SHIFT_ALT_UP as i32);
+            s.shiftaltdown = get_keycode("kDN4", SHIFT_ALT_DOWN as i32);
         }
-        s.mousefocusin  = get_keycode("kxIN",  FOCUS_IN as i32);
+        s.mousefocusin = get_keycode("kxIN", FOCUS_IN as i32);
         s.mousefocusout = get_keycode("kxOUT", FOCUS_OUT as i32);
     });
 
@@ -3195,15 +3783,14 @@ pub fn nano_main() {
         }
 
         let mut givenline: isize = 0;
-        let mut givencol: isize  = 0;
+        let mut givencol: isize = 0;
         #[cfg(not(feature = "tiny"))]
         let mut searchstring: Option<String> = None;
 
         // If there's a +LINE[,COLUMN] argument, consume it.  ('+' is ASCII, so
         // the lossy form is a faithful test; the argument itself is a line/
         // column spec or search string, not a filename.)
-        if file_idx + 1 < file_args_count
-            && file_args[file_idx].to_string_lossy().starts_with('+')
+        if file_idx + 1 < file_args_count && file_args[file_idx].to_string_lossy().starts_with('+')
         {
             let plus_arg = file_args[file_idx].to_string_lossy().into_owned();
             let rest = &plus_arg[1..];
@@ -3214,13 +3801,23 @@ pub fn nano_main() {
                 let rbytes: Vec<char> = rest.chars().collect();
                 while n < rbytes.len() && rbytes[n].is_ascii_alphabetic() {
                     match rbytes[n] {
-                        'c' => { SET!(CASE_SENSITIVE); }
-                        'C' => { UNSET!(CASE_SENSITIVE); }
-                        'r' => { SET!(USE_REGEXP); }
-                        'R' => { UNSET!(USE_REGEXP); }
+                        'c' => {
+                            SET!(CASE_SENSITIVE);
+                        }
+                        'C' => {
+                            UNSET!(CASE_SENSITIVE);
+                        }
+                        'r' => {
+                            SET!(USE_REGEXP);
+                        }
+                        'R' => {
+                            UNSET!(USE_REGEXP);
+                        }
                         _ => {
-                            winio::statusline(MessageType::Alert,
-                                &format!("Invalid search modifier '{}'", rbytes[n]));
+                            winio::statusline(
+                                MessageType::Alert,
+                                &format!("Invalid search modifier '{}'", rbytes[n]),
+                            );
                         }
                     }
                     n += 1;
@@ -3228,7 +3825,7 @@ pub fn nano_main() {
 
                 if n < rbytes.len() && (rbytes[n] == '/' || rbytes[n] == '?') {
                     if n + 1 < rbytes.len() {
-                        let sstr: String = rbytes[n+1..].iter().collect();
+                        let sstr: String = rbytes[n + 1..].iter().collect();
                         if rbytes[n] == '?' {
                             SET!(BACKWARDS_SEARCH);
                         }
@@ -3248,7 +3845,10 @@ pub fn nano_main() {
                                 givencol = column;
                             }
                             Err(()) => {
-                                winio::statusline(MessageType::Alert, "Invalid line or column number");
+                                winio::statusline(
+                                    MessageType::Alert,
+                                    "Invalid line or column number",
+                                );
                             }
                         }
                     }
@@ -3323,7 +3923,10 @@ pub fn nano_main() {
         #[cfg(feature = "histories")]
         {
             let has_filename = with_state(|s| {
-                s.openfile.as_ref().map(|of| !of.filename.is_empty()).unwrap_or(false)
+                s.openfile
+                    .as_ref()
+                    .map(|of| !of.filename.is_empty())
+                    .unwrap_or(false)
             });
             if ISSET!(POSITIONLOG) && has_filename {
                 history::restore_cursor_position_if_any();
@@ -3354,14 +3957,20 @@ pub fn nano_main() {
                         search::regexp_init(sstr);
                     }
                     let ss_clone = sstr.clone();
-                    let filetop = with_state(|s| s.openfile.as_ref()
-                        .and_then(|of| of.filetop.clone()));
+                    let filetop =
+                        with_state(|s| s.openfile.as_ref().and_then(|of| of.filetop.clone()));
                     if let Some(ft) = filetop {
                         let backwards = ISSET!(BACKWARDS_SEARCH);
                         let mut match_len: usize = 0;
-                        let found = search::findnextstr(&ss_clone, false, JUSTFIND,
-                                                        &mut match_len, backwards,
-                                                        Some(&ft), 0);
+                        let found = search::findnextstr(
+                            &ss_clone,
+                            false,
+                            JUSTFIND,
+                            &mut match_len,
+                            backwards,
+                            Some(&ft),
+                            0,
+                        );
                         if found == 0 {
                             search::not_found_msg(&ss_clone);
                         } else {
@@ -3373,7 +3982,9 @@ pub fn nano_main() {
                     }
                     let pw = crate::utils::xplustabs();
                     with_state_mut(|s| {
-                        if let Some(ref mut of) = s.openfile { of.placewewant = pw; }
+                        if let Some(ref mut of) = s.openfile {
+                            of.placewewant = pw;
+                        }
                     });
                     if ISSET!(USE_REGEXP) {
                         search::tidy_up_after_search();
@@ -3443,11 +4054,10 @@ pub fn nano_main() {
     #[cfg(feature = "help")]
     {
         let show_welcome = with_state(|s| {
-            s.openfile.as_ref().map(|of| {
-                of.filename.is_empty()
-                    && of.totsize == 0
-                    && !s.flag_isset(NO_HELP)
-            }).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| of.filename.is_empty() && of.totsize == 0 && !s.flag_isset(NO_HELP))
+                .unwrap_or(false)
         });
         // Check NOTREBOUND: help function must still be bound to ^G (0x07).
         #[cfg(feature = "nanorc")]
@@ -3482,7 +4092,10 @@ pub fn nano_main() {
             if let crate::installer::UpdateStatus::Downloaded { version, .. } = status {
                 winio::statusline(
                     MessageType::Notice,
-                    &format!("Update v{} downloaded \u{2014} restart nano to apply.", version),
+                    &format!(
+                        "Update v{} downloaded \u{2014} restart nano to apply.",
+                        version
+                    ),
                 );
             }
         }
@@ -3509,9 +4122,14 @@ pub fn nano_main() {
         #[cfg(not(feature = "tiny"))]
         {
             let (softwrap, solo_sidescroll, editwincols) = with_state(|s| {
-                (s.flag_isset(SOFTWRAP), s.flag_isset(SOLO_SIDESCROLL), s.editwincols)
+                (
+                    s.flag_isset(SOFTWRAP),
+                    s.flag_isset(SOLO_SIDESCROLL),
+                    s.editwincols,
+                )
             });
-            let want_united = !solo_sidescroll && !softwrap && editwincols > (2 * CUSHION + 2) as i32;
+            let want_united =
+                !solo_sidescroll && !softwrap && editwincols > (2 * CUSHION + 2) as i32;
             let united = state().united_sidescroll;
             if united != want_united {
                 with_state_mut(|s| {
@@ -3523,7 +4141,12 @@ pub fn nano_main() {
             // Minibar display.
             let (minibar, zero, lines, lastmsg) = with_state(|s| {
                 let lines = s.editwinrows + s.midwin.y as i32;
-                (s.flag_isset(MINIBAR), s.flag_isset(ZERO), lines, s.lastmessage)
+                (
+                    s.flag_isset(MINIBAR),
+                    s.flag_isset(ZERO),
+                    lines,
+                    s.lastmessage,
+                )
             });
             if minibar && !zero && lines > 1 && lastmsg < MessageType::Remark {
                 winio::minibar();
@@ -3531,11 +4154,19 @@ pub fn nano_main() {
                 // Constant cursor position display.
                 let (constant_show, lastmsg2, lines2, zero2, waiting) = with_state(|s| {
                     let ln = s.editwinrows + s.midwin.y as i32;
-                    (s.flag_isset(CONSTANT_SHOW), s.lastmessage, ln, s.flag_isset(ZERO),
-                     winio::waiting_keycodes())
+                    (
+                        s.flag_isset(CONSTANT_SHOW),
+                        s.lastmessage,
+                        ln,
+                        s.flag_isset(ZERO),
+                        winio::waiting_keycodes(),
+                    )
                 });
-                if constant_show && lastmsg2 == MessageType::Vacuum && lines2 > 1
-                    && !zero2 && waiting == 0
+                if constant_show
+                    && lastmsg2 == MessageType::Vacuum
+                    && lines2 > 1
+                    && !zero2
+                    && waiting == 0
                 {
                     winio::report_cursor_position();
                 }
@@ -3545,11 +4176,15 @@ pub fn nano_main() {
         {
             let (constant_show, lastmsg, lines, zero, waiting) = with_state(|s| {
                 let ln = s.editwinrows;
-                (s.flag_isset(CONSTANT_SHOW), s.lastmessage, ln, s.flag_isset(ZERO),
-                 winio::waiting_keycodes())
+                (
+                    s.flag_isset(CONSTANT_SHOW),
+                    s.lastmessage,
+                    ln,
+                    s.flag_isset(ZERO),
+                    winio::waiting_keycodes(),
+                )
             });
-            if constant_show && lastmsg == MessageType::Vacuum
-                && lines > 1 && !zero && waiting == 0
+            if constant_show && lastmsg == MessageType::Vacuum && lines > 1 && !zero && waiting == 0
             {
                 winio::report_cursor_position();
             }
@@ -3562,12 +4197,16 @@ pub fn nano_main() {
         {
             let using_utf8 = state().using_utf8;
             let at_bom = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .map(|cur| {
                         let b = cur.borrow();
                         let d = b.data.as_bytes();
-                        s.openfile.as_ref().map(|of| of.current_x == 0).unwrap_or(false)
+                        s.openfile
+                            .as_ref()
+                            .map(|of| of.current_x == 0)
+                            .unwrap_or(false)
                             && d.get(0) == Some(&0xEF)
                             && d.get(1) == Some(&0xBB)
                             && d.get(2) == Some(&0xBF)
@@ -3599,9 +4238,8 @@ pub fn nano_main() {
                 (s.flag_isset(ZERO), s.lastmessage, s.editwinrows, ln)
             });
             if zero && lastmsg > MessageType::Hush {
-                let cursor_row = with_state(|s| {
-                    s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0)
-                });
+                let cursor_row =
+                    with_state(|s| s.openfile.as_ref().map(|of| of.cursor_row).unwrap_or(0));
                 if cursor_row == (editwinrows - 1) as isize && lines > 1 {
                     winio::edit_scroll(FORWARD);
                     // wnoutrefresh(midwin) — flush happens in edit_refresh
@@ -3664,6 +4302,41 @@ mod signal_tests {
             assert!(SUSPEND_REQUESTED.swap(false, Ordering::SeqCst));
         }
     }
+
+    #[test]
+    fn emergency_save_preserves_non_utf8_path_and_document_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut filename_bytes = directory.path().as_os_str().as_bytes().to_vec();
+        filename_bytes.extend_from_slice(b"/buffer-\xFF.bin");
+        let filename = std::path::PathBuf::from(OsString::from_vec(filename_bytes));
+
+        let line = make_new_node(None);
+        let document = [b'a', 0xFF, 0, b'z'];
+        line.borrow_mut().data = LineData::from_external(&document);
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filename = filename.to_string_lossy().into_owned();
+        buffer.filename_path = filename.clone();
+        buffer.filetop = Some(line.clone());
+        buffer.filebot = Some(line.clone());
+        buffer.edittop = Some(line.clone());
+        buffer.current = Some(line);
+        buffer.modified = true;
+        state_mut().openfile = Some(buffer);
+
+        emergency_save(&filename);
+
+        let mut save_name = filename.as_os_str().to_os_string();
+        save_name.push(".save");
+        let save_path = std::path::PathBuf::from(save_name);
+        assert_eq!(std::fs::read(&save_path).unwrap(), document);
+        assert!(!directory.path().join("buffer-�.bin.save").exists());
+
+        state_mut().openfile = None;
+    }
 }
 
 #[cfg(test)]
@@ -3701,9 +4374,15 @@ mod cli_tests {
 
     #[test]
     fn feature_availability_matches_the_compiled_build() {
-        assert_eq!(long_option_is_available("multibuffer"), cfg!(feature = "multibuffer"));
+        assert_eq!(
+            long_option_is_available("multibuffer"),
+            cfg!(feature = "multibuffer")
+        );
         assert_eq!(short_option_is_available('s'), cfg!(feature = "speller"));
-        assert_eq!(long_option_is_available("magic"), cfg!(feature = "libmagic"));
+        assert_eq!(
+            long_option_is_available("magic"),
+            cfg!(feature = "libmagic")
+        );
     }
 }
 

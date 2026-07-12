@@ -1,0 +1,75 @@
+name: Broad PTY integrity
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Random seed (decimal or 0x-prefixed)
+        required: false
+        default: "0x4E414E4F"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pty-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  broad-pty-integrity:
+    name: Seeded and 1 MiB PTY byte integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pty-broad-${{ hashFiles('Cargo.toml') }}
+
+      - name: Install GNU nano reference
+        run: |
+          if [ ! -x /usr/bin/nano ]; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends nano
+          fi
+          /usr/bin/nano --version | grep -m1 'GNU nano'
+
+      - name: Build release candidate
+        run: cargo build --release --verbose
+
+      - name: Run broad PTY byte-integrity suite
+        env:
+          REQUESTED_SEED: ${{ inputs.seed }}
+        run: |
+          seed="${REQUESTED_SEED:-0x4E414E4F}"
+          python3 scripts/pty_integrity.py \
+            --candidate ./target/release/nano \
+            --reference /usr/bin/nano \
+            --profile broad \
+            --seed "$seed" \
+            --artifact-dir artifacts/pty-integrity
+
+      - name: Upload PTY failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pty-integrity-broad-${{ github.run_id }}
+          path: artifacts/pty-integrity
+          if-no-files-found: ignore
+          retention-days: 30

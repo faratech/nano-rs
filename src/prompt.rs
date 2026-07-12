@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/prompt.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2016, 2018, 2020-2022, 2025 Benno Schulenberg
@@ -253,7 +257,7 @@ pub fn copy_the_answer() {
         // free_lines(cutbuffer)  →  drop old cutbuffer
         // cutbuffer = make_new_node(NULL);  cutbuffer->data = copy_of(answer)
         let new_node = state_mut().lines.alloc(LineNode {
-            data: answer,
+            data: LineData::from_utf8(&answer),
             lineno: 0,
             next: None,
             prev: None,
@@ -273,16 +277,22 @@ pub fn copy_the_answer() {
 /// Paste the first line of the cutbuffer into the current answer.
 #[cfg(not(feature = "tiny"))]
 pub fn paste_into_answer() {
-    let paste_data: Option<String> = with_state(|s| {
-        s.cutbuffer.as_ref().map(|cb| cb.borrow().data.clone())
-    });
+    let paste_data: Option<LineData> =
+        with_state(|s| s.cutbuffer.as_ref().map(|cb| cb.borrow().data.clone()));
 
     if let Some(data) = paste_data {
+        let Some(text) = data.as_utf8() else {
+            crate::winio::statusline(
+                MessageType::Alert,
+                "Cannot paste non-UTF-8 document bytes into a prompt",
+            );
+            return;
+        };
         let pastelen = data.len();
         let typing_x = get_typing_x();
 
         with_state_mut(|s| {
-            s.answer.insert_str(typing_x, &data);
+            s.answer.insert_str(typing_x, text);
         });
 
         set_typing_x(typing_x + pastelen);
@@ -318,14 +328,9 @@ pub fn process_prompt_click() -> i32 {
             let typing_x = get_typing_x();
 
             if rel_col >= start_col as i32 {
-                let page_start = get_statusbar_page_start(
-                    start_col,
-                    start_col + wideness(&answer, typing_x),
-                );
-                let new_x = actual_x(
-                    &answer,
-                    page_start + (rel_col as usize) - start_col,
-                );
+                let page_start =
+                    get_statusbar_page_start(start_col, start_col + wideness(&answer, typing_x));
+                let new_x = actual_x(&answer, page_start + (rel_col as usize) - start_col);
                 set_typing_x(new_x);
             } else {
                 set_typing_x(0);
@@ -386,7 +391,10 @@ pub fn absorb_character(input: i32, function: Option<FuncPtr>) {
     let meta_key = state().meta_key;
     let currmenu = state().currmenu;
     let openfile_filename_empty = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.filename.is_empty()).unwrap_or(true)
+        s.openfile
+            .as_ref()
+            .map(|f| f.filename.is_empty())
+            .unwrap_or(true)
     });
     let restricted = ISSET!(RESTRICTED);
 
@@ -426,17 +434,25 @@ pub fn handle_editing(function: FuncPtr) -> bool {
         do_statusbar_right();
     } else if {
         #[cfg(not(feature = "tiny"))]
-        { function == to_prev_word as FuncPtr }
+        {
+            function == to_prev_word as FuncPtr
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     } {
         #[cfg(not(feature = "tiny"))]
         do_statusbar_prev_word();
     } else if {
         #[cfg(not(feature = "tiny"))]
-        { function == to_next_word as FuncPtr }
+        {
+            function == to_next_word as FuncPtr
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     } {
         #[cfg(not(feature = "tiny"))]
         do_statusbar_next_word();
@@ -450,7 +466,10 @@ pub fn handle_editing(function: FuncPtr) -> bool {
         let restricted = ISSET!(RESTRICTED);
         let at_writefile = state().currmenu == MWRITEFILE;
         let filename_nonempty = with_state(|s| {
-            s.openfile.as_ref().map(|f| !f.filename.is_empty()).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|f| !f.filename.is_empty())
+                .unwrap_or(false)
         });
         restricted && at_writefile && filename_nonempty
     } && (function == do_verbatim_input as FuncPtr
@@ -470,17 +489,25 @@ pub fn handle_editing(function: FuncPtr) -> bool {
         lop_the_answer();
     } else if {
         #[cfg(not(feature = "tiny"))]
-        { function == copy_text as FuncPtr }
+        {
+            function == copy_text as FuncPtr
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     } {
         #[cfg(not(feature = "tiny"))]
         copy_the_answer();
     } else if {
         #[cfg(not(feature = "tiny"))]
-        { function == paste_text as FuncPtr }
+        {
+            function == paste_text as FuncPtr
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     } {
         #[cfg(not(feature = "tiny"))]
         {
@@ -542,10 +569,7 @@ pub fn draw_the_promptbar() {
     let column = base + wideness(&answer, typing_x);
 
     let the_page = get_statusbar_page_start(base, column);
-    let end_page = get_statusbar_page_start(
-        base,
-        base + breadth(&answer).saturating_sub(1),
-    );
+    let end_page = get_statusbar_page_start(base, base + breadth(&answer).saturating_sub(1));
 
     let cols = crate::winio::get_cols();
 
@@ -725,7 +749,7 @@ fn acquire_an_answer(
 
         // Check for cancel or enter
         let is_cancel = function.map_or(false, |f| f == crate::global::do_cancel as FuncPtr);
-        let is_enter  = function.map_or(false, |f| f == crate::global::do_enter  as FuncPtr);
+        let is_enter = function.map_or(false, |f| f == crate::global::do_enter as FuncPtr);
 
         if is_cancel || is_enter {
             break;
@@ -774,8 +798,10 @@ fn acquire_an_answer(
 
         #[cfg(feature = "histories")]
         {
-            let is_older = function.map_or(false, |f| f == crate::global::get_older_item as FuncPtr);
-            let is_newer = function.map_or(false, |f| f == crate::global::get_newer_item as FuncPtr);
+            let is_older =
+                function.map_or(false, |f| f == crate::global::get_older_item as FuncPtr);
+            let is_newer =
+                function.map_or(false, |f| f == crate::global::get_newer_item as FuncPtr);
 
             if is_older && history_kind.is_some() {
                 let kind = history_kind.unwrap();
@@ -919,8 +945,8 @@ fn repaint_prompt_for_current_geometry(
 /// executed and the prompt should return that shortcut to its caller.  Help,
 /// refresh, prompt editing, and prompt-local toggles keep the prompt active.
 fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Option<fn()>) -> bool {
-    let is_help      = function.map_or(false, |f| f == crate::global::do_help         as FuncPtr);
-    let is_refresh   = function.map_or(false, |f| f == crate::global::full_refresh     as FuncPtr);
+    let is_help = function.map_or(false, |f| f == crate::global::do_help as FuncPtr);
+    let is_refresh = function.map_or(false, |f| f == crate::global::full_refresh as FuncPtr);
 
     if is_help || is_refresh {
         if let Some(f) = function {
@@ -968,7 +994,8 @@ fn history_handle_other(function: Option<FuncPtr>, input: i32, refresh_func: Opt
         if function.map_or(false, |f| f == crate::rcfile::implant_sentinel as FuncPtr) {
             let expansion = with_state(|s| {
                 let currmenu = s.currmenu;
-                s.sclist.iter()
+                s.sclist
+                    .iter()
                     .find(|sc| {
                         sc.keycode == input
                             && sc.func == function
@@ -1066,7 +1093,8 @@ fn do_tab_complete(refresh_func: Option<fn()>, listed: &mut bool) {
     if (currmenu & (MINSERTFILE | MWRITEFILE | MGOTODIR)) != 0 && !restricted {
         let answer = state().answer.clone();
         let mut tx = get_typing_x();
-        let new_answer = crate::files::input_tab(&answer, &mut tx, refresh_func.unwrap_or(|| {}), listed);
+        let new_answer =
+            crate::files::input_tab(&answer, &mut tx, refresh_func.unwrap_or(|| {}), listed);
         let _new_len = new_answer.len();
         state_mut().answer = new_answer;
         set_typing_x(tx);
@@ -1133,31 +1161,28 @@ pub fn do_prompt(
 
         state_mut().lastmessage = MessageType::Vacuum;
 
-        let (function, retval_raw) = acquire_an_answer(
-            history_kind,
-            refresh_func,
-            &mut listed,
-            menu,
-            msg,
-        );
+        let (function, retval_raw) =
+            acquire_an_answer(history_kind, refresh_func, &mut listed, menu, msg);
 
         /* Restore a possible previous prompt and maybe the typing position. */
         set_prompt(saved_prompt.clone());
 
         let restore_tx = function.map_or(false, |f| {
-            f == crate::global::do_cancel    as FuncPtr
-            || f == crate::global::do_enter  as FuncPtr
-            || f == crate::global::to_first_line as FuncPtr
-            || f == crate::global::to_last_line  as FuncPtr
-            || {
-                #[cfg(feature = "browser")]
-                {
-                    f == crate::global::to_first_file as FuncPtr
-                    || f == crate::global::to_last_file  as FuncPtr
+            f == crate::global::do_cancel as FuncPtr
+                || f == crate::global::do_enter as FuncPtr
+                || f == crate::global::to_first_line as FuncPtr
+                || f == crate::global::to_last_line as FuncPtr
+                || {
+                    #[cfg(feature = "browser")]
+                    {
+                        f == crate::global::to_first_file as FuncPtr
+                            || f == crate::global::to_last_file as FuncPtr
+                    }
+                    #[cfg(not(feature = "browser"))]
+                    {
+                        false
+                    }
                 }
-                #[cfg(not(feature = "browser"))]
-                { false }
-            }
         });
 
         if restore_tx {
@@ -1214,7 +1239,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
     // C: const char *yesstr = _("Yy");
     let yesstr = tr!("Yy");
     // C: const char *nostr  = _("Nn");
-    let nostr  = tr!("Nn");
+    let nostr = tr!("Nn");
     // C: const char *allstr = _("Aa");
     let allstr = tr!("Aa");
 
@@ -1310,9 +1335,13 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
             crate::global::full_refresh();
         } else if {
             #[cfg(not(feature = "tiny"))]
-            { func.map_or(false, |f| f == crate::global::do_toggle as FuncPtr) }
+            {
+                func.map_or(false, |f| f == crate::global::do_toggle as FuncPtr)
+            }
             #[cfg(feature = "tiny")]
-            { false }
+            {
+                false
+            }
         } {
             #[cfg(not(feature = "tiny"))]
             {
@@ -1338,7 +1367,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
         /* Interpret ^N as "No", to allow exiting in anger, and ^Q or ^X too. */
         else if kbinput == b'\x0E' as i32
             || (kbinput == b'\x11' as i32 && !ISSET!(MODERN_BINDINGS))
-            || (kbinput == b'\x18' as i32 &&  ISSET!(MODERN_BINDINGS))
+            || (kbinput == b'\x18' as i32 && ISSET!(MODERN_BINDINGS))
         {
             choice = NO;
             if kbinput != b'\x0E' as i32 {
@@ -1353,9 +1382,13 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
             choice = ALL;
         } else if {
             #[cfg(feature = "mouse")]
-            { kbinput == crate::winio::KEY_MOUSE_CODE }
+            {
+                kbinput == crate::winio::KEY_MOUSE_CODE
+            }
             #[cfg(not(feature = "mouse"))]
-            { false }
+            {
+                false
+            }
         } {
             #[cfg(feature = "mouse")]
             {
@@ -1366,12 +1399,17 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
                     // verify the click is inside footwin.  get_mouseinput returns
                     // ABSOLUTE coords, so the Yes/No/All math needs relative ones.
                     let (foot_y, foot_x, foot_rows, foot_cols) = with_state(|s| {
-                        (s.footwin.y as i32, s.footwin.x as i32,
-                         s.footwin.rows as i32, s.footwin.cols as i32)
+                        (
+                            s.footwin.y as i32,
+                            s.footwin.x as i32,
+                            s.footwin.rows as i32,
+                            s.footwin.cols as i32,
+                        )
                     });
                     let rel_y = mouse_y - foot_y;
                     let rel_x = mouse_x - foot_x;
-                    let in_footwin = rel_y >= 0 && rel_y < foot_rows && rel_x >= 0 && rel_x < foot_cols;
+                    let in_footwin =
+                        rel_y >= 0 && rel_y < foot_rows && rel_x >= 0 && rel_x < foot_cols;
                     if in_footwin && rel_x < (width * 2) as i32 && rel_y > 0 {
                         let x = rel_x / width as i32;
                         let y = rel_y - 1;
@@ -1451,9 +1489,13 @@ fn is_word_char(s: &str, allow_punct: bool) -> bool {
 #[inline]
 fn is_zerowidth(s: &str) -> bool {
     #[cfg(feature = "utf8")]
-    { crate::chars::is_zerowidth(s) }
+    {
+        crate::chars::is_zerowidth(s)
+    }
     #[cfg(not(feature = "utf8"))]
-    { false }
+    {
+        false
+    }
 }
 
 /// C: char *display_string(…) — produce a printable version of the answer
@@ -1485,12 +1527,18 @@ mod tests {
     fn permissible_generic_action_terminates_prompt_acquisition() {
         GENERIC_CALLS.store(0, Ordering::SeqCst);
         assert!(history_handle_other(
-            Some(generic_prompt_action as FuncPtr), 0, None));
+            Some(generic_prompt_action as FuncPtr),
+            0,
+            None
+        ));
         assert_eq!(GENERIC_CALLS.load(Ordering::SeqCst), 1);
 
         #[cfg(not(feature = "tiny"))]
         assert!(!history_handle_other(
-            Some(crate::global::do_nothing as FuncPtr), 0, None));
+            Some(crate::global::do_nothing as FuncPtr),
+            0,
+            None
+        ));
     }
 
     #[cfg(feature = "histories")]
@@ -1498,7 +1546,11 @@ mod tests {
     fn reaching_each_history_bottom_restores_the_unicode_draft() {
         use crate::history::HistoryKind;
 
-        for kind in [HistoryKind::Search, HistoryKind::Replace, HistoryKind::Execute] {
+        for kind in [
+            HistoryKind::Search,
+            HistoryKind::Replace,
+            HistoryKind::Execute,
+        ] {
             crate::history::history_init();
             crate::history::update_history(kind, "older", false);
             state_mut().answer = "older".into();
@@ -1524,11 +1576,7 @@ mod tests {
 
         let mut stored = Some("original draft".to_string());
         state_mut().answer = "recalled + edit".into();
-        abandon_history_navigation_after_edit(
-            Some(HistoryKind::Search),
-            "recalled",
-            &mut stored,
-        );
+        abandon_history_navigation_after_edit(Some(HistoryKind::Search), "recalled", &mut stored);
 
         assert_eq!(stored, None);
         assert_eq!(state().answer, "recalled + edit");

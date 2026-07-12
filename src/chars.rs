@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 use crate::definitions::*;
 use crate::global::STATE;
 use unicode_width::UnicodeWidthChar;
@@ -11,18 +15,35 @@ use unicode_width::UnicodeWidthChar;
 // startup (nano.rs) and never changes afterwards; caching it here avoids
 // a thread-local STATE lookup on every character scanned in the
 // width/stepping hot paths below.
+#[cfg(not(test))]
 static USING_UTF8: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static USING_UTF8_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[inline(always)]
+fn raw<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {
+    value.as_ref()
+}
 
 /// Record the startup-determined UTF-8 mode (also kept in AppState.using_utf8).
 #[inline]
 pub fn remember_utf8(on: bool) {
+    #[cfg(not(test))]
     USING_UTF8.store(on, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    USING_UTF8_FOR_TEST.with(|mode| mode.set(on));
 }
 
 /// Is the locale UTF-8?  Cached equivalent of `STATE.using_utf8`.
 #[inline]
 pub fn using_utf8() -> bool {
-    USING_UTF8.load(std::sync::atomic::Ordering::Relaxed)
+    #[cfg(not(test))]
+    return USING_UTF8.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    return USING_UTF8_FOR_TEST.with(std::cell::Cell::get);
 }
 
 // ── Character classification ─────────────────────────────────────────────────
@@ -30,27 +51,31 @@ pub fn using_utf8() -> bool {
 /* C: bool is_alpha_char(const char *c)
  * Return true when the character at the start of `c` is some kind of letter. */
 #[cfg(feature = "speller")]
-pub fn is_alpha_char(c: &str) -> bool {
-    match c.chars().next() {
-        Some(ch) => ch.is_alphabetic(),
-        None => false,
+pub fn is_alpha_char<T: AsRef<[u8]> + ?Sized>(c: &T) -> bool {
+    if !using_utf8() {
+        return raw(c).first().is_some_and(u8::is_ascii_alphabetic);
     }
+    mbtowide(c)
+        .map(|(ch, _)| ch.is_alphabetic())
+        .unwrap_or(false)
 }
 
 /* C: bool is_alnum_char(const char *c)
  * Return true when the character at the start of `c` is a letter or a digit. */
-pub fn is_alnum_char(c: &str) -> bool {
-    match c.chars().next() {
-        Some(ch) => ch.is_alphanumeric(),
-        None => false,
+pub fn is_alnum_char<T: AsRef<[u8]> + ?Sized>(c: &T) -> bool {
+    if !using_utf8() {
+        return raw(c).first().is_some_and(u8::is_ascii_alphanumeric);
     }
+    mbtowide(c)
+        .map(|(ch, _)| ch.is_alphanumeric())
+        .unwrap_or(false)
 }
 
 /* C: bool is_blank_char(const char *c)
  * Return true when the character at the start of `c` is a space, tab, or other
  * Unicode whitespace (but NOT a newline — mirrors iswblank behaviour). */
-pub fn is_blank_char(c: &str) -> bool {
-    let bytes = c.as_bytes();
+pub fn is_blank_char<T: AsRef<[u8]> + ?Sized>(c: &T) -> bool {
+    let bytes = raw(c);
     if bytes.is_empty() {
         return false;
     }
@@ -59,8 +84,11 @@ pub fn is_blank_char(c: &str) -> bool {
     if first < 0x80 {
         return first == b' ' || first == b'\t';
     }
+    if !using_utf8() {
+        return false;
+    }
     // Multi-byte path: decode the first char and test Unicode blank category.
-    match c.chars().next() {
+    match mbtowide(c).ok().map(|pair| pair.0) {
         // iswblank matches horizontal whitespace (space / tab and Unicode equivalents)
         Some(ch) => {
             matches!(
@@ -69,7 +97,8 @@ pub fn is_blank_char(c: &str) -> bool {
                 | '\u{0020}' // SPACE
                 | '\u{00A0}' // NO-BREAK SPACE
                 | '\u{1680}' // OGHAM SPACE MARK
-                | '\u{2000}'..='\u{200A}' // various typographic spaces
+                | '\u{2000}'
+                    ..='\u{200A}' // various typographic spaces
                 | '\u{202F}' // NARROW NO-BREAK SPACE
                 | '\u{205F}' // MEDIUM MATHEMATICAL SPACE
                 | '\u{3000}' // IDEOGRAPHIC SPACE
@@ -83,8 +112,8 @@ pub fn is_blank_char(c: &str) -> bool {
  * Return true when the character at the start of `c` is a control character.
  * Mirrors the C implementation's byte-level checks (including UTF-8 upper
  * control codes U+0080..U+009F). */
-pub fn is_cntrl_char(c: &str) -> bool {
-    let bytes = c.as_bytes();
+pub fn is_cntrl_char<T: AsRef<[u8]> + ?Sized>(c: &T) -> bool {
+    let bytes = raw(c);
     if bytes.is_empty() {
         return false;
     }
@@ -120,11 +149,13 @@ pub fn is_cntrl_char(c: &str) -> bool {
 
 /* C: bool is_punct_char(const char *c)
  * Return true when the character at the start of `c` is a punctuation character. */
-pub fn is_punct_char(c: &str) -> bool {
-    match c.chars().next() {
-        Some(ch) => ch.is_ascii_punctuation() || unicode_is_punct(ch),
-        None => false,
+pub fn is_punct_char<T: AsRef<[u8]> + ?Sized>(c: &T) -> bool {
+    if !using_utf8() {
+        return raw(c).first().is_some_and(u8::is_ascii_punctuation);
     }
+    mbtowide(c)
+        .map(|(ch, _)| ch.is_ascii_punctuation() || unicode_is_punct(ch))
+        .unwrap_or(false)
 }
 
 /// Helper: Unicode punctuation check (mirrors glibc's iswpunct).
@@ -160,8 +191,9 @@ fn is_ignorable_format(ch: char) -> bool {
 /* C: bool is_word_char(const char *c, bool allow_punct)
  * Return true when the character is word-forming: alphanumeric, in `word_chars`,
  * or (when `allow_punct` is true) punctuation. */
-pub fn is_word_char(c: &str, allow_punct: bool) -> bool {
-    if c.is_empty() {
+pub fn is_word_char<T: AsRef<[u8]> + ?Sized>(c: &T, allow_punct: bool) -> bool {
+    let bytes = raw(c);
+    if bytes.is_empty() {
         return false;
     }
 
@@ -177,10 +209,12 @@ pub fn is_word_char(c: &str, allow_punct: bool) -> bool {
     let word_chars = STATE.with(|s| s.borrow().word_chars.clone());
     if let Some(ref wc) = word_chars {
         if !wc.is_empty() {
-            // Collect the first multibyte char from `c` as a &str slice
-            let ch_len = char_length(c);
-            let symbol = &c[..ch_len];
-            return wc.contains(symbol);
+            // Match a complete character.  A raw malformed continuation byte
+            // must not match the same byte inside a valid UTF-8 scalar from
+            // the configured word-character list.
+            let ch_len = char_length(c).min(bytes.len());
+            let symbol = &bytes[..ch_len];
+            return mbstrchr(wc, &symbol).is_some();
         }
     }
 
@@ -208,8 +242,8 @@ pub fn control_rep(c: i8) -> char {
 
 /* C: char control_mbrep(const char *c, bool isdata)
  * Return the visible representation of a multibyte control character. */
-pub fn control_mbrep(c: &str, isdata: bool) -> char {
-    let bytes = c.as_bytes();
+pub fn control_mbrep<T: AsRef<[u8]> + ?Sized>(c: &T, isdata: bool) -> char {
+    let bytes = raw(c);
     if bytes.is_empty() {
         return '?';
     }
@@ -243,8 +277,8 @@ pub fn control_mbrep(c: &str, isdata: bool) -> char {
  * Convert the multibyte sequence at the start of `c` to a Rust char.
  * Returns Ok((char, byte_length)) on success, or Err(()) for an invalid sequence.
  * This mirrors nano's custom UTF-8 decoder exactly. */
-pub fn mbtowide(c: &str) -> Result<(char, usize), ()> {
-    let bytes = c.as_bytes();
+pub fn mbtowide<T: AsRef<[u8]> + ?Sized>(c: &T) -> Result<(char, usize), ()> {
+    let bytes = raw(c);
     if bytes.is_empty() {
         return Err(());
     }
@@ -277,9 +311,7 @@ pub fn mbtowide(c: &str) -> Result<(char, usize), ()> {
 
         if v1 < 0xF0 {
             if (v1 > 0xE0 || v2 >= 0x20) && (v1 != 0xED || v2 < 0x20) {
-                let codepoint = (((v1 & 0x0F) as u32) << 12)
-                    | ((v2 as u32) << 6)
-                    | (v3 as u32);
+                let codepoint = (((v1 & 0x0F) as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
                 return char::from_u32(codepoint).map(|ch| (ch, 3)).ok_or(());
             } else {
                 return Err(());
@@ -313,8 +345,8 @@ pub fn mbtowide(c: &str) -> Result<(char, usize), ()> {
 /* C: bool is_doublewidth(const char *ch)
  * Return true when the character at the start of `ch` occupies two terminal columns. */
 #[cfg(feature = "utf8")]
-pub fn is_doublewidth(ch: &str) -> bool {
-    let bytes = ch.as_bytes();
+pub fn is_doublewidth<T: AsRef<[u8]> + ?Sized>(ch: &T) -> bool {
+    let bytes = raw(ch);
     if bytes.is_empty() {
         return false;
     }
@@ -335,8 +367,8 @@ pub fn is_doublewidth(ch: &str) -> bool {
 /* C: bool is_zerowidth(const char *ch)
  * Return true when the character at the start of `ch` occupies zero terminal columns. */
 #[cfg(feature = "utf8")]
-pub fn is_zerowidth(ch: &str) -> bool {
-    let bytes = ch.as_bytes();
+pub fn is_zerowidth<T: AsRef<[u8]> + ?Sized>(ch: &T) -> bool {
+    let bytes = raw(ch);
     if bytes.is_empty() {
         return false;
     }
@@ -366,8 +398,8 @@ pub fn is_zerowidth(ch: &str) -> bool {
 /* C: int char_length(const char *pointer)
  * Return the number of bytes in the character that starts at `pointer`.
  * Mirrors nano's custom validation logic exactly. */
-pub fn char_length(s: &str) -> usize {
-    let bytes = s.as_bytes();
+pub fn char_length<T: AsRef<[u8]> + ?Sized>(s: &T) -> usize {
+    let bytes = raw(s);
     if bytes.is_empty() {
         return 1; // safety fallback
     }
@@ -421,8 +453,8 @@ pub fn char_length(s: &str) -> usize {
 
 /* C: size_t mbstrlen(const char *pointer)
  * Return the number of (multibyte) characters in the given string. */
-pub fn mbstrlen(s: &str) -> usize {
-    let bytes = s.as_bytes();
+pub fn mbstrlen<T: AsRef<[u8]> + ?Sized>(s: &T) -> usize {
+    let bytes = raw(s);
     // nano treats an embedded NUL as the end of the string (C string semantics).
     let end = match bytes.iter().position(|&b| b == 0) {
         Some(p) => p,
@@ -432,28 +464,30 @@ pub fn mbstrlen(s: &str) -> usize {
         // Single-byte locale: exactly one character per byte.
         return end;
     }
-    // UTF-8: the character count is the number of bytes that are NOT continuation
-    // bytes (0x80..=0xBF). Because a Rust &str is always well-formed UTF-8, this is
-    // identical to walking char_length() per character, but in one branch-light,
-    // auto-vectorizable pass instead of a function call per character — this is the
-    // dominant cost in count_chars_in_chain / totsize on large files.
-    bytes[..end].iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+    let mut count = 0;
+    let mut at = 0;
+    while at < end {
+        at += char_length(&bytes[at..end]);
+        count += 1;
+    }
+    count
 }
 
 /* C: int collect_char(const char *string, char *thechar)
  * Return the length (in bytes) of the character at the start of `string`,
  * and return a copy of that character as a String. */
-pub fn collect_char(s: &str) -> (usize, String) {
+pub fn collect_char<T: AsRef<[u8]> + ?Sized>(s: &T) -> (usize, LineData) {
+    let bytes = raw(s);
     let charlen = char_length(s);
-    let safe_end = charlen.min(s.len());
-    (charlen, s[..safe_end].to_string())
+    let safe_end = charlen.min(bytes.len());
+    (charlen, LineData::from_internal(bytes[..safe_end].to_vec()))
 }
 
 /* C: int advance_over(const char *string, size_t *column)
  * Return the number of bytes in the character at the start of `string`,
  * and add that character's display width to `*column`. */
-pub fn advance_over(s: &str, column: &mut usize) -> usize {
-    let bytes = s.as_bytes();
+pub fn advance_over<T: AsRef<[u8]> + ?Sized>(s: &T, column: &mut usize) -> usize {
+    let bytes = raw(s);
     if bytes.is_empty() {
         return 1;
     }
@@ -519,7 +553,7 @@ pub fn advance_over(s: &str, column: &mut usize) -> usize {
 /* C: size_t step_left(const char *buf, size_t pos)
  * Return the byte index of the start of the multibyte character immediately
  * before position `pos` in `buf`. */
-pub fn step_left(buf: &str, pos: usize) -> usize {
+pub fn step_left<T: AsRef<[u8]> + ?Sized>(buf: &T, pos: usize) -> usize {
     let using_utf8 = using_utf8();
 
     if using_utf8 {
@@ -527,7 +561,7 @@ pub fn step_left(buf: &str, pos: usize) -> usize {
             return 0;
         }
 
-        let bytes = buf.as_bytes();
+        let bytes = raw(buf);
         let _start_search = if pos < 4 { 0 } else { pos - 4 };
 
         // Probe backwards for a valid UTF-8 starter byte
@@ -548,7 +582,7 @@ pub fn step_left(buf: &str, pos: usize) -> usize {
         let mut prev = before;
         while cur < pos {
             prev = cur;
-            cur += char_length(&buf[cur..]);
+            cur += char_length(&bytes[cur..]);
         }
         prev
     } else {
@@ -562,14 +596,15 @@ pub fn step_left(buf: &str, pos: usize) -> usize {
 fn is_utf8_starter(b: u8) -> bool {
     // Continuation bytes have the form 10xxxxxx (0x80..0xBF)
     // A starter byte is anything outside that range.
-    (b as i8) > -65_i8  // −65 as i8 is 0xBF; bytes > 0xBF or < 0x80 are starters
+    (b as i8) > -65_i8 // −65 as i8 is 0xBF; bytes > 0xBF or < 0x80 are starters
 }
 
 /* C: size_t step_right(const char *buf, size_t pos)
  * Return the byte index of the start of the multibyte character immediately
  * after position `pos` in `buf`. */
-pub fn step_right(buf: &str, pos: usize) -> usize {
-    pos + char_length(&buf[pos..])
+pub fn step_right<T: AsRef<[u8]> + ?Sized>(buf: &T, pos: usize) -> usize {
+    let bytes = raw(buf);
+    pos + char_length(&bytes[pos..])
 }
 
 // ── Case-insensitive multibyte comparisons ────────────────────────────────────
@@ -577,20 +612,24 @@ pub fn step_right(buf: &str, pos: usize) -> usize {
 /* C: int mbstrcasecmp(const char *s1, const char *s2)
  * Case-insensitive string comparison for multibyte strings.
  * Returns 0 if equal, negative if s1 < s2, positive if s1 > s2. */
-pub fn mbstrcasecmp(s1: &str, s2: &str) -> i32 {
+pub fn mbstrcasecmp<A: AsRef<[u8]> + ?Sized, B: AsRef<[u8]> + ?Sized>(s1: &A, s2: &B) -> i32 {
     mbstrncasecmp(s1, s2, usize::MAX)
 }
 
 /* C: int mbstrncasecmp(const char *s1, const char *s2, size_t n)
  * Case-insensitive comparison of up to `n` characters of two multibyte strings. */
-pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
+pub fn mbstrncasecmp<A: AsRef<[u8]> + ?Sized, B: AsRef<[u8]> + ?Sized>(
+    s1: &A,
+    s2: &B,
+    n: usize,
+) -> i32 {
     let using_utf8 = using_utf8();
 
     if using_utf8 {
         let mut p1 = 0usize;
         let mut p2 = 0usize;
-        let b1 = s1.as_bytes();
-        let b2 = s2.as_bytes();
+        let b1 = raw(s1);
+        let b2 = raw(s2);
         let mut remaining = n;
 
         while p1 < b1.len() && b1[p1] != 0 && p2 < b2.len() && b2[p2] != 0 && remaining > 0 {
@@ -601,8 +640,16 @@ pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
             if byte1 >= 0 && byte2 >= 0 {
                 let u1 = b1[p1];
                 let u2 = b2[p2];
-                let lower1 = if u1.is_ascii_uppercase() { u1 | 0x20 } else { u1 };
-                let lower2 = if u2.is_ascii_uppercase() { u2 | 0x20 } else { u2 };
+                let lower1 = if u1.is_ascii_uppercase() {
+                    u1 | 0x20
+                } else {
+                    u1
+                };
+                let lower2 = if u2.is_ascii_uppercase() {
+                    u2 | 0x20
+                } else {
+                    u2
+                };
                 if lower1 != lower2 {
                     return lower1 as i32 - lower2 as i32;
                 }
@@ -613,8 +660,8 @@ pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
             }
 
             // Multi-byte path
-            let res1 = mbtowide(&s1[p1..]);
-            let res2 = mbtowide(&s2[p2..]);
+            let res1 = mbtowide(&b1[p1..]);
+            let res2 = mbtowide(&b2[p2..]);
 
             match (res1, res2) {
                 (Ok((wc1, len1)), Ok((wc2, len2))) => {
@@ -648,8 +695,8 @@ pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
         }
     } else {
         // Non-UTF-8: byte-level case-insensitive comparison
-        let bytes1 = s1.as_bytes();
-        let bytes2 = s2.as_bytes();
+        let bytes1 = raw(s1);
+        let bytes2 = raw(s2);
         for i in 0..n {
             let b1 = bytes1.get(i).copied().unwrap_or(0);
             let b2 = bytes2.get(i).copied().unwrap_or(0);
@@ -669,37 +716,51 @@ pub fn mbstrncasecmp(s1: &str, s2: &str, n: usize) -> i32 {
 /* C: char *mbstrcasestr(const char *haystack, const char *needle)
  * Case-insensitive substring search for multibyte strings.
  * Returns the byte offset of the first match in `haystack`, or None. */
-pub fn mbstrcasestr(haystack: &str, needle: &str) -> Option<usize> {
+pub fn mbstrcasestr<H: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
+    haystack: &H,
+    needle: &N,
+) -> Option<usize> {
+    if raw(needle).is_empty() {
+        return Some(0);
+    }
     let using_utf8 = using_utf8();
 
     if using_utf8 {
         let needle_chars = mbstrlen(needle);
         let mut pos = 0;
-        let bytes = haystack.as_bytes();
+        let bytes = raw(haystack);
         while pos < bytes.len() && bytes[pos] != 0 {
-            if mbstrncasecmp(&haystack[pos..], needle, needle_chars) == 0 {
+            if mbstrncasecmp(&bytes[pos..], needle, needle_chars) == 0 {
                 return Some(pos);
             }
-            pos += char_length(&haystack[pos..]);
+            pos += char_length(&bytes[pos..]);
         }
         None
     } else {
         // Non-UTF-8: ASCII case-insensitive search
-        let hay_lower: String = haystack.to_ascii_lowercase();
-        let needle_lower: String = needle.to_ascii_lowercase();
-        hay_lower.find(&needle_lower)
+        let hay_lower: Vec<u8> = raw(haystack).iter().map(u8::to_ascii_lowercase).collect();
+        let needle_lower: Vec<u8> = raw(needle).iter().map(u8::to_ascii_lowercase).collect();
+        hay_lower
+            .windows(needle_lower.len())
+            .position(|part| part == needle_lower)
     }
 }
 
 /* C: char *revstrstr(const char *haystack, const char *needle, const char *pointer)
  * Reverse strstr — find last occurrence of `needle` in `haystack` that starts
  * at or before `start_offset`. */
-pub fn revstrstr(haystack: &str, needle: &str, start_offset: usize) -> Option<usize> {
-    if needle.is_empty() {
+pub fn revstrstr<H: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
+    haystack: &H,
+    needle: &N,
+    start_offset: usize,
+) -> Option<usize> {
+    let hay_bytes = raw(haystack);
+    let needle_bytes = raw(needle);
+    if needle_bytes.is_empty() {
         return Some(start_offset);
     }
-    let needle_len = needle.len();
-    let tail_len = haystack.len().saturating_sub(start_offset);
+    let needle_len = needle_bytes.len();
+    let tail_len = hay_bytes.len().saturating_sub(start_offset);
 
     let mut ptr = if tail_len < needle_len {
         start_offset.saturating_sub(needle_len - tail_len)
@@ -707,12 +768,8 @@ pub fn revstrstr(haystack: &str, needle: &str, start_offset: usize) -> Option<us
         start_offset
     };
 
-    let hay_bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
-
     loop {
-        if ptr + needle_len <= hay_bytes.len()
-            && &hay_bytes[ptr..ptr + needle_len] == needle_bytes
+        if ptr + needle_len <= hay_bytes.len() && &hay_bytes[ptr..ptr + needle_len] == needle_bytes
         {
             return Some(ptr);
         }
@@ -726,21 +783,24 @@ pub fn revstrstr(haystack: &str, needle: &str, start_offset: usize) -> Option<us
 
 /* C: char *revstrcasestr(const char *haystack, const char *needle, const char *pointer)
  * Reverse case-insensitive strstr (single-byte version). */
-pub fn revstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Option<usize> {
-    if needle.is_empty() {
+pub fn revstrcasestr<H: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
+    haystack: &H,
+    needle: &N,
+    start_offset: usize,
+) -> Option<usize> {
+    let hay_bytes = raw(haystack);
+    let needle_bytes = raw(needle);
+    if needle_bytes.is_empty() {
         return Some(start_offset);
     }
-    let needle_len = needle.len();
-    let tail_len = haystack.len().saturating_sub(start_offset);
+    let needle_len = needle_bytes.len();
+    let tail_len = hay_bytes.len().saturating_sub(start_offset);
 
     let mut ptr = if tail_len < needle_len {
         start_offset.saturating_sub(needle_len - tail_len)
     } else {
         start_offset
     };
-
-    let hay_bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
 
     loop {
         if ptr + needle_len <= hay_bytes.len() {
@@ -763,12 +823,17 @@ pub fn revstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Optio
 
 /* C: char *mbrevstrcasestr(const char *haystack, const char *needle, const char *pointer)
  * Reverse case-insensitive search for multibyte strings, starting at `start_offset`. */
-pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Option<usize> {
+pub fn mbrevstrcasestr<H: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
+    haystack: &H,
+    needle: &N,
+    start_offset: usize,
+) -> Option<usize> {
     let using_utf8 = using_utf8();
 
     if using_utf8 {
         let needle_chars = mbstrlen(needle);
-        let tail_chars = mbstrlen(&haystack[start_offset..]);
+        let hay_bytes = raw(haystack);
+        let tail_chars = mbstrlen(&hay_bytes[start_offset..]);
 
         let mut ptr = if tail_chars < needle_chars {
             let diff = needle_chars - tail_chars;
@@ -784,12 +849,12 @@ pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Opt
             start_offset
         };
 
-        if ptr > haystack.len() {
+        if ptr > hay_bytes.len() {
             return None;
         }
 
         loop {
-            if mbstrncasecmp(&haystack[ptr..], needle, needle_chars) == 0 {
+            if mbstrncasecmp(&hay_bytes[ptr..], needle, needle_chars) == 0 {
                 return Some(ptr);
             }
             if ptr == 0 {
@@ -807,20 +872,23 @@ pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Opt
 /* C: const char *mbstrchr(const char *string, const char *chr)
  * Find the first occurrence of the multibyte character `chr` in `string`.
  * Returns the byte offset of the match, or None. */
-pub fn mbstrchr(string: &str, chr: &str) -> Option<usize> {
+pub fn mbstrchr<S: AsRef<[u8]> + ?Sized, C: AsRef<[u8]> + ?Sized>(
+    string: &S,
+    chr: &C,
+) -> Option<usize> {
     let using_utf8 = using_utf8();
 
     if using_utf8 {
         let (wc_needle, bad_c) = match mbtowide(chr) {
             Ok((wc, _)) => (wc as u32, false),
-            Err(_) => (chr.as_bytes().first().copied().unwrap_or(0) as u32, true),
+            Err(_) => (raw(chr).first().copied().unwrap_or(0) as u32, true),
         };
 
         let mut pos = 0;
-        let bytes = string.as_bytes();
+        let bytes = raw(string);
 
         while pos < bytes.len() && bytes[pos] != 0 {
-            let (ws, bad_s, symlen) = match mbtowide(&string[pos..]) {
+            let (ws, bad_s, symlen) = match mbtowide(&bytes[pos..]) {
                 Ok((wc, len)) => (wc as u32, false, len),
                 Err(_) => (bytes[pos] as u32, true, 1usize),
             };
@@ -835,24 +903,27 @@ pub fn mbstrchr(string: &str, chr: &str) -> Option<usize> {
         None
     } else {
         // Single-byte: find first occurrence of chr[0]
-        let target = chr.as_bytes().first().copied()?;
-        string.as_bytes().iter().position(|&b| b == target)
+        let target = raw(chr).first().copied()?;
+        raw(string).iter().position(|&b| b == target)
     }
 }
 
 /* C: char *mbstrpbrk(const char *string, const char *accept)
  * Find the first character in `string` that is also in `accept` (multibyte-aware). */
 #[cfg(not(feature = "tiny"))]
-pub fn mbstrpbrk(string: &str, accept: &str) -> Option<usize> {
+pub fn mbstrpbrk<S: AsRef<[u8]> + ?Sized, A: AsRef<[u8]> + ?Sized>(
+    string: &S,
+    accept: &A,
+) -> Option<usize> {
     let mut pos = 0;
-    let bytes = string.as_bytes();
+    let bytes = raw(string);
 
     while pos < bytes.len() && bytes[pos] != 0 {
         #[cfg(any(not(feature = "tiny"), feature = "justify"))]
-        if mbstrchr(accept, &string[pos..]).is_some() {
+        if mbstrchr(accept, &bytes[pos..]).is_some() {
             return Some(pos);
         }
-        pos += char_length(&string[pos..]);
+        pos += char_length(&bytes[pos..]);
     }
 
     None
@@ -862,8 +933,12 @@ pub fn mbstrpbrk(string: &str, accept: &str) -> Option<usize> {
  * Find the first character (searching backwards from `start_offset`) in `head`
  * that is also in `accept` (multibyte-aware). */
 #[cfg(not(feature = "tiny"))]
-pub fn mbrevstrpbrk(head: &str, accept: &str, start_offset: usize) -> Option<usize> {
-    let head_bytes = head.as_bytes();
+pub fn mbrevstrpbrk<H: AsRef<[u8]> + ?Sized, A: AsRef<[u8]> + ?Sized>(
+    head: &H,
+    accept: &A,
+    start_offset: usize,
+) -> Option<usize> {
+    let head_bytes = raw(head);
 
     // If pointer is at the end (NUL), step back one character
     let mut ptr = if start_offset >= head_bytes.len() || head_bytes[start_offset] == 0 {
@@ -877,7 +952,7 @@ pub fn mbrevstrpbrk(head: &str, accept: &str, start_offset: usize) -> Option<usi
 
     loop {
         #[cfg(any(not(feature = "tiny"), feature = "justify"))]
-        if mbstrchr(accept, &head[ptr..]).is_some() {
+        if mbstrchr(accept, &head_bytes[ptr..]).is_some() {
             return Some(ptr);
         }
         if ptr == 0 {
@@ -891,14 +966,14 @@ pub fn mbrevstrpbrk(head: &str, accept: &str, start_offset: usize) -> Option<usi
 
 /* C: bool has_blank_char(const char *string)
  * Return true if the given string contains at least one blank character. */
-pub fn has_blank_char(string: &str) -> bool {
+pub fn has_blank_char<S: AsRef<[u8]> + ?Sized>(string: &S) -> bool {
     let mut pos = 0;
-    let bytes = string.as_bytes();
+    let bytes = raw(string);
     while pos < bytes.len() && bytes[pos] != 0 {
-        if is_blank_char(&string[pos..]) {
+        if is_blank_char(&bytes[pos..]) {
             return true;
         }
-        pos += char_length(&string[pos..]);
+        pos += char_length(&bytes[pos..]);
     }
     false
 }
@@ -906,15 +981,15 @@ pub fn has_blank_char(string: &str) -> bool {
 /* C: bool white_string(const char *string)
  * Return true when the given string is empty or consists entirely of blanks
  * (or carriage returns). */
-pub fn white_string(string: &str) -> bool {
+pub fn white_string<S: AsRef<[u8]> + ?Sized>(string: &S) -> bool {
     let mut pos = 0;
-    let bytes = string.as_bytes();
+    let bytes = raw(string);
     while pos < bytes.len() && bytes[pos] != 0 {
         let ch = bytes[pos];
-        if !is_blank_char(&string[pos..]) && ch != b'\r' {
+        if !is_blank_char(&bytes[pos..]) && ch != b'\r' {
             return false;
         }
-        pos += char_length(&string[pos..]);
+        pos += char_length(&bytes[pos..]);
     }
     true
 }
@@ -925,4 +1000,90 @@ pub fn white_string(string: &str) -> bool {
 pub fn strip_leading_blanks_from(s: &mut String) {
     let trimmed = s.trim_start_matches(|c| c == ' ' || c == '\t').to_string();
     *s = trimmed;
+}
+
+#[cfg(test)]
+mod byte_semantics_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static UTF8_MODE: Mutex<()> = Mutex::new(());
+
+    struct RestoreMode(bool);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            remember_utf8(self.0);
+        }
+    }
+
+    fn in_mode<T>(utf8: bool, test: impl FnOnce() -> T) -> T {
+        let _lock = UTF8_MODE.lock().unwrap();
+        let restore = RestoreMode(using_utf8());
+        remember_utf8(utf8);
+        let result = test();
+        drop(restore);
+        result
+    }
+
+    #[test]
+    fn malformed_utf8_bytes_are_individual_units() {
+        in_mode(true, || {
+            let malformed: &[&[u8]] = &[
+                &[0x80],
+                &[0xC0, 0xAF],
+                &[0xE2, 0x82],
+                &[0xED, 0xA0, 0x80],
+                &[0xF4, 0x90, 0x80, 0x80],
+                &[0xFF],
+            ];
+            for bytes in malformed {
+                assert_eq!(mbstrlen(bytes), bytes.len(), "{bytes:02X?}");
+                let mut at = 0;
+                while at < bytes.len() {
+                    assert_eq!(char_length(&bytes[at..]), 1, "{bytes:02X?} at {at}");
+                    let next = step_right(bytes, at);
+                    assert_eq!(step_left(bytes, next), at, "{bytes:02X?} at {at}");
+                    at = next;
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn valid_utf8_scalars_remain_atomic() {
+        in_mode(true, || {
+            let data = "Aé界😀B".as_bytes();
+            let expected = [0, 1, 3, 6, 10, 11];
+            for pair in expected.windows(2) {
+                assert_eq!(step_right(data, pair[0]), pair[1]);
+                assert_eq!(step_left(data, pair[1]), pair[0]);
+            }
+            assert_eq!(mbstrlen(data), 5);
+        });
+    }
+
+    #[test]
+    fn single_byte_locale_steps_every_byte() {
+        in_mode(false, || {
+            let data: Vec<u8> = (0..=255).collect();
+            for at in 0..data.len() {
+                assert_eq!(char_length(&data[at..]), 1);
+                assert_eq!(step_right(&data, at), at + 1);
+                assert_eq!(step_left(&data, at + 1), at);
+            }
+            // C locale classification is ASCII-only.
+            assert!(!is_alnum_char(&[0xE9]));
+            assert!(!is_blank_char(&[0xA0]));
+        });
+    }
+
+    #[test]
+    fn malformed_byte_does_not_match_inside_configured_utf8_word_character() {
+        in_mode(true, || {
+            let previous = STATE.with(|state| state.borrow_mut().word_chars.replace("é".into()));
+            assert!(is_word_char("é".as_bytes(), false));
+            assert!(!is_word_char(&[0xA9], false));
+            STATE.with(|state| state.borrow_mut().word_chars = previous);
+        });
+    }
 }

@@ -1,12 +1,16 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/search.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2015-2022, 2025 Benno Schulenberg
 
 use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
-use crate::{ISSET, SET, UNSET, TOGGLE};
-use regex_lite::RegexBuilder;
+use crate::{ISSET, SET, TOGGLE, UNSET};
+use regex::bytes::RegexBuilder;
 
 // ---------------------------------------------------------------------------
 // Module-level state (static variables in C)
@@ -45,15 +49,28 @@ unsafe extern "Rust" {}
 // These are stubs for functions defined in other modules that search.c calls.
 // In a fully ported codebase these will resolve to the real implementations.
 
-#[inline] fn statusbar(msg: &str) { crate::winio::statusbar(msg) }
+#[inline]
+fn statusbar(msg: &str) {
+    crate::winio::statusbar(msg)
+}
 
-#[inline] fn statusline(mtype: MessageType, msg: &str) { crate::winio::statusline(mtype, msg) }
+#[inline]
+fn statusline(mtype: MessageType, msg: &str) {
+    crate::winio::statusline(mtype, msg)
+}
 
-#[inline] fn wipe_statusbar() { crate::winio::wipe_statusbar() }
+#[inline]
+fn wipe_statusbar() {
+    crate::winio::wipe_statusbar()
+}
 
-#[inline] fn edit_refresh() { crate::winio::edit_refresh() }
+#[inline]
+fn edit_refresh() {
+    crate::winio::edit_refresh()
+}
 
-#[inline] fn edit_redraw(was_current: &LinePtr, mode: UpdateType) {
+#[inline]
+fn edit_redraw(was_current: &LinePtr, mode: UpdateType) {
     crate::winio::edit_redraw(was_current, mode)
 }
 
@@ -65,49 +82,55 @@ fn xplustabs() -> usize {
 
 /// C: size_t wideness(const char *text, size_t maxlen) — chars.c.
 #[inline]
-fn wideness(data: &str, x: usize) -> usize {
+fn wideness<T: AsRef<[u8]> + ?Sized>(data: &T, x: usize) -> usize {
     crate::utils::wideness(data, x)
 }
 
 /// C: size_t breadth(const char *text) — chars.c — display width of text.
 #[inline]
-fn breadth(data: &str) -> usize {
+fn breadth<T: AsRef<[u8]> + ?Sized>(data: &T) -> usize {
     crate::utils::breadth(data)
 }
 
 /// C: char *display_string(…) — winio.c.
 #[inline]
-fn display_string(s: &str, column: usize, span: usize, isdata: bool, isprompt: bool) -> String {
+fn display_string<T: AsRef<[u8]> + ?Sized>(
+    s: &T,
+    column: usize,
+    span: usize,
+    isdata: bool,
+    isprompt: bool,
+) -> String {
     crate::winio::display_string(s, column, span, isdata, isprompt)
 }
 
 /// C: size_t actual_x(const char *text, size_t column) — chars.c.
 #[inline]
-fn actual_x(data: &str, column: usize) -> usize {
+fn actual_x<T: AsRef<[u8]> + ?Sized>(data: &T, column: usize) -> usize {
     crate::utils::actual_x(data, column)
 }
 
 /// C: size_t char_length(const char *s) — chars.c.
 #[inline]
-fn char_length(s: &str) -> usize {
+fn char_length<T: AsRef<[u8]> + ?Sized>(s: &T) -> usize {
     crate::chars::char_length(s)
 }
 
 /// C: size_t step_left(const char *buf, size_t pos) — chars.c.
 #[inline]
-fn step_left(data: &str, x: usize) -> usize {
+fn step_left<T: AsRef<[u8]> + ?Sized>(data: &T, x: usize) -> usize {
     crate::chars::step_left(data, x)
 }
 
 /// C: size_t step_right(const char *buf, size_t pos) — chars.c.
 #[inline]
-fn step_right(data: &str, x: usize) -> usize {
+fn step_right<T: AsRef<[u8]> + ?Sized>(data: &T, x: usize) -> usize {
     crate::chars::step_right(data, x)
 }
 
 /// C: size_t mbstrlen(const char *s) — chars.c.
 #[inline]
-fn mbstrlen(s: &str) -> usize {
+fn mbstrlen<T: AsRef<[u8]> + ?Sized>(s: &T) -> usize {
     crate::chars::mbstrlen(s)
 }
 
@@ -137,7 +160,10 @@ fn ask_user(yesorallorno: bool, question: &str) -> i32 {
     crate::prompt::ask_user(yesorallorno, question)
 }
 
-#[inline] fn set_modified() { crate::files::set_modified() }
+#[inline]
+fn set_modified() {
+    crate::files::set_modified()
+}
 
 fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
     // Mirror C utils.c:parse_line_column — return TRUE only when the REQUIRED parts
@@ -147,12 +173,18 @@ fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
     let s = input.trim_start_matches(' ');
     match s.find(|c| c == ',' || c == '.' || c == ':') {
         None => match crate::utils::parse_num(s) {
-            Some(ln) => { *line = ln; true }
+            Some(ln) => {
+                *line = ln;
+                true
+            }
             None => false,
         },
         Some(pos) => {
             let col_ok = match crate::utils::parse_num(&s[pos + 1..]) {
-                Some(cn) => { *col = cn; true }
+                Some(cn) => {
+                    *col = cn;
+                    true
+                }
                 None => false,
             };
             if pos == 0 {
@@ -161,7 +193,10 @@ fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
             } else {
                 // Both the line part and the column part must parse.
                 let line_ok = match crate::utils::parse_num(&s[..pos]) {
-                    Some(ln) => { *line = ln; true }
+                    Some(ln) => {
+                        *line = ln;
+                        true
+                    }
                     None => false,
                 };
                 line_ok && col_ok
@@ -170,7 +205,10 @@ fn parse_line_column(input: &str, line: &mut isize, col: &mut isize) -> bool {
     }
 }
 
-#[inline] fn adjust_viewport(mode: UpdateType) { crate::winio::adjust_viewport(mode) }
+#[inline]
+fn adjust_viewport(mode: UpdateType) {
+    crate::winio::adjust_viewport(mode)
+}
 
 /// C: linestruct *line_from_number(ssize_t number) — utils.c.
 #[inline]
@@ -185,7 +223,8 @@ fn go_forward_chunks(rows: i32, line: &mut Option<LinePtr>, leftedge: &mut usize
     }
 }
 
-#[inline] fn leftedge_for(col: usize, line: &LinePtr) -> usize {
+#[inline]
+fn leftedge_for(col: usize, line: &LinePtr) -> usize {
     crate::winio::leftedge_for(col, &line.borrow().data)
 }
 
@@ -194,18 +233,10 @@ fn update_line(line: &LinePtr, x: usize) {
     crate::winio::update_line(line, x);
 }
 
-fn mbstrchr<'a>(s: &'a str, needle_start: &str) -> Option<&'a str> {
-    // C: mbstrchr(s, needle_start) — chars.c
-    // Find needle_start (first char) in s.
-    let needle_ch = needle_start.chars().next()?;
-    let idx = s.find(needle_ch)?;
-    Some(&s[idx..])
-}
-
 /// C: bool is_separate_word(size_t position, size_t length, const char *text) — chars.c.
 #[cfg(feature = "speller")]
 #[inline]
-fn is_separate_word(position: usize, length: usize, text: &str) -> bool {
+fn is_separate_word<T: AsRef<[u8]> + ?Sized>(position: usize, length: usize, text: &T) -> bool {
     crate::utils::is_separate_word(position, length, text)
 }
 
@@ -214,19 +245,32 @@ fn update_history(history: &Option<LinePtr>, answer: &str, prune: bool) {
     use crate::history::HistoryKind;
     // Determine which history list by comparing the pointer with the global search/replace histories.
     let kind = with_state(|s| {
-        let is_replace = s.replace_history.as_ref().zip(history.as_ref())
+        let is_replace = s
+            .replace_history
+            .as_ref()
+            .zip(history.as_ref())
             .map(|(r, h)| LinePtr::ptr_eq(r, h))
             .unwrap_or(false);
-        if is_replace { HistoryKind::Replace } else { HistoryKind::Search }
+        if is_replace {
+            HistoryKind::Replace
+        } else {
+            HistoryKind::Search
+        }
     });
     crate::history::update_history(kind, answer, prune);
 }
 
 #[cfg(feature = "color")]
-#[inline] fn check_the_multis(line: &LinePtr) { crate::color::check_the_multis(line) }
+#[inline]
+fn check_the_multis(line: &LinePtr) {
+    crate::color::check_the_multis(line)
+}
 
 #[cfg(not(feature = "tiny"))]
-#[inline] fn add_undo(kind: UndoType, msg: Option<&str>) { crate::text::add_undo(kind, msg) }
+#[inline]
+fn add_undo(kind: UndoType, msg: Option<&str>) {
+    crate::text::add_undo(kind, msg)
+}
 
 #[cfg(not(feature = "tiny"))]
 fn mark_is_before_cursor() -> bool {
@@ -342,11 +386,7 @@ fn unicode_ci_rfind(haystack: &str, needle: &str) -> Option<usize> {
     unicode_ci_rfind_at_or_before(haystack, needle, haystack.len())
 }
 
-fn unicode_ci_rfind_at_or_before(
-    haystack: &str,
-    needle: &str,
-    ceiling: usize,
-) -> Option<usize> {
+fn unicode_ci_rfind_at_or_before(haystack: &str, needle: &str, ceiling: usize) -> Option<usize> {
     let folded_needle = needle.to_lowercase();
     if folded_needle.is_empty() {
         return None;
@@ -371,13 +411,15 @@ fn unicode_ci_rfind_at_or_before(
 // C: const char *strstrwrapper(const char *data, const char *needle, const char *from)
 // Returns the byte offset of the match within `data`, or None.
 // (Not NANO_TINY-gated: findnextstr — always compiled — calls it, matching C.)
-fn strstrwrapper(
-    data: &str,
-    needle: &str,
+fn strstrwrapper<D: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
+    data: &D,
+    needle: &N,
     from_offset: usize,
-    lowered_needle: Option<&str>,
+    _lowered_needle: Option<&str>,
     flags: SearchFlags,
 ) -> Option<usize> {
+    let data = data.as_ref();
+    let needle = needle.as_ref();
     if from_offset > data.len() {
         return None;
     }
@@ -403,7 +445,7 @@ fn strstrwrapper(
                         if m.start() == from_offset || m.start() == data.len() {
                             break;
                         }
-                        next_rung = step_right(data, m.start());
+                        next_rung = step_right(&data, m.start());
                     }
                     // Store regmatches for the found match.
                     if let Some((start, _end)) = last_match {
@@ -454,47 +496,43 @@ fn strstrwrapper(
         let case_sensitive = flags.case_sensitive;
 
         if backwards {
-            // Find the last occurrence at or before from_offset.
+            // GNU's case-sensitive literal search is deliberately bytewise,
+            // even when that means a match starts inside valid UTF-8.
             if case_sensitive {
-                let mut last_match: Option<usize> = None;
-                let mut start = 0;
-                while let Some(pos) = data[start..].find(needle) {
-                    let match_pos = start + pos;
-                    if match_pos > from_offset {
-                        break;
-                    }
-                    last_match = Some(match_pos);
-                    // Advance past the FIRST character of the match by its byte
-                    // length (not 1), so the next slice stays on a char boundary
-                    // (C advances by char_length).
-                    let step = data[match_pos..].chars().next().map_or(1, |c| c.len_utf8());
-                    start = match_pos + step;
-                    if start >= data.len() {
-                        break;
-                    }
+                if needle.is_empty() {
+                    Some(from_offset.min(data.len()))
+                } else {
+                    let last_start = from_offset.min(data.len().saturating_sub(needle.len()));
+                    data[..last_start.saturating_add(needle.len())]
+                        .windows(needle.len())
+                        .rposition(|part| part == needle)
+                        .filter(|&at| at <= from_offset)
                 }
-                last_match
             } else if !needle.is_empty() && data.is_ascii() && needle.is_ascii() {
                 // Common case: ASCII, case-insensitive. Scan in place with no
                 // allocation. ASCII case-folding is byte-length-preserving, so this
                 // yields the exact same last-match offset as the to_lowercase() path.
                 let search_end = from_offset.saturating_add(needle.len()).min(data.len());
-                ascii_ci_rfind(&data.as_bytes()[..search_end], needle.as_bytes())
-                    .filter(|&start| start <= from_offset)
+                ascii_ci_rfind(&data[..search_end], needle).filter(|&start| start <= from_offset)
             } else {
-                unicode_ci_rfind_at_or_before(
-                    data, lowered_needle.unwrap_or(needle), from_offset)
+                crate::chars::mbrevstrcasestr(&data, &needle, from_offset)
             }
         } else {
             // Find first occurrence at or after from_offset.
             let search_slice = &data[from_offset..];
             let found = if case_sensitive {
-                search_slice.find(needle)
+                if needle.is_empty() {
+                    Some(0)
+                } else {
+                    search_slice
+                        .windows(needle.len())
+                        .position(|part| part == needle)
+                }
             } else if !needle.is_empty() && search_slice.is_ascii() && needle.is_ascii() {
                 // Common case: ASCII, case-insensitive — zero-alloc in-place scan.
-                ascii_ci_find(search_slice.as_bytes(), needle.as_bytes())
+                ascii_ci_find(search_slice, needle)
             } else {
-                unicode_ci_find(search_slice, lowered_needle.unwrap_or(needle))
+                crate::chars::mbstrcasestr(&search_slice, &needle)
             };
             found.map(|pos| from_offset + pos)
         }
@@ -510,6 +548,8 @@ pub fn regexp_init(regexp: &str) -> bool {
 
     let result = RegexBuilder::new(regexp)
         .case_insensitive(!case_sensitive)
+        .unicode(crate::chars::using_utf8())
+        .dot_matches_new_line(true)
         .build();
 
     match result {
@@ -542,9 +582,7 @@ pub fn tidy_up_after_search() {
 
     #[cfg(not(feature = "tiny"))]
     {
-        let has_mark = with_state(|s| {
-            s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()
-        });
+        let has_mark = with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some());
         if has_mark {
             state_mut().refresh_needed = true;
         }
@@ -581,16 +619,31 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
 
     loop {
         // Build the prompt string components.
-        let case_sensitive_str = if ISSET!(CASE_SENSITIVE) { " [Case sensitive]" } else { "" };
-        let regexp_str = if ISSET!(USE_REGEXP) { " [Reg.exp.]" } else { "" };
-        let backwards_str = if ISSET!(BACKWARDS_SEARCH) { " [Backwards]" } else { "" };
+        let case_sensitive_str = if ISSET!(CASE_SENSITIVE) {
+            " [Case sensitive]"
+        } else {
+            ""
+        };
+        let regexp_str = if ISSET!(USE_REGEXP) {
+            " [Reg.exp.]"
+        } else {
+            ""
+        };
+        let backwards_str = if ISSET!(BACKWARDS_SEARCH) {
+            " [Backwards]"
+        } else {
+            ""
+        };
         let replace_str = if replacing {
             #[cfg(not(feature = "tiny"))]
             {
-                let in_sel = with_state(|s| {
-                    s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()
-                });
-                if in_sel { " (to replace) in selection" } else { " (to replace)" }
+                let in_sel =
+                    with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some());
+                if in_sel {
+                    " (to replace) in selection"
+                } else {
+                    " (to replace)"
+                }
             }
             #[cfg(feature = "tiny")]
             " (to replace)"
@@ -598,12 +651,20 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
             ""
         };
 
-        let prompt = format!("Search{}{}{}{}{}", case_sensitive_str, regexp_str,
-                              backwards_str, replace_str, thedefault);
+        let prompt = format!(
+            "Search{}{}{}{}{}",
+            case_sensitive_str, regexp_str, backwards_str, replace_str, thedefault
+        );
 
         let menu = {
             let inhelp = state().inhelp;
-            if inhelp { MFINDINHELP } else if replacing { MREPLACE } else { MWHEREIS }
+            if inhelp {
+                MFINDINHELP
+            } else if replacing {
+                MREPLACE
+            } else {
+                MWHEREIS
+            }
         };
 
         let initial = if retain_answer {
@@ -612,8 +673,13 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
             String::new()
         };
 
-        let response = do_prompt(menu, &initial,
-            Some(crate::history::HistoryKind::Search), crate::winio::edit_refresh, &prompt);
+        let response = do_prompt(
+            menu,
+            &initial,
+            Some(crate::history::HistoryKind::Search),
+            crate::winio::edit_refresh,
+            &prompt,
+        );
 
         let last_search_empty = state().last_search.is_empty();
 
@@ -729,8 +795,8 @@ fn search_cancel_requested() -> bool {
 }
 
 /* C: int findnextstr(const char *needle, bool whole_word_only, int modus,
-                      size_t *match_len, bool skipone,
-                      const linestruct *begin, size_t begin_x) */
+size_t *match_len, bool skipone,
+const linestruct *begin, size_t begin_x) */
 // Returns: 1=found, 0=not found, -2=cancelled
 pub fn findnextstr(
     needle: &str,
@@ -787,12 +853,11 @@ pub fn findnextstr(
     // Pre-lower the needle once per search for the case-insensitive plain-search
     // fallback path (non-ASCII lines), instead of re-lowering it on every line
     // scanned. The ASCII fast path inside strstrwrapper needs no lowered needle.
-    let lowered_needle: Option<String> =
-        if !flags.use_regexp && !flags.case_sensitive {
-            Some(needle.to_lowercase())
-        } else {
-            None
-        };
+    let lowered_needle: Option<String> = if !flags.use_regexp && !flags.case_sensitive {
+        Some(needle.to_lowercase())
+    } else {
+        None
+    };
     let lowered_needle = lowered_needle.as_deref();
 
     loop {
@@ -811,13 +876,18 @@ pub fn findnextstr(
         // every line walked (the dominant per-line cost of a full-buffer search).
         let found_offset: Option<usize> = {
             let guard = current_line.borrow();
-            let ld: &str = &guard.data;
+            let ld: &[u8] = guard.data.as_bytes();
             if skipone {
                 skipone = false;
                 if backwards && from_offset != 0 {
                     let new_from = step_left(ld, from_offset);
-                    strstrwrapper(ld, needle, new_from, lowered_needle, flags)
-                        .filter(|&pos| if backwards { pos <= new_from } else { pos >= new_from })
+                    strstrwrapper(ld, needle, new_from, lowered_needle, flags).filter(|&pos| {
+                        if backwards {
+                            pos <= new_from
+                        } else {
+                            pos >= new_from
+                        }
+                    })
                 } else if !backwards && from_offset < ld.len() {
                     let new_from = from_offset + char_length(&ld[from_offset..]);
                     strstrwrapper(ld, needle, new_from, lowered_needle, flags)
@@ -848,9 +918,7 @@ pub fn findnextstr(
             }
 
             #[cfg(feature = "speller")]
-            if whole_word_only
-                && !is_separate_word(found_x, found_len, &line_data)
-            {
+            if whole_word_only && !is_separate_word(found_x, found_len, &line_data) {
                 // Continue looking in the rest of the line.
                 from_offset = found_x + char_length(&line_data[found_x..]);
                 continue;
@@ -870,7 +938,7 @@ pub fn findnextstr(
                 // begin_x and found_x are both byte offsets into the line.
                 if get_came_full_circle()
                     && ((!backwards
-                            && (found_x > begin_x || (modus == REPLACING && found_x == begin_x)))
+                        && (found_x > begin_x || (modus == REPLACING && found_x == begin_x)))
                         || (backwards && found_x < begin_x))
                 {
                     return 0;
@@ -890,9 +958,10 @@ pub fn findnextstr(
                 #[cfg(not(feature = "tiny"))]
                 if modus == JUSTFIND {
                     let no_mark = with_state(|s| {
-                        s.openfile.as_ref().map(|f| {
-                            f.mark.is_none() || f.softmark
-                        }).unwrap_or(true)
+                        s.openfile
+                            .as_ref()
+                            .map(|f| f.mark.is_none() || f.softmark)
+                            .unwrap_or(true)
                     });
                     if no_mark {
                         let from_col = xplustabs();
@@ -941,7 +1010,10 @@ pub fn findnextstr(
         // Move to the previous or next line.
         let backwards = flags.backwards;
         let next_line: Option<LinePtr> = if backwards {
-            current_line.borrow().prev.as_ref()
+            current_line
+                .borrow()
+                .prev
+                .as_ref()
                 .and_then(|w| w.upgrade())
         } else {
             current_line.borrow().next.clone()
@@ -1038,7 +1110,9 @@ pub fn do_research() {
     {
         let (last_empty, has_prev) = with_state(|s| {
             let empty = s.last_search.is_empty();
-            let prev = s.searchbot.as_ref()
+            let prev = s
+                .searchbot
+                .as_ref()
                 .and_then(|b| b.borrow().prev.as_ref().and_then(|w| w.upgrade()))
                 .is_some();
             (empty, prev)
@@ -1046,13 +1120,15 @@ pub fn do_research() {
 
         if last_empty && has_prev {
             let prev_data = with_state(|s| {
-                s.searchbot.as_ref()
-                    .and_then(|b| b.borrow().prev.as_ref()
-                        .and_then(|w| w.upgrade()))
+                s.searchbot
+                    .as_ref()
+                    .and_then(|b| b.borrow().prev.as_ref().and_then(|w| w.upgrade()))
                     .map(|p| p.borrow().data.clone())
             });
             if let Some(data) = prev_data {
-                state_mut().last_search = data;
+                if let Some(text) = data.as_utf8() {
+                    state_mut().last_search = text.to_owned();
+                }
             }
         }
     }
@@ -1116,7 +1192,10 @@ pub fn not_found_msg(s: &str) {
     let numchars = actual_x(&disp, wideness(&disp, cols / 2));
     let truncated = &disp[..numchars];
     let ellipsis = if numchars < disp.len() { "..." } else { "" };
-    statusline(MessageType::Ahem, &format!("\"{}{}\" not found", truncated, ellipsis));
+    statusline(
+        MessageType::Ahem,
+        &format!("\"{}{}\" not found", truncated, ellipsis),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1160,9 +1239,12 @@ pub fn go_looking() {
         (lp, x)
     });
 
-    let same_spot = was_current.as_ref().zip(now_current.as_ref()).map(|(w, n)| {
-        LinePtr::ptr_eq(w, n)
-    }).unwrap_or(false) && was_x == now_x;
+    let same_spot = was_current
+        .as_ref()
+        .zip(now_current.as_ref())
+        .map(|(w, n)| LinePtr::ptr_eq(w, n))
+        .unwrap_or(false)
+        && was_x == now_x;
 
     if result == 1 && same_spot {
         statusline(MessageType::Remark, "This is the only occurrence");
@@ -1180,10 +1262,10 @@ pub fn go_looking() {
 // ---------------------------------------------------------------------------
 /* C: int replace_regexp(char *string, bool create) */
 // In Rust: always returns the replacement string (create=true) or just the size.
-// We return the replacement as a String.
-pub fn replace_regexp_str() -> String {
+// Return replacement bytes so captured malformed input is never decoded.
+pub fn replace_regexp_str() -> LineData {
     let answer = state().answer.clone();
-    let mut result = String::new();
+    let mut result = LineData::empty();
     let chars: Vec<char> = answer.chars().collect();
     let mut i = 0;
 
@@ -1194,17 +1276,21 @@ pub fn replace_regexp_str() -> String {
             if num >= 1 && num <= 9 {
                 // Check if this subgroup exists in search_regexp.
                 let nsub = with_state(|s| {
-                    s.search_regexp.as_ref().map(|re| re.captures_len()).unwrap_or(0)
+                    s.search_regexp
+                        .as_ref()
+                        .map(|re| re.captures_len())
+                        .unwrap_or(0)
                 });
                 if (num as usize) < nsub {
                     let (rm_so, rm_eo) = state().regmatches[num as usize];
                     let current_data = with_state(|s| {
-                        s.openfile.as_ref()
+                        s.openfile
+                            .as_ref()
                             .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
                             .unwrap_or_default()
                     });
                     if rm_so < current_data.len() && rm_eo <= current_data.len() {
-                        result.push_str(&current_data[rm_so..rm_eo]);
+                        result.extend_bytes(&current_data[rm_so..rm_eo]);
                     }
                     i += 2;
                     continue;
@@ -1222,9 +1308,11 @@ pub fn replace_regexp_str() -> String {
 // replace_line — return a copy of current line with one needle replaced
 // ---------------------------------------------------------------------------
 /* C: char *replace_line(const char *needle) */
-pub fn replace_line(needle: &str) -> String {
+pub fn replace_line(needle: &str) -> LineData {
     let (current_data, current_x) = with_state(|s| {
-        let data = s.openfile.as_ref()
+        let data = s
+            .openfile
+            .as_ref()
             .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
             .unwrap_or_default();
         let x = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
@@ -1234,7 +1322,7 @@ pub fn replace_line(needle: &str) -> String {
     let use_regexp = ISSET!(USE_REGEXP);
 
     let match_len: usize;
-    let replacement: String;
+    let replacement: LineData;
 
     if use_regexp {
         let (rm_so, rm_eo) = state().regmatches[0];
@@ -1242,24 +1330,26 @@ pub fn replace_line(needle: &str) -> String {
         replacement = replace_regexp_str();
     } else {
         match_len = needle.len();
-        replacement = state().answer.clone();
+        replacement = LineData::from_utf8(&state().answer);
     }
 
     let head = &current_data[..current_x];
     let tail = if current_x + match_len <= current_data.len() {
         &current_data[current_x + match_len..]
     } else {
-        ""
+        &[]
     };
-
-    format!("{}{}{}", head, replacement, tail)
+    let mut altered = LineData::from_internal(head.to_vec());
+    altered.extend_bytes(replacement.as_bytes());
+    altered.extend_bytes(tail);
+    altered
 }
 
 // ---------------------------------------------------------------------------
 // do_replace_loop — step through occurrences and prompt for replacement
 // ---------------------------------------------------------------------------
 /* C: ssize_t do_replace_loop(const char *needle, bool whole_word_only,
-                               const linestruct *real_current, size_t *real_current_x) */
+const linestruct *real_current, size_t *real_current_x) */
 // Returns: -1 if needle not found, -2 if aborted, else number of replacements.
 pub fn do_replace_loop(
     needle: &str,
@@ -1274,9 +1364,8 @@ pub fn do_replace_loop(
     let mut numreplaced: isize = -1;
 
     #[cfg(not(feature = "tiny"))]
-    let was_mark: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.mark.clone())
-    });
+    let was_mark: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.clone()));
 
     #[cfg(not(feature = "tiny"))]
     let right_side_up = was_mark.is_some() && mark_is_before_cursor();
@@ -1379,7 +1468,9 @@ pub fn do_replace_loop(
         if !replaceall {
             let (found_x, found_data) = with_state(|s| {
                 let x = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
-                let data = s.openfile.as_ref()
+                let data = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
                     .unwrap_or_default();
                 (x, data)
@@ -1429,7 +1520,9 @@ pub fn do_replace_loop(
             let altered = replace_line(needle);
 
             let (old_len, new_len, _current_x) = with_state(|s| {
-                let old = s.openfile.as_ref()
+                let old = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.len()))
                     .unwrap_or(0);
                 let cx = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
@@ -1447,7 +1540,9 @@ pub fn do_replace_loop(
                 // then adjust its x position for any text length changes.
                 if was_mark.is_some() && !right_side_up {
                     let adjusted_mark_x = with_state_mut(|s| {
-                        let Some(of) = s.openfile.as_mut() else { return None };
+                        let Some(of) = s.openfile.as_mut() else {
+                            return None;
+                        };
                         let cur = of.current.clone();
                         let cx = of.current_x;
                         if let (Some(cur), Some(wm)) = (cur, was_mark.as_ref()) {
@@ -1471,16 +1566,21 @@ pub fn do_replace_loop(
                 // adjust the cursor's x position for any text length changes.
                 if was_mark.is_none() || right_side_up {
                     let (is_real, cx_lt_rx) = with_state(|s| {
-                        let is_real = real_current.map(|rc| {
-                            s.openfile.as_ref().and_then(|f| f.current.as_ref())
-                                .map(|cur| LinePtr::ptr_eq(cur, rc))
-                                .unwrap_or(false)
-                        }).unwrap_or(false);
+                        let is_real = real_current
+                            .map(|rc| {
+                                s.openfile
+                                    .as_ref()
+                                    .and_then(|f| f.current.as_ref())
+                                    .map(|cur| LinePtr::ptr_eq(cur, rc))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
                         let cx = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
                         (is_real, cx < *real_current_x)
                     });
                     if is_real && cx_lt_rx {
-                        let cx = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
+                        let cx =
+                            with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
                         if *real_current_x < cx + match_len {
                             *real_current_x = cx + match_len;
                         }
@@ -1494,11 +1594,15 @@ pub fn do_replace_loop(
             #[cfg(feature = "tiny")]
             {
                 let (is_real, cx_lt_rx) = with_state(|s| {
-                    let is_real = real_current.map(|rc| {
-                        s.openfile.as_ref().and_then(|f| f.current.as_ref())
-                            .map(|cur| LinePtr::ptr_eq(cur, rc))
-                            .unwrap_or(false)
-                    }).unwrap_or(false);
+                    let is_real = real_current
+                        .map(|rc| {
+                            s.openfile
+                                .as_ref()
+                                .and_then(|f| f.current.as_ref())
+                                .map(|cur| LinePtr::ptr_eq(cur, rc))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
                     let cx = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
                     (is_real, cx < *real_current_x)
                 });
@@ -1520,9 +1624,12 @@ pub fn do_replace_loop(
             // When moving forward, advance cursor past the replacement text.
             if !ISSET!(BACKWARDS_SEARCH) {
                 let new_x = with_state(|s| {
-                    s.openfile.as_ref().map(|f| {
-                        (f.current_x as isize + match_len as isize + length_change) as usize
-                    }).unwrap_or(0)
+                    s.openfile
+                        .as_ref()
+                        .map(|f| {
+                            (f.current_x as isize + match_len as isize + length_change) as usize
+                        })
+                        .unwrap_or(0)
                 });
                 with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
@@ -1534,12 +1641,13 @@ pub fn do_replace_loop(
             // Update file size and replace the line data.
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
-                    let old_char_count = of.current.as_ref()
-                        .map(|l| l.borrow().data.chars().count())
+                    let old_char_count = of
+                        .current
+                        .as_ref()
+                        .map(|l| mbstrlen(&l.borrow().data))
                         .unwrap_or(0);
-                    let new_char_count = altered.chars().count();
-                    of.totsize = (of.totsize as isize
-                        + new_char_count as isize
+                    let new_char_count = mbstrlen(&altered);
+                    of.totsize = (of.totsize as isize + new_char_count as isize
                         - old_char_count as isize) as usize;
                     if let Some(ref cur) = of.current {
                         cur.borrow_mut().data = altered.clone();
@@ -1595,25 +1703,24 @@ pub fn do_replace() {
 // ---------------------------------------------------------------------------
 /* C: void ask_for_and_do_replacements(void) */
 pub fn ask_for_and_do_replacements() {
-    let was_edittop: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.edittop.clone())
-    });
-    let was_firstcolumn: usize = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0)
-    });
-    let beginline: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
-    let mut begin_x: usize = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0)
-    });
+    let was_edittop: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.edittop.clone()));
+    let was_firstcolumn: usize =
+        with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0));
+    let beginline: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
+    let mut begin_x: usize = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
 
     let replacee = state().last_search.clone();
 
     // Prompt for replacement string.
-    let response = do_prompt(MREPLACEWITH, "",
-        Some(crate::history::HistoryKind::Replace), crate::winio::edit_refresh,
-        "Replace with");
+    let response = do_prompt(
+        MREPLACEWITH,
+        "",
+        Some(crate::history::HistoryKind::Replace),
+        crate::winio::edit_refresh,
+        "Replace with",
+    );
 
     // Restore the search string (it may have changed at the prompt).
     state_mut().last_search = replacee.clone();
@@ -1662,16 +1769,25 @@ pub fn ask_for_and_do_replacements() {
 // goto_line_posx — go to specified line and x position
 // ---------------------------------------------------------------------------
 /* C: void goto_line_posx(ssize_t linenumber, size_t pos_x) */
-#[cfg(any(not(feature = "tiny"), feature = "speller", feature = "linter", feature = "formatter"))]
+#[cfg(any(
+    not(feature = "tiny"),
+    feature = "speller",
+    feature = "linter",
+    feature = "formatter"
+))]
 pub fn goto_line_posx(linenumber: isize, pos_x: usize) {
     #[cfg(feature = "color")]
     {
         let needs_recook = with_state(|s| {
             let editwinrows = s.editwinrows;
-            let edittop_lineno = s.openfile.as_ref()
+            let edittop_lineno = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.edittop.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
-            let current_lineno = s.openfile.as_ref()
+            let current_lineno = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
             let softwrap = s.flag_isset(SOFTWRAP);
@@ -1686,7 +1802,8 @@ pub fn goto_line_posx(linenumber: isize, pos_x: usize) {
     }
 
     let filebot_lineno = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|f| f.filebot.as_ref().map(|l| l.borrow().lineno))
             .unwrap_or(0)
     });
@@ -1721,7 +1838,10 @@ pub fn goto_line_posx(linenumber: isize, pos_x: usize) {
     });
 }
 
-#[cfg(all(feature = "tiny", not(any(feature = "speller", feature = "linter", feature = "formatter"))))]
+#[cfg(all(
+    feature = "tiny",
+    not(any(feature = "speller", feature = "linter", feature = "formatter"))
+))]
 pub fn goto_line_posx(_linenumber: isize, _pos_x: usize) {}
 
 // ---------------------------------------------------------------------------
@@ -1738,10 +1858,14 @@ pub fn do_gotolinecolumn() {
 /* C: void ask_for_line_and_column(char *provided) */
 pub fn ask_for_line_and_column(provided: &str) {
     let (cur_line, cur_col) = with_state(|s| {
-        let line = s.openfile.as_ref()
+        let line = s
+            .openfile
+            .as_ref()
             .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
             .unwrap_or(1);
-        let col = s.openfile.as_ref()
+        let col = s
+            .openfile
+            .as_ref()
             .map(|f| f.placewewant as isize + 1)
             .unwrap_or(1);
         (line, col)
@@ -1750,9 +1874,13 @@ pub fn ask_for_line_and_column(provided: &str) {
     let mut line = cur_line;
     let mut column = cur_col;
 
-    let response = do_prompt(MGOTOLINE, provided,
-        None, crate::winio::edit_refresh,
-        "Enter line number, column number");
+    let response = do_prompt(
+        MGOTOLINE,
+        provided,
+        None,
+        crate::winio::edit_refresh,
+        "Enter line number, column number",
+    );
 
     if response < 0 {
         statusbar("Cancelled");
@@ -1764,9 +1892,17 @@ pub fn ask_for_line_and_column(provided: &str) {
     let answer = state().answer.clone();
 
     // A ++ or -- before the number signifies a relative jump.
-    let doublesign = if answer.starts_with("++") || answer.starts_with("--") { 1usize } else { 0 };
+    let doublesign = if answer.starts_with("++") || answer.starts_with("--") {
+        1usize
+    } else {
+        0
+    };
 
-    let input = if doublesign > 0 { &answer[doublesign..] } else { &answer[..] };
+    let input = if doublesign > 0 {
+        &answer[doublesign..]
+    } else {
+        &answer[..]
+    };
 
     if !parse_line_column(input, &mut line, &mut column) {
         statusline(MessageType::Ahem, "Invalid line or column number");
@@ -1775,7 +1911,8 @@ pub fn ask_for_line_and_column(provided: &str) {
 
     if doublesign > 0 {
         let cur_lineno = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(1)
         });
@@ -1787,7 +1924,11 @@ pub fn ask_for_line_and_column(provided: &str) {
 
     goto_line_and_column(line, column, false);
 
-    let mode = if answer.starts_with(',') { UpdateType::Stationary } else { UpdateType::Centering };
+    let mode = if answer.starts_with(',') {
+        UpdateType::Stationary
+    } else {
+        UpdateType::Centering
+    };
     adjust_viewport(mode);
     state_mut().refresh_needed = true;
 }
@@ -1798,7 +1939,8 @@ pub fn ask_for_line_and_column(provided: &str) {
 /* C: void goto_line_and_column(ssize_t line, ssize_t column, bool hugfloor) */
 pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) {
     let filebot_lineno = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|f| f.filebot.as_ref().map(|l| l.borrow().lineno))
             .unwrap_or(1)
     });
@@ -1808,7 +1950,8 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
         line = filebot_lineno + line + 1;
     } else if line == 0 {
         line = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(1)
         });
@@ -1821,15 +1964,18 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
     {
         let needs_recook = with_state(|s| {
             let editwinrows = s.editwinrows;
-            let edittop_lineno = s.openfile.as_ref()
+            let edittop_lineno = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.edittop.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
-            let current_lineno = s.openfile.as_ref()
+            let current_lineno = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
             let softwrap = s.flag_isset(SOFTWRAP);
-            line > edittop_lineno + editwinrows as isize
-                || (softwrap && line > current_lineno)
+            line > edittop_lineno + editwinrows as isize || (softwrap && line > current_lineno)
         });
         if needs_recook {
             with_state_mut(|s| {
@@ -1847,7 +1993,11 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
             let next = current.as_ref().and_then(|l| l.borrow().next.clone());
             let is_bot = with_state(|s| {
                 let bot = s.openfile.as_ref().and_then(|f| f.filebot.clone());
-                current.as_ref().zip(bot.as_ref()).map(|(c, b)| LinePtr::ptr_eq(c, b)).unwrap_or(false)
+                current
+                    .as_ref()
+                    .zip(bot.as_ref())
+                    .map(|(c, b)| LinePtr::ptr_eq(c, b))
+                    .unwrap_or(false)
             });
             if is_bot {
                 break;
@@ -1864,7 +2014,8 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
 
     // Negative column means: from the end of the line.
     let current_data = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
             .unwrap_or_default()
     });
@@ -1874,7 +2025,10 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
         column = line_breadth + column + 2;
     } else if column == 0 {
         column = with_state(|s| {
-            s.openfile.as_ref().map(|f| f.placewewant as isize + 1).unwrap_or(1)
+            s.openfile
+                .as_ref()
+                .map(|f| f.placewewant as isize + 1)
+                .unwrap_or(1)
         });
     }
     if column < 1 {
@@ -1925,18 +2079,30 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
             let editwinrows = state().editwinrows;
             let mut currentline = cur;
             let mut leftedge = with_state(|s| {
-                s.openfile.as_ref().and_then(|f| f.current.as_ref().map(|l| {
-                    leftedge_for(s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0), l)
-                })).unwrap_or(0)
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| {
+                        f.current.as_ref().map(|l| {
+                            leftedge_for(
+                                s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0),
+                                l,
+                            )
+                        })
+                    })
+                    .unwrap_or(0)
             });
             rows_from_tail = (editwinrows / 2)
                 - go_forward_chunks(editwinrows / 2, &mut currentline, &mut leftedge);
         } else {
             let (cur_lineno, bot_lineno) = with_state(|s| {
-                let cur = s.openfile.as_ref()
+                let cur = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                     .unwrap_or(0);
-                let bot = s.openfile.as_ref()
+                let bot = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.filebot.as_ref().map(|l| l.borrow().lineno))
                     .unwrap_or(0);
                 (cur, bot)
@@ -1948,10 +2114,14 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
     #[cfg(feature = "tiny")]
     {
         let (cur_lineno, bot_lineno) = with_state(|s| {
-            let cur = s.openfile.as_ref()
+            let cur = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
-            let bot = s.openfile.as_ref()
+            let bot = s
+                .openfile
+                .as_ref()
                 .and_then(|f| f.filebot.as_ref().map(|l| l.borrow().lineno))
                 .unwrap_or(0);
             (cur, bot)
@@ -1993,9 +2163,7 @@ pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
     let Some(mut line) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else {
         return false;
     };
-    let current_x: usize = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0)
-    });
+    let current_x: usize = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
 
     let found_x: usize;
 
@@ -2003,14 +2171,22 @@ pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
         // First step away from the current bracket.
         let mut pointer_offset: usize;
         if current_x == 0 {
-            let prev = { let b = line.borrow(); b.prev.as_ref().and_then(|w| w.upgrade()) };
+            let prev = {
+                let b = line.borrow();
+                b.prev.as_ref().and_then(|w| w.upgrade())
+            };
             match prev {
                 None => return false,
-                Some(p) => { line = p; }
+                Some(p) => {
+                    line = p;
+                }
             }
             pointer_offset = line.borrow().data.len();
         } else {
-            pointer_offset = { let b = line.borrow(); step_left(&b.data, current_x) };
+            pointer_offset = {
+                let b = line.borrow();
+                step_left(&b.data, current_x)
+            };
         }
 
         // Now seek for any of the two brackets we are interested in.
@@ -2023,16 +2199,24 @@ pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
                 found_x = x;
                 break;
             }
-            let prev = { let b = line.borrow(); b.prev.as_ref().and_then(|w| w.upgrade()) };
+            let prev = {
+                let b = line.borrow();
+                b.prev.as_ref().and_then(|w| w.upgrade())
+            };
             match prev {
                 None => return false,
-                Some(p) => { line = p; }
+                Some(p) => {
+                    line = p;
+                }
             }
             pointer_offset = line.borrow().data.len();
         }
     } else {
         // Forward search.
-        let mut pointer_offset = { let b = line.borrow(); step_right(&b.data, current_x) };
+        let mut pointer_offset = {
+            let b = line.borrow();
+            step_right(&b.data, current_x)
+        };
 
         loop {
             let hit = {
@@ -2047,7 +2231,9 @@ pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
             let next = line.borrow().next.clone();
             match next {
                 None => return false,
-                Some(n) => { line = n; }
+                Some(n) => {
+                    line = n;
+                }
             }
             pointer_offset = 0;
         }
@@ -2069,20 +2255,16 @@ pub fn find_a_bracket(reverse: bool, bracket_pair: &str) -> bool {
 /* C: void do_find_bracket(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn do_find_bracket() {
-    let was_current: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
-    let was_x: usize = with_state(|s| {
-        s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0)
-    });
+    let was_current: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
+    let was_x: usize = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
 
-    let matchbrackets: String = with_state(|s| {
-        s.matchbrackets.clone().unwrap_or_default()
-    });
+    let matchbrackets: String = with_state(|s| s.matchbrackets.clone().unwrap_or_default());
 
     // Find the current character in matchbrackets.
-    let current_data: String = with_state(|s| {
-        s.openfile.as_ref()
+    let current_data: LineData = with_state(|s| {
+        s.openfile
+            .as_ref()
             .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
             .unwrap_or_default()
     });
@@ -2090,14 +2272,14 @@ pub fn do_find_bracket() {
 
     // Get the character at current_x.
     let ch_str = &current_data[current_x..];
-    let ch_result = mbstrchr(&matchbrackets, ch_str);
+    let ch_result = crate::chars::mbstrchr(&matchbrackets, ch_str);
 
     if ch_result.is_none() {
         statusline(MessageType::Ahem, "Not a bracket");
         return;
     }
 
-    let ch_in_matchbrackets = ch_result.unwrap();
+    let ch_offset = ch_result.unwrap();
 
     // Find the halfway point in matchbrackets.
     let charcount = mbstrlen(&matchbrackets) / 2;
@@ -2107,11 +2289,10 @@ pub fn do_find_bracket() {
     }
 
     // Determine search direction.
-    let ch_offset = ch_in_matchbrackets.as_ptr() as usize - matchbrackets.as_ptr() as usize;
     let reverse = ch_offset >= halfway;
 
     // Step to find the complementary bracket.
-    let ch_char = ch_in_matchbrackets.chars().next().unwrap_or('?');
+    let ch_char = matchbrackets[ch_offset..].chars().next().unwrap_or('?');
     let _ch_len = ch_char.len_utf8();
 
     // Find wanted_ch by stepping charcount positions.
@@ -2153,13 +2334,16 @@ pub fn do_find_bracket() {
 
         // Check whether the found character is the same bracket or the other.
         let found_data = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref().map(|l| l.borrow().data.clone()))
                 .unwrap_or_default()
         });
         let found_x = with_state(|s| s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0));
 
-        let found_ch = found_data[found_x..].chars().next().unwrap_or('?');
+        let found_ch = crate::chars::mbtowide(&found_data[found_x..])
+            .map(|pair| pair.0)
+            .unwrap_or('?');
 
         if found_ch == ch_char {
             balance += 1;
@@ -2189,11 +2373,17 @@ pub fn put_or_lift_anchor() {
     let (current_lp, current_x, is_filetop, has_anchor) = with_state(|s| {
         let lp = s.openfile.as_ref().and_then(|f| f.current.clone());
         let x = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
-        let is_top = s.openfile.as_ref().map(|f| {
-            f.current.as_ref().zip(f.filetop.as_ref())
-                .map(|(c, t)| LinePtr::ptr_eq(c, t))
-                .unwrap_or(false)
-        }).unwrap_or(false);
+        let is_top = s
+            .openfile
+            .as_ref()
+            .map(|f| {
+                f.current
+                    .as_ref()
+                    .zip(f.filetop.as_ref())
+                    .map(|(c, t)| LinePtr::ptr_eq(c, t))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
         let anchor = lp.as_ref().map(|l| l.borrow().has_anchor).unwrap_or(false);
         (lp, x, is_top, anchor)
     });
@@ -2211,7 +2401,11 @@ pub fn put_or_lift_anchor() {
     }
 
     let (line_numbers, minibar, zero) = with_state(|s| {
-        (s.flag_isset(LINE_NUMBERS), s.flag_isset(MINIBAR), s.flag_isset(ZERO))
+        (
+            s.flag_isset(LINE_NUMBERS),
+            s.flag_isset(MINIBAR),
+            s.flag_isset(ZERO),
+        )
     });
 
     if !line_numbers && (!minibar || zero) {
@@ -2229,11 +2423,11 @@ pub fn put_or_lift_anchor() {
 /* C: void go_to_and_confirm(linestruct *line) */
 #[cfg(not(feature = "tiny"))]
 pub fn go_to_and_confirm(target: &LinePtr) {
-    let was_current: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
+    let was_current: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
 
-    let is_current = was_current.as_ref()
+    let is_current = was_current
+        .as_ref()
         .map(|c| LinePtr::ptr_eq(c, target))
         .unwrap_or(false);
 
@@ -2249,10 +2443,14 @@ pub fn go_to_and_confirm(target: &LinePtr) {
         {
             let needs_recook = with_state(|s| {
                 let editwinrows = s.editwinrows;
-                let edittop_lineno = s.openfile.as_ref()
+                let edittop_lineno = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.edittop.as_ref().map(|l| l.borrow().lineno))
                     .unwrap_or(0);
-                let _cur_lineno = s.openfile.as_ref()
+                let _cur_lineno = s
+                    .openfile
+                    .as_ref()
                     .and_then(|f| f.current.as_ref().map(|l| l.borrow().lineno))
                     .unwrap_or(0);
                 let softwrap = s.flag_isset(SOFTWRAP);
@@ -2292,9 +2490,8 @@ pub fn go_to_and_confirm(target: &LinePtr) {
 /* C: void to_prev_anchor(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn to_prev_anchor() {
-    let current: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
+    let current: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
 
     let current_lp = match current {
         Some(ref l) => l.clone(),
@@ -2339,9 +2536,8 @@ pub fn to_prev_anchor() {
 /* C: void to_next_anchor(void) */
 #[cfg(not(feature = "tiny"))]
 pub fn to_next_anchor() {
-    let current: Option<LinePtr> = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.clone())
-    });
+    let current: Option<LinePtr> =
+        with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
 
     let current_lp = match current {
         Some(ref l) => l.clone(),
@@ -2386,9 +2582,11 @@ pub fn to_next_anchor() {
 #[cfg(test)]
 mod ci_scan_tests {
     use super::{
-        ascii_ci_find, ascii_ci_rfind, regexp_init, search_cancel_requested,
-        softwrap_placewewant, strstrwrapper, unicode_ci_find, unicode_ci_rfind, SearchFlags,
+        SearchFlags, ascii_ci_find, ascii_ci_rfind, regexp_init, replace_line,
+        search_cancel_requested, softwrap_placewewant, strstrwrapper, unicode_ci_find,
+        unicode_ci_rfind,
     };
+    use crate::definitions::{LineData, OpenFileStruct, USE_REGEXP};
     use crate::global::{state, state_mut};
 
     /// Reference forward search: first match of the lowercased needle.
@@ -2404,7 +2602,9 @@ mod ci_scan_tests {
         }
         let hb = h.as_bytes();
         let nb = n.as_bytes();
-        (0..=h.len() - n.len()).rev().find(|&i| &hb[i..i + n.len()] == nb)
+        (0..=h.len() - n.len())
+            .rev()
+            .find(|&i| &hb[i..i + n.len()] == nb)
     }
 
     #[test]
@@ -2444,7 +2644,10 @@ mod ci_scan_tests {
         };
 
         let data = "a1 b2";
-        assert_eq!(strstrwrapper(data, "unused", data.len(), None, flags), Some(3));
+        assert_eq!(
+            strstrwrapper(data, "unused", data.len(), None, flags),
+            Some(3)
+        );
         let matches = state().regmatches;
         assert_eq!(matches[0], (3, 5));
         assert_eq!(matches[1], (3, 4));
@@ -2460,10 +2663,16 @@ mod ci_scan_tests {
             backwards: true,
             case_sensitive: true,
         };
-        let insensitive = SearchFlags { case_sensitive: false, ..sensitive };
+        let insensitive = SearchFlags {
+            case_sensitive: false,
+            ..sensitive
+        };
 
         assert_eq!(strstrwrapper("abba", "bb", 2, None, sensitive), Some(1));
-        assert_eq!(strstrwrapper("aBBa", "bb", 2, Some("bb"), insensitive), Some(1));
+        assert_eq!(
+            strstrwrapper("aBBa", "bb", 2, Some("bb"), insensitive),
+            Some(1)
+        );
         assert_eq!(strstrwrapper("abb", "b", 1, None, sensitive), Some(1));
     }
 
@@ -2485,6 +2694,34 @@ mod ci_scan_tests {
         assert_eq!(state().regmatches[0], (1, 3));
 
         state_mut().search_regexp = None;
+    }
+
+    #[test]
+    fn regex_replacement_backreference_preserves_malformed_bytes() {
+        let line = crate::nano::make_new_node(None);
+        line.borrow_mut().data = LineData::from_internal(vec![b'a', 0xFF, b'b']);
+
+        let mut buffer = Box::new(OpenFileStruct::default());
+        buffer.filetop = Some(line.clone());
+        buffer.filebot = Some(line.clone());
+        buffer.edittop = Some(line.clone());
+        buffer.current = Some(line);
+        buffer.current_x = 1;
+        state_mut().openfile = Some(buffer);
+        state_mut().answer = r"<\1>".to_string();
+        state_mut().regmatches[0] = (1, 2);
+        state_mut().regmatches[1] = (1, 2);
+
+        assert!(regexp_init("(.)"));
+        crate::SET!(USE_REGEXP);
+        assert_eq!(
+            replace_line("unused").as_bytes(),
+            &[b'a', b'<', 0xFF, b'>', b'b']
+        );
+
+        crate::UNSET!(USE_REGEXP);
+        state_mut().search_regexp = None;
+        state_mut().openfile = None;
     }
 
     #[test]

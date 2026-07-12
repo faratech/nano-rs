@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/move.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2018, 2020, 2024, 2026 Benno Schulenberg
@@ -11,9 +15,9 @@
 // to the real implementations in crate::winio; indent_length / begpar /
 // inpar likewise forward to crate::text.
 
+use crate::ISSET;
 use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
-use crate::ISSET;
 
 // ── External helpers (winio.c / text.c — delegating to real implementations) ──
 
@@ -52,8 +56,8 @@ fn leftedge_for(column: usize, line: &LinePtr) -> usize {
 /// Return the column where a soft-wrapped chunk breaks.
 #[cfg(not(feature = "tiny"))]
 #[inline]
-fn get_softwrap_breakpoint(
-    linedata: &str,
+fn get_softwrap_breakpoint<T: AsRef<[u8]> + ?Sized>(
+    linedata: &T,
     leftedge: usize,
     kickoff: &mut bool,
     last_chunk: &mut bool,
@@ -145,7 +149,7 @@ fn statusline(importance: MessageType, msg: &str) {
 /// Return the length of the indentation at the start of `line`.
 #[cfg(any(not(feature = "tiny"), feature = "justify"))]
 #[inline]
-fn indent_length(line: &str) -> usize {
+fn indent_length<T: AsRef<[u8]> + ?Sized>(line: &T) -> usize {
     crate::text::indent_length(line)
 }
 
@@ -167,12 +171,12 @@ fn inpar(line: &LinePtr) -> bool {
 
 // ── Helpers from utils.rs / chars.rs ─────────────────────────────────────────
 
+#[cfg(feature = "utf8")]
+use crate::chars::is_zerowidth;
+use crate::chars::{is_word_char, step_left, step_right, white_string};
 use crate::utils::{actual_x, xplustabs};
 #[cfg(not(feature = "tiny"))]
 use crate::utils::{breadth, wideness};
-use crate::chars::{white_string, is_word_char, step_left, step_right};
-#[cfg(feature = "utf8")]
-use crate::chars::is_zerowidth;
 
 // ── move.c functions ──────────────────────────────────────────────────────────
 
@@ -194,7 +198,8 @@ pub fn to_first_line() {
 pub fn to_last_line() {
     let inhelp = state().inhelp;
     let last_x = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.filebot.as_ref())
             .map(|lb| if inhelp { 0 } else { lb.borrow().data.len() })
             .unwrap_or(0)
@@ -218,7 +223,9 @@ pub fn to_last_line() {
         }
         s.refresh_needed = true;
         #[cfg(feature = "color")]
-        { s.recook |= s.perturbed; }
+        {
+            s.recook |= s.perturbed;
+        }
         s.focusing = false;
     });
 }
@@ -229,19 +236,19 @@ pub fn get_edge_and_target(leftedge: &mut usize, target_column: &mut usize) {
     #[cfg(not(feature = "tiny"))]
     {
         if ISSET!(SOFTWRAP) {
-            let (tabsize, editwincols) = with_state(|s| (s.tabsize as usize, s.editwincols as usize));
+            let (tabsize, editwincols) =
+                with_state(|s| (s.tabsize as usize, s.editwincols as usize));
             let shim = editwincols * (1 + (tabsize / editwincols));
             let col = xplustabs();
-            let current_lp = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
+            let current_lp = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
             if let Some(ref lp) = current_lp {
                 *leftedge = leftedge_for(col, lp);
                 let pww = with_state(|s| s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0));
                 *target_column = (pww + shim - *leftedge) % editwincols;
             } else {
                 *leftedge = 0;
-                *target_column = with_state(|s| s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0));
+                *target_column =
+                    with_state(|s| s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0));
             }
             return;
         }
@@ -306,7 +313,13 @@ pub fn set_proper_index_and_pww(leftedge: &mut usize, target: usize, forward: bo
 
     let current_lp = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
     if let Some(ref lp) = current_lp {
-        let new_x = proper_x(lp, leftedge, forward, actual_last_column(*leftedge, target), Some(&mut shifted));
+        let new_x = proper_x(
+            lp,
+            leftedge,
+            forward,
+            actual_last_column(*leftedge, target),
+            Some(&mut shifted),
+        );
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
                 of.current_x = new_x;
@@ -318,7 +331,13 @@ pub fn set_proper_index_and_pww(leftedge: &mut usize, target: usize, forward: bo
             let mut shifted2 = false;
             let current_lp2 = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
             if let Some(ref lp2) = current_lp2 {
-                let new_x2 = proper_x(lp2, leftedge, forward, actual_last_column(*leftedge, target), Some(&mut shifted2));
+                let new_x2 = proper_x(
+                    lp2,
+                    leftedge,
+                    forward,
+                    actual_last_column(*leftedge, target),
+                    Some(&mut shifted2),
+                );
                 with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
                         of.current_x = new_x2;
@@ -450,7 +469,10 @@ pub fn to_top_row() {
     set_proper_index_and_pww(&mut leftedge, offset, false);
 
     let has_mark = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+        s.openfile
+            .as_ref()
+            .and_then(|of| of.mark.as_ref())
+            .is_some()
     });
     state_mut().refresh_needed = has_mark;
 }
@@ -485,7 +507,10 @@ pub fn to_bottom_row() {
     set_proper_index_and_pww(&mut leftedge, offset, true);
 
     let has_mark = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+        s.openfile
+            .as_ref()
+            .and_then(|of| of.mark.as_ref())
+            .is_some()
     });
     state_mut().refresh_needed = has_mark;
 }
@@ -501,7 +526,11 @@ pub fn do_cycle() {
         let editwinrows = state().editwinrows;
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
-                of.cursor_row = if cycling_aim == 1 { 0 } else { (editwinrows - 1) as isize };
+                of.cursor_row = if cycling_aim == 1 {
+                    0
+                } else {
+                    (editwinrows - 1) as isize
+                };
             }
         });
         adjust_viewport(UpdateType::Stationary);
@@ -589,7 +618,10 @@ pub fn to_para_begin() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
     if let Some(_wc) = was_current.clone() {
         let new_line = do_para_begin(with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.current.clone()).expect("a current line")
+            s.openfile
+                .as_ref()
+                .and_then(|of| of.current.clone())
+                .expect("a current line")
         }));
         with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
@@ -610,7 +642,10 @@ pub fn to_para_end() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     let new_line = do_para_end(with_state(|s| {
-        s.openfile.as_ref().and_then(|of| of.current.clone()).expect("a current line")
+        s.openfile
+            .as_ref()
+            .and_then(|of| of.current.clone())
+            .expect("a current line")
     }));
 
     // Step beyond the last line of the paragraph, if possible;
@@ -634,7 +669,9 @@ pub fn to_para_end() {
         edit_redraw(&wc_lp, UpdateType::Centering);
     }
     #[cfg(feature = "color")]
-    with_state_mut(|s| { s.recook |= s.perturbed; });
+    with_state_mut(|s| {
+        s.recook |= s.perturbed;
+    });
 }
 
 /* C: void to_prev_block(void) — #ifndef NANO_TINY
@@ -649,7 +686,8 @@ pub fn to_prev_block() {
     loop {
         // Check if there's a prev line.
         let prev_opt = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
         });
@@ -663,7 +701,8 @@ pub fn to_prev_block() {
             }
         });
         is_text = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|lp| !white_string(&lp.borrow().data))
                 .unwrap_or(false)
@@ -673,7 +712,8 @@ pub fn to_prev_block() {
 
     // Step forward one line again if we passed text but this line is blank.
     let (current_is_blank, has_next) = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|lp| {
                 let data = lp.borrow().data.clone();
@@ -684,7 +724,8 @@ pub fn to_prev_block() {
     });
     if seen_text && has_next && current_is_blank {
         let next_lp = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .and_then(|lp| lp.borrow().next.clone())
         });
@@ -712,7 +753,8 @@ pub fn to_next_block() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
 
     let mut is_white = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|lp| white_string(&lp.borrow().data))
             .unwrap_or(false)
@@ -722,7 +764,8 @@ pub fn to_next_block() {
     // Skip forward until first nonblank line after some blank line(s).
     loop {
         let has_next = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|lp| lp.borrow().next.is_some())
                 .unwrap_or(false)
@@ -731,7 +774,8 @@ pub fn to_next_block() {
             break;
         }
         let next_lp = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .and_then(|lp| lp.borrow().next.clone())
         });
@@ -741,7 +785,8 @@ pub fn to_next_block() {
             }
         });
         is_white = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|lp| white_string(&lp.borrow().data))
                 .unwrap_or(false)
@@ -759,7 +804,9 @@ pub fn to_next_block() {
         edit_redraw(&wc_lp, UpdateType::Centering);
     }
     #[cfg(feature = "color")]
-    with_state_mut(|s| { s.recook |= s.perturbed; });
+    with_state_mut(|s| {
+        s.recook |= s.perturbed;
+    });
 }
 
 /* C: void do_prev_word(void)
@@ -776,7 +823,8 @@ pub fn do_prev_word() {
         // If at the head of a line, move to the end of the preceding one.
         if current_x == 0 {
             let has_prev = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
                     .is_some()
@@ -785,11 +833,15 @@ pub fn do_prev_word() {
                 break;
             }
             let prev_lp = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
             });
-            let prev_len = prev_lp.as_ref().map(|lp| lp.borrow().data.len()).unwrap_or(0);
+            let prev_len = prev_lp
+                .as_ref()
+                .map(|lp| lp.borrow().data.len())
+                .unwrap_or(0);
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
                     of.current = prev_lp;
@@ -801,7 +853,15 @@ pub fn do_prev_word() {
         // Step back one character.
         let (data, cur_x) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+            (
+                of.current
+                    .as_ref()
+                    .expect("a current line")
+                    .borrow()
+                    .data
+                    .clone(),
+                of.current_x,
+            )
         });
         let new_x = step_left(&data, cur_x);
         with_state_mut(|s| {
@@ -812,7 +872,15 @@ pub fn do_prev_word() {
 
         let (data2, cur_x2) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+            (
+                of.current
+                    .as_ref()
+                    .expect("a current line")
+                    .borrow()
+                    .data
+                    .clone(),
+                of.current_x,
+            )
         });
 
         if is_word_char(&data2[cur_x2..], punctuation_as_letters) {
@@ -839,7 +907,15 @@ pub fn do_prev_word() {
         // Move one character forward again to sit on the start of the word.
         let (data, cur_x) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+            (
+                of.current
+                    .as_ref()
+                    .expect("a current line")
+                    .borrow()
+                    .data
+                    .clone(),
+                of.current_x,
+            )
         });
         let new_x = step_right(&data, cur_x);
         with_state_mut(|s| {
@@ -857,7 +933,15 @@ pub fn do_next_word(after_ends: bool) -> bool {
     let punctuation_as_letters = ISSET!(WORD_BOUNDS);
     let (data0, cur_x0) = with_state(|s| {
         let of = s.openfile.as_ref().expect("an open buffer");
-        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+        (
+            of.current
+                .as_ref()
+                .expect("a current line")
+                .borrow()
+                .data
+                .clone(),
+            of.current_x,
+        )
     });
     let started_on_word = is_word_char(&data0[cur_x0..], punctuation_as_letters);
     let mut seen_space = !started_on_word;
@@ -868,14 +952,23 @@ pub fn do_next_word(after_ends: bool) -> bool {
     loop {
         let (data, cur_x) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+            (
+                of.current
+                    .as_ref()
+                    .expect("a current line")
+                    .borrow()
+                    .data
+                    .clone(),
+                of.current_x,
+            )
         });
 
         // If at the end of a line, move to the beginning of the next one.
         if data.as_bytes().get(cur_x).copied() == Some(0) || cur_x >= data.len() {
             // When at end of file, stop.
             let has_next = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .map(|lp| lp.borrow().next.is_some())
                     .unwrap_or(false)
@@ -884,7 +977,8 @@ pub fn do_next_word(after_ends: bool) -> bool {
                 break;
             }
             let next_lp = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|lp| lp.borrow().next.clone())
             });
@@ -907,7 +1001,15 @@ pub fn do_next_word(after_ends: bool) -> bool {
 
         let (data2, cur_x2) = with_state(|s| {
             let of = s.openfile.as_ref().expect("an open buffer");
-            (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+            (
+                of.current
+                    .as_ref()
+                    .expect("a current line")
+                    .borrow()
+                    .data
+                    .clone(),
+                of.current_x,
+            )
         });
 
         #[cfg(not(feature = "tiny"))]
@@ -998,7 +1100,15 @@ pub fn do_home() {
         if ISSET!(SMART_HOME) {
             let (data, cur_x) = with_state(|s| {
                 let of = s.openfile.as_ref().expect("an open buffer");
-                (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+                (
+                    of.current
+                        .as_ref()
+                        .expect("a current line")
+                        .borrow()
+                        .data
+                        .clone(),
+                    of.current_x,
+                )
             });
             let indent_x = indent_length(&data);
 
@@ -1097,7 +1207,8 @@ pub fn do_end() {
     let was_current = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
     let was_column = xplustabs();
     let line_len = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|lp| lp.borrow().data.len())
             .unwrap_or(0)
@@ -1113,7 +1224,8 @@ pub fn do_end() {
             if let Some(ref lp) = current_lp {
                 let data = lp.borrow().data.clone();
                 let leftedge = leftedge_for(was_column, lp);
-                let mut rightedge = get_softwrap_breakpoint(&data, leftedge, &mut kickoff, &mut last_chunk);
+                let mut rightedge =
+                    get_softwrap_breakpoint(&data, leftedge, &mut kickoff, &mut last_chunk);
 
                 // If on last chunk, we're already at end of line.
                 // Otherwise, one column past the end — shift back one.
@@ -1278,12 +1390,17 @@ pub fn do_down() {
 pub fn do_scroll_up() {
     // When the top of the file is onscreen, we can't scroll.
     let (edittop_has_no_prev, firstcolumn_zero) = with_state(|s| {
-        s.openfile.as_ref().map(|of| {
-            let no_prev = of.edittop.as_ref()
-                .map(|lp| lp.borrow().prev.is_none())
-                .unwrap_or(true);
-            (no_prev, of.firstcolumn == 0)
-        }).unwrap_or((true, true))
+        s.openfile
+            .as_ref()
+            .map(|of| {
+                let no_prev = of
+                    .edittop
+                    .as_ref()
+                    .map(|lp| lp.borrow().prev.is_none())
+                    .unwrap_or(true);
+                (no_prev, of.firstcolumn == 0)
+            })
+            .unwrap_or((true, true))
     });
     if edittop_has_no_prev && firstcolumn_zero {
         return;
@@ -1311,7 +1428,8 @@ pub fn do_scroll_down() {
 
     let editwinrows = state().editwinrows;
     let has_next_line = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.edittop.as_ref())
             .map(|lp| lp.borrow().next.is_some())
             .unwrap_or(false)
@@ -1320,12 +1438,15 @@ pub fn do_scroll_down() {
     #[cfg(not(feature = "tiny"))]
     let softwrap_extra = if ISSET!(SOFTWRAP) {
         with_state(|s| {
-            s.openfile.as_ref()
-                .and_then(|of| of.edittop.as_ref().map(|lp| {
-                    let extra = extra_chunks_in(lp);
-                    let chunk = chunk_for(of.firstcolumn, lp);
-                    extra > chunk
-                }))
+            s.openfile
+                .as_ref()
+                .and_then(|of| {
+                    of.edittop.as_ref().map(|lp| {
+                        let extra = extra_chunks_in(lp);
+                        let chunk = chunk_for(of.firstcolumn, lp);
+                        extra > chunk
+                    })
+                })
                 .unwrap_or(false)
         })
     } else {
@@ -1347,7 +1468,8 @@ pub fn do_left() {
     let cur_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
     if cur_x > 0 {
         let data = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|lp| lp.borrow().data.clone())
                 .unwrap_or_default()
@@ -1371,20 +1493,25 @@ pub fn do_left() {
         // If we're not already at the top of the file, move to the end
         // of the previous line.
         let is_filetop = with_state(|s| {
-            s.openfile.as_ref().map(|of| {
-                match (&of.current, &of.filetop) {
+            s.openfile
+                .as_ref()
+                .map(|of| match (&of.current, &of.filetop) {
                     (Some(c), Some(ft)) => LinePtr::ptr_eq(c, ft),
                     _ => true,
-                }
-            }).unwrap_or(true)
+                })
+                .unwrap_or(true)
         });
         if !is_filetop {
             let prev_lp = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
             });
-            let prev_len = prev_lp.as_ref().map(|lp| lp.borrow().data.len()).unwrap_or(0);
+            let prev_len = prev_lp
+                .as_ref()
+                .map(|lp| lp.borrow().data.len())
+                .unwrap_or(0);
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
                     of.current = prev_lp;
@@ -1406,7 +1533,15 @@ pub fn do_right() {
 
     let (data, cur_x) = with_state(|s| {
         let of = s.openfile.as_ref().expect("an open buffer");
-        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+        (
+            of.current
+                .as_ref()
+                .expect("a current line")
+                .borrow()
+                .data
+                .clone(),
+            of.current_x,
+        )
     });
 
     // If there's a character at the current position, step over it.
@@ -1430,16 +1565,18 @@ pub fn do_right() {
         // If we're not already at the bottom of the file, move to the
         // beginning of the next line.
         let is_filebot = with_state(|s| {
-            s.openfile.as_ref().map(|of| {
-                match (&of.current, &of.filebot) {
+            s.openfile
+                .as_ref()
+                .map(|of| match (&of.current, &of.filebot) {
                     (Some(c), Some(fb)) => LinePtr::ptr_eq(c, fb),
                     _ => true,
-                }
-            }).unwrap_or(true)
+                })
+                .unwrap_or(true)
         });
         if !is_filebot {
             let next_lp = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .and_then(|lp| lp.borrow().next.clone())
             });
@@ -1462,7 +1599,11 @@ pub fn do_right() {
 #[cfg(not(feature = "tiny"))]
 pub fn do_scroll_left() {
     if ISSET!(SOFTWRAP) || ISSET!(SOLO_SIDESCROLL) {
-        let flag_str = if ISSET!(SOFTWRAP) { "--softwrap" } else { "--solo" };
+        let flag_str = if ISSET!(SOFTWRAP) {
+            "--softwrap"
+        } else {
+            "--solo"
+        };
         // TRANSLATORS: The %s is the name of an option.
         statusline(
             MessageType::Ahem,
@@ -1473,7 +1614,13 @@ pub fn do_scroll_left() {
 
     let tabsize = state().tabsize as usize;
     let brink = with_state(|s| s.openfile.as_ref().map(|of| of.brink).unwrap_or(0));
-    let step = if brink < tabsize { brink } else if tabsize < 2 { 2 } else { tabsize };
+    let step = if brink < tabsize {
+        brink
+    } else if tabsize < 2 {
+        2
+    } else {
+        tabsize
+    };
 
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
@@ -1481,14 +1628,24 @@ pub fn do_scroll_left() {
         }
     });
 
-    let (brink2, editwincols) = with_state(|s| (
-        s.openfile.as_ref().map(|of| of.brink).unwrap_or(0),
-        s.editwincols as usize,
-    ));
+    let (brink2, editwincols) = with_state(|s| {
+        (
+            s.openfile.as_ref().map(|of| of.brink).unwrap_or(0),
+            s.editwincols as usize,
+        )
+    });
 
     let (data, cur_x) = with_state(|s| {
         let of = s.openfile.as_ref().expect("an open buffer");
-        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+        (
+            of.current
+                .as_ref()
+                .expect("a current line")
+                .borrow()
+                .data
+                .clone(),
+            of.current_x,
+        )
     });
 
     let frame_x = actual_x(&data, brink2 + editwincols.saturating_sub(CUSHION + 1));
@@ -1511,7 +1668,11 @@ pub fn do_scroll_left() {
 #[cfg(not(feature = "tiny"))]
 pub fn do_scroll_right() {
     if ISSET!(SOFTWRAP) || ISSET!(SOLO_SIDESCROLL) {
-        let flag_str = if ISSET!(SOFTWRAP) { "--softwrap" } else { "--solo" };
+        let flag_str = if ISSET!(SOFTWRAP) {
+            "--softwrap"
+        } else {
+            "--solo"
+        };
         statusline(
             MessageType::Ahem,
             &format!("Not possible with '{}'", flag_str),
@@ -1532,7 +1693,10 @@ pub fn do_scroll_right() {
         let of = s.openfile.as_ref().expect("an open buffer");
         (
             of.brink,
-            of.edittop.as_ref().map(|lp| lp.borrow().lineno).unwrap_or(0),
+            of.edittop
+                .as_ref()
+                .map(|lp| lp.borrow().lineno)
+                .unwrap_or(0),
         )
     });
 
@@ -1548,10 +1712,12 @@ pub fn do_scroll_right() {
         // Walk backward while current line is too short.
         loop {
             let (is_short, _has_prev, not_edittop) = with_state(|s| {
-                let lp_short = candidate.as_ref()
+                let lp_short = candidate
+                    .as_ref()
                     .map(|lp| breadth(&lp.borrow().data) < brink + CUSHION)
                     .unwrap_or(false);
-                let has_prev_lp = candidate.as_ref()
+                let has_prev_lp = candidate
+                    .as_ref()
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
                     .is_some();
                 let edittop_lp = s.openfile.as_ref().and_then(|of| of.edittop.clone());
@@ -1565,7 +1731,8 @@ pub fn do_scroll_right() {
                 break;
             }
             let prev_lp = with_state(|_s| {
-                candidate.as_ref()
+                candidate
+                    .as_ref()
                     .and_then(|lp| lp.borrow().prev.as_ref()?.upgrade())
             });
             candidate = prev_lp;
@@ -1574,7 +1741,8 @@ pub fn do_scroll_right() {
         // Walk forward while line is too short and line number is within viewport.
         loop {
             let (is_short, has_next, lineno_ok) = with_state(|_s| {
-                let lp_short = candidate.as_ref()
+                let lp_short = candidate
+                    .as_ref()
                     .map(|lp| breadth(&lp.borrow().data) < brink + CUSHION)
                     .unwrap_or(false);
                 let next = candidate.as_ref().and_then(|lp| lp.borrow().next.clone());
@@ -1585,25 +1753,24 @@ pub fn do_scroll_right() {
             if !(lineno_ok && is_short && has_next) {
                 break;
             }
-            let next_lp = with_state(|_s| {
-                candidate.as_ref().and_then(|lp| lp.borrow().next.clone())
-            });
+            let next_lp =
+                with_state(|_s| candidate.as_ref().and_then(|lp| lp.borrow().next.clone()));
             candidate = next_lp;
         }
 
         // Use candidate only if it's within the viewport and wide enough.
         let (fits, in_view) = with_state(|_s| {
-            let lineno = candidate.as_ref().map(|lp| lp.borrow().lineno).unwrap_or(sill);
-            let wide_enough = candidate.as_ref()
+            let lineno = candidate
+                .as_ref()
+                .map(|lp| lp.borrow().lineno)
+                .unwrap_or(sill);
+            let wide_enough = candidate
+                .as_ref()
                 .map(|lp| breadth(&lp.borrow().data) >= brink + CUSHION)
                 .unwrap_or(false);
             (wide_enough, lineno < sill)
         });
-        if fits && in_view {
-            candidate
-        } else {
-            start_lp
-        }
+        if fits && in_view { candidate } else { start_lp }
     };
 
     with_state_mut(|s| {
@@ -1614,7 +1781,15 @@ pub fn do_scroll_right() {
 
     let (data, cur_x) = with_state(|s| {
         let of = s.openfile.as_ref().expect("an open buffer");
-        (of.current.as_ref().expect("a current line").borrow().data.clone(), of.current_x)
+        (
+            of.current
+                .as_ref()
+                .expect("a current line")
+                .borrow()
+                .data
+                .clone(),
+            of.current_x,
+        )
     });
 
     let frame_x = actual_x(&data, brink + CUSHION);

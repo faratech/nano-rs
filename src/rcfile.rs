@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/rcfile.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014 Mike Frysinger
@@ -11,11 +15,11 @@ use crate::global::{state, state_mut, with_state, with_state_mut};
 use crate::{ISSET, SET, UNSET};
 use std::cell::RefCell;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 #[cfg(feature = "color")]
-use regex_lite::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
 
 // ---------------------------------------------------------------------------
 // Module-level statics (thread_local replacements for C file-scope statics)
@@ -87,29 +91,41 @@ pub const RCFILE_NAME: &str = "nanorc";
 
 // ncurses attribute bit constants (matching winio.rs local values)
 pub const A_NORMAL: i32 = 0;
-pub const A_BOLD:   i32 = 0x0200_0000;
+pub const A_BOLD: i32 = 0x0200_0000;
 pub const A_ITALIC: i32 = 0x0008_0000;
 
 // Terminal color indices (matching ncurses COLOR_* constants)
-pub const COLOR_BLACK:   i16 = 0;
-pub const COLOR_RED:     i16 = 1;
-pub const COLOR_GREEN:   i16 = 2;
-pub const COLOR_YELLOW:  i16 = 3;
-pub const COLOR_BLUE:    i16 = 4;
+pub const COLOR_BLACK: i16 = 0;
+pub const COLOR_RED: i16 = 1;
+pub const COLOR_GREEN: i16 = 2;
+pub const COLOR_YELLOW: i16 = 3;
+pub const COLOR_BLUE: i16 = 4;
 pub const COLOR_MAGENTA: i16 = 5;
-pub const COLOR_CYAN:    i16 = 6;
-pub const COLOR_WHITE:   i16 = 7;
+pub const COLOR_CYAN: i16 = 6;
+pub const COLOR_WHITE: i16 = 7;
 
 /// Number of indexed colors the current terminal can actually display.
 fn terminal_colors() -> i16 {
     if let Some(level) = supports_color::on_cached(supports_color::Stream::Stdout) {
-        if level.has_256 || level.has_16m { 256 } else if level.has_basic { 8 } else { 0 }
+        if level.has_256 || level.has_16m {
+            256
+        } else if level.has_basic {
+            8
+        } else {
+            0
+        }
     } else {
         // `supports-color` intentionally suppresses its answer for NO_COLOR,
         // but explicit nanorc colors override NO_COLOR in GNU nano.  Retain the
         // underlying indexed capability for that explicit-configuration case.
         let term = std::env::var("TERM").unwrap_or_default();
-        if term == "dumb" { 0 } else if term.contains("256color") { 256 } else { 8 }
+        if term == "dumb" {
+            0
+        } else if term.contains("256color") {
+            256
+        } else {
+            8
+        }
     }
 }
 
@@ -124,141 +140,348 @@ const SYSCONFDIR: &str = "/etc";
 /// flag==0 means the option takes an argument (not a pure flag bit).
 struct RcOpt {
     name: &'static str,
-    flag: u32,  // 0 = "takes an argument"
+    flag: u32, // 0 = "takes an argument"
 }
 
 /// C: static const rcoption rcopts[]
 static RCOPTS: &[RcOpt] = &[
-    RcOpt { name: "boldtext",              flag: BOLD_TEXT },
+    RcOpt {
+        name: "boldtext",
+        flag: BOLD_TEXT,
+    },
     #[cfg(feature = "justify")]
-    RcOpt { name: "brackets",              flag: 0 },
+    RcOpt {
+        name: "brackets",
+        flag: 0,
+    },
     #[cfg(feature = "wrapping")]
-    RcOpt { name: "breaklonglines",        flag: BREAK_LONG_LINES },
-    RcOpt { name: "casesensitive",         flag: CASE_SENSITIVE },
-    RcOpt { name: "constantshow",          flag: CONSTANT_SHOW },
+    RcOpt {
+        name: "breaklonglines",
+        flag: BREAK_LONG_LINES,
+    },
+    RcOpt {
+        name: "casesensitive",
+        flag: CASE_SENSITIVE,
+    },
+    RcOpt {
+        name: "constantshow",
+        flag: CONSTANT_SHOW,
+    },
     // "fill" is ENABLED_WRAPORJUSTIFY — enabled when wrapping OR justify
     #[cfg(any(feature = "wrapping", feature = "justify"))]
-    RcOpt { name: "fill",                  flag: 0 },
+    RcOpt {
+        name: "fill",
+        flag: 0,
+    },
     #[cfg(feature = "histories")]
-    RcOpt { name: "historylog",            flag: HISTORYLOG },
+    RcOpt {
+        name: "historylog",
+        flag: HISTORYLOG,
+    },
     #[cfg(feature = "linenumbers")]
-    RcOpt { name: "linenumbers",           flag: LINE_NUMBERS },
+    RcOpt {
+        name: "linenumbers",
+        flag: LINE_NUMBERS,
+    },
     #[cfg(feature = "libmagic")]
-    RcOpt { name: "magic",                  flag: USE_MAGIC },
+    RcOpt {
+        name: "magic",
+        flag: USE_MAGIC,
+    },
     #[cfg(feature = "mouse")]
-    RcOpt { name: "mouse",                 flag: USE_MOUSE },
+    RcOpt {
+        name: "mouse",
+        flag: USE_MOUSE,
+    },
     #[cfg(feature = "multibuffer")]
-    RcOpt { name: "multibuffer",           flag: MULTIBUFFER },
-    RcOpt { name: "nohelp",               flag: NO_HELP },
-    RcOpt { name: "nonewlines",           flag: NO_NEWLINES },
+    RcOpt {
+        name: "multibuffer",
+        flag: MULTIBUFFER,
+    },
+    RcOpt {
+        name: "nohelp",
+        flag: NO_HELP,
+    },
+    RcOpt {
+        name: "nonewlines",
+        flag: NO_NEWLINES,
+    },
     #[cfg(feature = "wrapping")]
-    RcOpt { name: "nowrap",               flag: NO_WRAP },
+    RcOpt {
+        name: "nowrap",
+        flag: NO_WRAP,
+    },
     #[cfg(feature = "operatingdir")]
-    RcOpt { name: "operatingdir",         flag: 0 },
+    RcOpt {
+        name: "operatingdir",
+        flag: 0,
+    },
     #[cfg(feature = "histories")]
-    RcOpt { name: "positionlog",          flag: POSITIONLOG },
-    RcOpt { name: "preserve",             flag: PRESERVE },
+    RcOpt {
+        name: "positionlog",
+        flag: POSITIONLOG,
+    },
+    RcOpt {
+        name: "preserve",
+        flag: PRESERVE,
+    },
     #[cfg(feature = "justify")]
-    RcOpt { name: "punct",                flag: 0 },
+    RcOpt {
+        name: "punct",
+        flag: 0,
+    },
     #[cfg(feature = "justify")]
-    RcOpt { name: "quotestr",             flag: 0 },
-    RcOpt { name: "quickblank",           flag: QUICK_BLANK },
-    RcOpt { name: "rawsequences",         flag: RAW_SEQUENCES },
-    RcOpt { name: "rebinddelete",         flag: REBIND_DELETE },
-    RcOpt { name: "regexp",               flag: USE_REGEXP },
-    RcOpt { name: "saveonexit",           flag: SAVE_ON_EXIT },
+    RcOpt {
+        name: "quotestr",
+        flag: 0,
+    },
+    RcOpt {
+        name: "quickblank",
+        flag: QUICK_BLANK,
+    },
+    RcOpt {
+        name: "rawsequences",
+        flag: RAW_SEQUENCES,
+    },
+    RcOpt {
+        name: "rebinddelete",
+        flag: REBIND_DELETE,
+    },
+    RcOpt {
+        name: "regexp",
+        flag: USE_REGEXP,
+    },
+    RcOpt {
+        name: "saveonexit",
+        flag: SAVE_ON_EXIT,
+    },
     #[cfg(feature = "speller")]
-    RcOpt { name: "speller",              flag: 0 },
+    RcOpt {
+        name: "speller",
+        flag: 0,
+    },
     // Non-tiny options:
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "afterends",            flag: AFTER_ENDS },
+    RcOpt {
+        name: "afterends",
+        flag: AFTER_ENDS,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "allow_insecure_backup", flag: INSECURE_BACKUP },
+    RcOpt {
+        name: "allow_insecure_backup",
+        flag: INSECURE_BACKUP,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "atblanks",             flag: AT_BLANKS },
+    RcOpt {
+        name: "atblanks",
+        flag: AT_BLANKS,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "autoindent",           flag: AUTOINDENT },
+    RcOpt {
+        name: "autoindent",
+        flag: AUTOINDENT,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "backup",               flag: MAKE_BACKUP },
+    RcOpt {
+        name: "backup",
+        flag: MAKE_BACKUP,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "backupdir",            flag: 0 },
+    RcOpt {
+        name: "backupdir",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "bookstyle",            flag: BOOKSTYLE },
+    RcOpt {
+        name: "bookstyle",
+        flag: BOOKSTYLE,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "colonparsing",         flag: COLON_PARSING },
+    RcOpt {
+        name: "colonparsing",
+        flag: COLON_PARSING,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "cutfromcursor",        flag: CUT_FROM_CURSOR },
+    RcOpt {
+        name: "cutfromcursor",
+        flag: CUT_FROM_CURSOR,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "emptyline",            flag: EMPTY_LINE },
+    RcOpt {
+        name: "emptyline",
+        flag: EMPTY_LINE,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "guidestripe",          flag: 0 },
+    RcOpt {
+        name: "guidestripe",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "indicator",            flag: INDICATOR },
+    RcOpt {
+        name: "indicator",
+        flag: INDICATOR,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "jumpyscrolling",       flag: JUMPY_SCROLLING },
+    RcOpt {
+        name: "jumpyscrolling",
+        flag: JUMPY_SCROLLING,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "locking",              flag: LOCKING },
+    RcOpt {
+        name: "locking",
+        flag: LOCKING,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "matchbrackets",        flag: 0 },
+    RcOpt {
+        name: "matchbrackets",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "minibar",              flag: MINIBAR },
+    RcOpt {
+        name: "minibar",
+        flag: MINIBAR,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "noconvert",            flag: NO_CONVERT },
+    RcOpt {
+        name: "noconvert",
+        flag: NO_CONVERT,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "showcursor",           flag: SHOW_CURSOR },
+    RcOpt {
+        name: "showcursor",
+        flag: SHOW_CURSOR,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "smarthome",            flag: SMART_HOME },
+    RcOpt {
+        name: "smarthome",
+        flag: SMART_HOME,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "softwrap",             flag: SOFTWRAP },
+    RcOpt {
+        name: "softwrap",
+        flag: SOFTWRAP,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "solosidescroll",       flag: SOLO_SIDESCROLL },
+    RcOpt {
+        name: "solosidescroll",
+        flag: SOLO_SIDESCROLL,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "stateflags",           flag: STATEFLAGS },
+    RcOpt {
+        name: "stateflags",
+        flag: STATEFLAGS,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "tabsize",              flag: 0 },
+    RcOpt {
+        name: "tabsize",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "tabstospaces",         flag: TABS_TO_SPACES },
+    RcOpt {
+        name: "tabstospaces",
+        flag: TABS_TO_SPACES,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "trimblanks",           flag: TRIM_BLANKS },
+    RcOpt {
+        name: "trimblanks",
+        flag: TRIM_BLANKS,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "unix",                 flag: MAKE_IT_UNIX },
+    RcOpt {
+        name: "unix",
+        flag: MAKE_IT_UNIX,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "whitespace",           flag: 0 },
+    RcOpt {
+        name: "whitespace",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "whitespacedisplay",    flag: WHITESPACE_DISPLAY },
+    RcOpt {
+        name: "whitespacedisplay",
+        flag: WHITESPACE_DISPLAY,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "wordbounds",           flag: WORD_BOUNDS },
+    RcOpt {
+        name: "wordbounds",
+        flag: WORD_BOUNDS,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "wordchars",            flag: 0 },
+    RcOpt {
+        name: "wordchars",
+        flag: 0,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "zap",                  flag: LET_THEM_ZAP },
+    RcOpt {
+        name: "zap",
+        flag: LET_THEM_ZAP,
+    },
     #[cfg(not(feature = "tiny"))]
-    RcOpt { name: "zero",                 flag: ZERO },
+    RcOpt {
+        name: "zero",
+        flag: ZERO,
+    },
     // Color interface options:
     #[cfg(feature = "color")]
-    RcOpt { name: "titlecolor",           flag: 0 },
+    RcOpt {
+        name: "titlecolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "numbercolor",          flag: 0 },
+    RcOpt {
+        name: "numbercolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "stripecolor",          flag: 0 },
+    RcOpt {
+        name: "stripecolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "scrollercolor",        flag: 0 },
+    RcOpt {
+        name: "scrollercolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "selectedcolor",        flag: 0 },
+    RcOpt {
+        name: "selectedcolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "spotlightcolor",       flag: 0 },
+    RcOpt {
+        name: "spotlightcolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "minicolor",            flag: 0 },
+    RcOpt {
+        name: "minicolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "promptcolor",          flag: 0 },
+    RcOpt {
+        name: "promptcolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "statuscolor",          flag: 0 },
+    RcOpt {
+        name: "statuscolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "errorcolor",           flag: 0 },
+    RcOpt {
+        name: "errorcolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "keycolor",             flag: 0 },
+    RcOpt {
+        name: "keycolor",
+        flag: 0,
+    },
     #[cfg(feature = "color")]
-    RcOpt { name: "functioncolor",        flag: 0 },
+    RcOpt {
+        name: "functioncolor",
+        flag: 0,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -270,19 +493,41 @@ const NUMBER_OF_MENUS: usize = 16;
 
 /* C: char *menunames[NUMBER_OF_MENUS] */
 const MENUNAMES: [&str; NUMBER_OF_MENUS] = [
-    "main", "search", "replace", "replacewith",
-    "yesno", "gotoline", "writeout", "insert",
-    "execute", "help", "spell", "linter",
-    "browser", "whereisfile", "gotodir",
+    "main",
+    "search",
+    "replace",
+    "replacewith",
+    "yesno",
+    "gotoline",
+    "writeout",
+    "insert",
+    "execute",
+    "help",
+    "spell",
+    "linter",
+    "browser",
+    "whereisfile",
+    "gotodir",
     "all",
 ];
 
 /* C: int menusymbols[NUMBER_OF_MENUS] */
 const MENUSYMBOLS: [u32; NUMBER_OF_MENUS] = [
-    MMAIN, MWHEREIS, MREPLACE, MREPLACEWITH,
-    MYESNO, MGOTOLINE, MWRITEFILE, MINSERTFILE,
-    MEXECUTE, MHELP, MSPELL, MLINTER,
-    MBROWSER, MWHEREISFILE, MGOTODIR,
+    MMAIN,
+    MWHEREIS,
+    MREPLACE,
+    MREPLACEWITH,
+    MYESNO,
+    MGOTOLINE,
+    MWRITEFILE,
+    MINSERTFILE,
+    MEXECUTE,
+    MHELP,
+    MSPELL,
+    MLINTER,
+    MBROWSER,
+    MWHEREISFILE,
+    MGOTODIR,
     MMOST | MBROWSER | MHELP | MYESNO,
 ];
 
@@ -293,9 +538,10 @@ const MENUSYMBOLS: [u32; NUMBER_OF_MENUS] = [
 /* C: void display_rcfile_errors(void) */
 /// Print all gathered errors to stderr.
 pub fn display_rcfile_errors() {
+    let mut stderr = io::stderr().lock();
     ERROR_LIST.with(|el| {
         for msg in el.borrow().iter() {
-            eprintln!("{}", msg);
+            let _ = writeln!(stderr, "{}", msg);
         }
     });
 }
@@ -345,7 +591,7 @@ pub fn jot_error(msg: &str) {
 /* C: void die(const char *msg, ...) */
 fn die(msg: &str) -> ! {
     display_rcfile_errors();
-    eprintln!("{}", msg);
+    let _ = writeln!(io::stderr().lock(), "{}", msg);
     std::process::exit(1);
 }
 
@@ -445,138 +691,140 @@ pub fn strtosc(input: &str) -> Option<KeyStruct> {
     use crate::global::*;
 
     let func: Option<FuncPtr> = match input {
-        "cancel"    => Some(do_cancel as FuncPtr),
+        "cancel" => Some(do_cancel as FuncPtr),
         #[cfg(feature = "help")]
-        "help"      => Some(do_help as FuncPtr),
-        "exit"      => Some(do_exit as FuncPtr),
+        "help" => Some(do_help as FuncPtr),
+        "exit" => Some(do_exit as FuncPtr),
         "discardbuffer" => Some(discard_buffer as FuncPtr),
-        "writeout"  => Some(do_writeout as FuncPtr),
-        "savefile"  => Some(do_savefile as FuncPtr),
-        "insert"    => Some(do_insertfile as FuncPtr),
-        "whereis"   => Some(do_search_forward as FuncPtr),
-        "wherewas"  => Some(do_search_backward as FuncPtr),
+        "writeout" => Some(do_writeout as FuncPtr),
+        "savefile" => Some(do_savefile as FuncPtr),
+        "insert" => Some(do_insertfile as FuncPtr),
+        "whereis" => Some(do_search_forward as FuncPtr),
+        "wherewas" => Some(do_search_backward as FuncPtr),
         "findprevious" => Some(do_findprevious as FuncPtr),
-        "findnext"  => Some(do_findnext as FuncPtr),
-        "replace"   => Some(do_replace as FuncPtr),
-        "cut"       => Some(cut_text as FuncPtr),
-        "copy"      => Some(copy_text as FuncPtr),
-        "paste"     => Some(paste_text as FuncPtr),
+        "findnext" => Some(do_findnext as FuncPtr),
+        "replace" => Some(do_replace as FuncPtr),
+        "cut" => Some(cut_text as FuncPtr),
+        "copy" => Some(copy_text as FuncPtr),
+        "paste" => Some(paste_text as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "execute"   => Some(do_execute as FuncPtr),
+        "execute" => Some(do_execute as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "cutrestoffile" => Some(cut_till_eof as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "zap"       => Some(zap_text as FuncPtr),
+        "zap" => Some(zap_text as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "mark"      => Some(do_mark as FuncPtr),
+        "mark" => Some(do_mark as FuncPtr),
         #[cfg(feature = "speller")]
         "tospell" | "speller" => Some(do_spell as FuncPtr),
         #[cfg(feature = "linter")]
-        "linter"    => Some(do_linter as FuncPtr),
+        "linter" => Some(do_linter as FuncPtr),
         #[cfg(feature = "formatter")]
         "formatter" => Some(do_formatter as FuncPtr),
-        "location"  => Some(report_cursor_position as FuncPtr),
-        "gotoline"  => Some(do_gotolinecolumn as FuncPtr),
+        "location" => Some(report_cursor_position as FuncPtr),
+        "gotoline" => Some(do_gotolinecolumn as FuncPtr),
         #[cfg(feature = "justify")]
-        "justify"   => Some(do_justify as FuncPtr),
+        "justify" => Some(do_justify as FuncPtr),
         #[cfg(feature = "justify")]
         "fulljustify" => Some(do_full_justify as FuncPtr),
         #[cfg(feature = "justify")]
         "beginpara" => Some(to_para_begin as FuncPtr),
         #[cfg(feature = "justify")]
-        "endpara"   => Some(to_para_end as FuncPtr),
+        "endpara" => Some(to_para_end as FuncPtr),
         #[cfg(feature = "comment")]
-        "comment"   => Some(do_comment as FuncPtr),
+        "comment" => Some(do_comment as FuncPtr),
         #[cfg(feature = "wordcomp")]
-        "complete"  => Some(complete_a_word as FuncPtr),
+        "complete" => Some(complete_a_word as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "indent"    => Some(do_indent as FuncPtr),
+        "indent" => Some(do_indent as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "unindent"  => Some(do_unindent as FuncPtr),
+        "unindent" => Some(do_unindent as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "chopwordleft"  => Some(chop_previous_word as FuncPtr),
+        "chopwordleft" => Some(chop_previous_word as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "chopwordright" => Some(chop_next_word as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "findbracket"   => Some(do_find_bracket as FuncPtr),
+        "findbracket" => Some(do_find_bracket as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "wordcount"     => Some(count_lines_words_and_characters as FuncPtr),
+        "wordcount" => Some(count_lines_words_and_characters as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "recordmacro"   => Some(record_macro as FuncPtr),
+        "recordmacro" => Some(record_macro as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "runmacro"      => Some(run_macro as FuncPtr),
+        "runmacro" => Some(run_macro as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "anchor"        => Some(put_or_lift_anchor as FuncPtr),
+        "anchor" => Some(put_or_lift_anchor as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "prevanchor"    => Some(to_prev_anchor as FuncPtr),
+        "prevanchor" => Some(to_prev_anchor as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "nextanchor"    => Some(to_next_anchor as FuncPtr),
+        "nextanchor" => Some(to_next_anchor as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "undo"      => Some(do_undo as FuncPtr),
+        "undo" => Some(do_undo as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "redo"      => Some(do_redo as FuncPtr),
+        "redo" => Some(do_redo as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "suspend"   => Some(do_suspend as FuncPtr),
-        "left" | "back"    => Some(do_left as FuncPtr),
+        "suspend" => Some(do_suspend as FuncPtr),
+        "left" | "back" => Some(do_left as FuncPtr),
         "right" | "forward" => Some(do_right as FuncPtr),
-        "up" | "prevline"  => Some(do_up as FuncPtr),
+        "up" | "prevline" => Some(do_up as FuncPtr),
         "down" | "nextline" => Some(do_down as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "scrollleft"  => Some(do_scroll_left as FuncPtr),
+        "scrollleft" => Some(do_scroll_left as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "scrollright" => Some(do_scroll_right as FuncPtr),
         #[cfg(any(not(feature = "tiny"), feature = "help"))]
-        "scrollup"    => Some(do_scroll_up as FuncPtr),
+        "scrollup" => Some(do_scroll_up as FuncPtr),
         #[cfg(any(not(feature = "tiny"), feature = "help"))]
-        "scrolldown"  => Some(do_scroll_down as FuncPtr),
-        "prevword"  => Some(to_prev_word as FuncPtr),
-        "nextword"  => Some(to_next_word as FuncPtr),
-        "home"      => Some(do_home as FuncPtr),
-        "end"       => Some(do_end as FuncPtr),
+        "scrolldown" => Some(do_scroll_down as FuncPtr),
+        "prevword" => Some(to_prev_word as FuncPtr),
+        "nextword" => Some(to_next_word as FuncPtr),
+        "home" => Some(do_home as FuncPtr),
+        "end" => Some(do_end as FuncPtr),
         "prevblock" => Some(to_prev_block as FuncPtr),
         "nextblock" => Some(to_next_block as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "toprow"    => Some(to_top_row as FuncPtr),
+        "toprow" => Some(to_top_row as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "bottomrow" => Some(to_bottom_row as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "center"    => Some(do_center as FuncPtr),
+        "center" => Some(do_center as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "cycle"     => Some(do_cycle as FuncPtr),
-        "pageup" | "prevpage"   => Some(do_page_up as FuncPtr),
+        "cycle" => Some(do_cycle as FuncPtr),
+        "pageup" | "prevpage" => Some(do_page_up as FuncPtr),
         "pagedown" | "nextpage" => Some(do_page_down as FuncPtr),
         "firstline" => Some(to_first_line as FuncPtr),
-        "lastline"  => Some(to_last_line as FuncPtr),
+        "lastline" => Some(to_last_line as FuncPtr),
         #[cfg(feature = "multibuffer")]
-        "prevbuf"   => Some(switch_to_prev_buffer as FuncPtr),
+        "prevbuf" => Some(switch_to_prev_buffer as FuncPtr),
         #[cfg(feature = "multibuffer")]
-        "nextbuf"   => Some(switch_to_next_buffer as FuncPtr),
-        "verbatim"  => Some(do_verbatim_input as FuncPtr),
-        "tab"       => Some(do_tab as FuncPtr),
-        "enter"     => Some(do_enter as FuncPtr),
-        "delete"    => Some(do_delete as FuncPtr),
+        "nextbuf" => Some(switch_to_next_buffer as FuncPtr),
+        "verbatim" => Some(do_verbatim_input as FuncPtr),
+        "tab" => Some(do_tab as FuncPtr),
+        "enter" => Some(do_enter as FuncPtr),
+        "delete" => Some(do_delete as FuncPtr),
         "backspace" => Some(do_backspace as FuncPtr),
-        "refresh"   => Some(full_refresh as FuncPtr),
-        "casesens"  => Some(case_sens_void as FuncPtr),
-        "regexp"    => Some(regexp_void as FuncPtr),
+        "refresh" => Some(full_refresh as FuncPtr),
+        "casesens" => Some(case_sens_void as FuncPtr),
+        "regexp" => Some(regexp_void as FuncPtr),
         "backwards" => Some(backwards_void as FuncPtr),
         "flipreplace" => Some(flip_replace as FuncPtr),
         #[cfg(feature = "histories")]
-        "older"     => Some(get_older_item as FuncPtr),
+        "older" => Some(get_older_item as FuncPtr),
         #[cfg(feature = "histories")]
-        "newer"     => Some(get_newer_item as FuncPtr),
+        "newer" => Some(get_newer_item as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "dosformat" => Some(dos_format as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "append"    => Some(append_it as FuncPtr),
+        "macformat" => Some(mac_format as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "prepend"   => Some(prepend_it as FuncPtr),
+        "append" => Some(append_it as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "backup"    => Some(back_it_up as FuncPtr),
+        "prepend" => Some(prepend_it as FuncPtr),
+        #[cfg(not(feature = "tiny"))]
+        "backup" => Some(back_it_up as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "flipexecute" => Some(flip_execute as FuncPtr),
         #[cfg(not(feature = "tiny"))]
-        "flippipe"  => Some(flip_pipe as FuncPtr),
+        "flippipe" => Some(flip_pipe as FuncPtr),
         #[cfg(not(feature = "tiny"))]
         "flipconvert" => Some(flip_convert as FuncPtr),
         #[cfg(feature = "multibuffer")]
@@ -584,11 +832,11 @@ pub fn strtosc(input: &str) -> Option<KeyStruct> {
         #[cfg(feature = "browser")]
         "tofiles" | "browser" => Some(to_files as FuncPtr),
         #[cfg(feature = "browser")]
-        "gotodir"   => Some(goto_dir as FuncPtr),
+        "gotodir" => Some(goto_dir as FuncPtr),
         #[cfg(feature = "browser")]
         "firstfile" => Some(to_first_file as FuncPtr),
         #[cfg(feature = "browser")]
-        "lastfile"  => Some(to_last_file as FuncPtr),
+        "lastfile" => Some(to_last_file as FuncPtr),
         _ => None,
     };
 
@@ -603,23 +851,23 @@ pub fn strtosc(input: &str) -> Option<KeyStruct> {
     {
         use crate::global::do_toggle;
         let toggle_flag: Option<u32> = match input {
-            "nohelp"             => Some(NO_HELP),
-            "zero"               => Some(ZERO),
-            "constantshow"       => Some(CONSTANT_SHOW),
-            "softwrap"           => Some(SOFTWRAP),
+            "nohelp" => Some(NO_HELP),
+            "zero" => Some(ZERO),
+            "constantshow" => Some(CONSTANT_SHOW),
+            "softwrap" => Some(SOFTWRAP),
             #[cfg(feature = "linenumbers")]
-            "linenumbers"        => Some(LINE_NUMBERS),
-            "whitespacedisplay"  => Some(WHITESPACE_DISPLAY),
+            "linenumbers" => Some(LINE_NUMBERS),
+            "whitespacedisplay" => Some(WHITESPACE_DISPLAY),
             #[cfg(feature = "color")]
-            "nosyntax"           => Some(NO_SYNTAX),
-            "smarthome"          => Some(SMART_HOME),
-            "autoindent"         => Some(AUTOINDENT),
-            "cutfromcursor"      => Some(CUT_FROM_CURSOR),
+            "nosyntax" => Some(NO_SYNTAX),
+            "smarthome" => Some(SMART_HOME),
+            "autoindent" => Some(AUTOINDENT),
+            "cutfromcursor" => Some(CUT_FROM_CURSOR),
             #[cfg(feature = "wrapping")]
-            "breaklonglines"     => Some(BREAK_LONG_LINES),
-            "tabstospaces"       => Some(TABS_TO_SPACES),
+            "breaklonglines" => Some(BREAK_LONG_LINES),
+            "tabstospaces" => Some(TABS_TO_SPACES),
             #[cfg(feature = "mouse")]
-            "mouse"              => Some(USE_MOUSE),
+            "mouse" => Some(USE_MOUSE),
             _ => None,
         };
 
@@ -672,9 +920,13 @@ fn is_universal(func: FuncPtr) -> bool {
         || func == do_end as FuncPtr
         || {
             #[cfg(not(feature = "tiny"))]
-            { func == to_prev_word as FuncPtr || func == to_next_word as FuncPtr }
+            {
+                func == to_prev_word as FuncPtr || func == to_next_word as FuncPtr
+            }
             #[cfg(feature = "tiny")]
-            { false }
+            {
+                false
+            }
         }
         || func == do_delete as FuncPtr
         || func == do_backspace as FuncPtr
@@ -746,29 +998,48 @@ const COLORCOUNT: usize = 34;
 
 #[cfg(feature = "color")]
 static HUES: [&str; COLORCOUNT] = [
-    "red", "green", "blue",
-    "yellow", "cyan", "magenta",
-    "white", "black", "normal",
-    "pink", "purple", "mauve",
-    "lagoon", "mint", "lime",
-    "peach", "orange", "latte",
-    "rosy", "beet", "plum",
-    "sea", "sky", "slate",
-    "teal", "sage", "brown",
-    "ocher", "sand", "tawny",
-    "brick", "crimson",
-    "grey", "gray",
+    "red", "green", "blue", "yellow", "cyan", "magenta", "white", "black", "normal", "pink",
+    "purple", "mauve", "lagoon", "mint", "lime", "peach", "orange", "latte", "rosy", "beet",
+    "plum", "sea", "sky", "slate", "teal", "sage", "brown", "ocher", "sand", "tawny", "brick",
+    "crimson", "grey", "gray",
 ];
 
 #[cfg(feature = "color")]
 static INDICES: [i16; COLORCOUNT] = [
-    COLOR_RED, COLOR_GREEN, COLOR_BLUE,
-    COLOR_YELLOW, COLOR_CYAN, COLOR_MAGENTA,
-    COLOR_WHITE, COLOR_BLACK, THE_DEFAULT,
-    204, 163, 134, 38, 48, 148, 215, 208, 137,
-    175, 127, 98, 32, 111, 66, 35, 107, 100,
-    142, 186, 136, 166, 161,
-    COLOR_BLACK + 8, COLOR_BLACK + 8,
+    COLOR_RED,
+    COLOR_GREEN,
+    COLOR_BLUE,
+    COLOR_YELLOW,
+    COLOR_CYAN,
+    COLOR_MAGENTA,
+    COLOR_WHITE,
+    COLOR_BLACK,
+    THE_DEFAULT,
+    204,
+    163,
+    134,
+    38,
+    48,
+    148,
+    215,
+    208,
+    137,
+    175,
+    127,
+    98,
+    32,
+    111,
+    66,
+    35,
+    107,
+    100,
+    142,
+    186,
+    136,
+    166,
+    161,
+    COLOR_BLACK + 8,
+    COLOR_BLACK + 8,
 ];
 
 #[cfg(feature = "color")]
@@ -1022,6 +1293,11 @@ fn compile(expression: &str, case_insensitive: bool) -> Option<Regex> {
     let pattern = posix_bracket_fixup(expression);
     let result = RegexBuilder::new(&pattern)
         .case_insensitive(case_insensitive)
+        .unicode(crate::chars::using_utf8())
+        // An LF inside LineData represents an embedded NUL, not a physical
+        // line boundary.  POSIX regexec() sees that byte as part of the line,
+        // so a syntax rule's dot must be able to match it too.
+        .dot_matches_new_line(true)
         .build();
     match result {
         Ok(r) => Some(r),
@@ -1044,7 +1320,8 @@ pub fn check_for_nonempty_syntax() {
         // Read from STATE.syntaxes head (the live syntax being built)
         // This is safe — we're not inside a with_state_mut borrow here
         let (syntax_lineno, syntax_name) = with_state(|s| {
-            s.syntaxes.as_ref()
+            s.syntaxes
+                .as_ref()
                 .map(|sx| (sx.lineno, sx.name.clone()))
                 .unwrap_or((0, String::new()))
         });
@@ -1064,14 +1341,24 @@ pub fn check_for_nonempty_syntax() {}
 /// Parse quoted regexes from ptr, compile them, and return a linked list.
 /// Returns None if there was a validation error; returns Some(head) on success
 /// (head may still be None if all regexes were invalid but parseable).
-fn grab_and_store_build(kind: &str, ptr: &str, for_default_syntax: bool) -> Option<Option<Box<RegexListType>>> {
+fn grab_and_store_build(
+    kind: &str,
+    ptr: &str,
+    for_default_syntax: bool,
+) -> Option<Option<Box<RegexListType>>> {
     if !get_opensyntax() {
-        jot_error(&format!("A '{}' command requires a preceding 'syntax' command", kind));
+        jot_error(&format!(
+            "A '{}' command requires a preceding 'syntax' command",
+            kind
+        ));
         return None;
     }
 
     if for_default_syntax && !ptr.is_empty() {
-        jot_error(&format!("The \"default\" syntax does not accept '{}' regexes", kind));
+        jot_error(&format!(
+            "The \"default\" syntax does not accept '{}' regexes",
+            kind
+        ));
         return None;
     }
 
@@ -1087,7 +1374,10 @@ fn grab_and_store_build(kind: &str, ptr: &str, for_default_syntax: bool) -> Opti
     while !remaining.is_empty() {
         // Each regex string must start with '"'
         if !remaining.starts_with('"') {
-            jot_error(&format!("Regex strings for '{}' must begin with a \" character", kind));
+            jot_error(&format!(
+                "Regex strings for '{}' must begin with a \" character",
+                kind
+            ));
             return None;
         }
         remaining = &remaining[1..]; // skip opening '"'
@@ -1122,7 +1412,10 @@ fn grab_and_store_build(kind: &str, ptr: &str, for_default_syntax: bool) -> Opti
 
 #[cfg(feature = "color")]
 /// Append compiled regex list to an existing storage chain.
-fn append_regex_list(storage: &mut Option<Box<RegexListType>>, new_items: Option<Box<RegexListType>>) {
+fn append_regex_list(
+    storage: &mut Option<Box<RegexListType>>,
+    new_items: Option<Box<RegexListType>>,
+) {
     if new_items.is_none() {
         return;
     }
@@ -1231,7 +1524,10 @@ fn begin_new_syntax(ptr: &str) {
     // The default syntax should have no associated extensions
     if !rest.is_empty() {
         let syntax_name = with_state(|s| {
-            s.syntaxes.as_ref().map(|sx| sx.name.clone()).unwrap_or_default()
+            s.syntaxes
+                .as_ref()
+                .map(|sx| sx.name.clone())
+                .unwrap_or_default()
         });
         if syntax_name == "default" {
             jot_error("The \"default\" syntax does not accept extensions");
@@ -1611,8 +1907,7 @@ pub fn parse_binding(ptr: &str, dobind: bool) {
         if !ISSET!(RESTRICTED) && !ISSET!(VIEW_MODE) {
             jot_error(&format!(
                 "Function '{}' does not exist in menu '{}'",
-                funcptr_str,
-                menuptr
+                funcptr_str, menuptr
             ));
         }
         return;
@@ -1637,8 +1932,7 @@ pub fn parse_binding(ptr: &str, dobind: bool) {
             let toggle_val = sc.toggle;
             let ordinal = with_state(|s| {
                 for existing in &s.sclist {
-                    if existing.func == Some(do_toggle as FuncPtr)
-                        && existing.toggle == toggle_val
+                    if existing.func == Some(do_toggle as FuncPtr) && existing.toggle == toggle_val
                     {
                         return existing.ordinal;
                     }
@@ -1765,15 +2059,18 @@ pub fn parse_one_include(file: &str, full_parse: bool) {
         // Apply any stored extendsyntax commands
         // (These were stored in augmentations on the syntax)
         let augments: Vec<(String, usize, String)> = with_state(|s| {
-            s.syntaxes.as_ref().map(|sx| {
-                let mut v = Vec::new();
-                let mut aug = sx.augmentations.as_ref();
-                while let Some(a) = aug {
-                    v.push((a.filename.clone(), a.lineno as usize, a.data.clone()));
-                    aug = a.next.as_ref();
-                }
-                v
-            }).unwrap_or_default()
+            s.syntaxes
+                .as_ref()
+                .map(|sx| {
+                    let mut v = Vec::new();
+                    let mut aug = sx.augmentations.as_ref();
+                    while let Some(a) = aug {
+                        v.push((a.filename.clone(), a.lineno as usize, a.data.clone()));
+                        aug = a.next.as_ref();
+                    }
+                    v
+                })
+                .unwrap_or_default()
         });
 
         for (filename, lineno, data) in augments {
@@ -1816,22 +2113,24 @@ fn check_vitals_mapped() {
 
     for v in 0..VITALS {
         let found_func = with_state(|s| {
-            s.allfuncs.iter().any(|f| {
-                f.func == Some(vitals[v]) && (f.menus as u32 & inmenus[v]) != 0
-            })
+            s.allfuncs
+                .iter()
+                .any(|f| f.func == Some(vitals[v]) && (f.menus as u32 & inmenus[v]) != 0)
         });
         if found_func {
             let bound = first_sc_for(inmenus[v], vitals[v]).is_some();
             if !bound {
                 let tag = with_state(|s| {
-                    s.allfuncs.iter()
+                    s.allfuncs
+                        .iter()
                         .find(|f| f.func == Some(vitals[v]) && (f.menus as u32 & inmenus[v]) != 0)
                         .map(|f| f.tag)
                         .unwrap_or("(unknown)")
                 });
                 jot_error(&format!(
                     "No key is bound to function '{}' in menu '{}'. Exiting.",
-                    tag, menu_to_name(inmenus[v])
+                    tag,
+                    menu_to_name(inmenus[v])
                 ));
                 die("If needed, use nano with the -I option to adjust your nanorc settings.\n");
             }
@@ -1851,7 +2150,9 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
             with_state(|s| s.syntaxes.as_ref().map(|sx| sx.lineno).unwrap_or(0))
         }
         #[cfg(not(feature = "color"))]
-        { 0usize }
+        {
+            0usize
+        }
     } else {
         0
     };
@@ -1860,9 +2161,9 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
     loop {
         raw_bytes.clear();
         match reader.read_until(b'\n', &mut raw_bytes) {
-            Ok(0) => break,      // end of file
+            Ok(0) => break, // end of file
             Ok(_) => {}
-            Err(_) => break,     // genuine read error
+            Err(_) => break, // genuine read error
         }
 
         LINENO.with(|l| *l.borrow_mut() += 1);
@@ -1925,7 +2226,10 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                 });
 
                 if !found {
-                    jot_error(&format!("Could not find syntax \"{}\" to extend", syntaxname));
+                    jot_error(&format!(
+                        "Could not find syntax \"{}\" to extend",
+                        syntaxname
+                    ));
                     continue;
                 }
 
@@ -1941,7 +2245,9 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                         set_opensyntax(true);
                         let syntaxname_str = syntaxname.to_string();
                         let is_default = syntaxname == "default";
-                        if let Some(new_items) = grab_and_store_build(cmd_keyword, cmd_rest, is_default) {
+                        if let Some(new_items) =
+                            grab_and_store_build(cmd_keyword, cmd_rest, is_default)
+                        {
                             with_state_mut(|s| {
                                 let mut cur = s.syntaxes.as_mut();
                                 while let Some(sx) = cur {
@@ -2003,9 +2309,14 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                 if intros_only {
                     // Build regex list OUTSIDE STATE borrow, then insert
                     let is_default = with_state(|s| {
-                        s.syntaxes.as_ref().map(|sx| sx.name == "default").unwrap_or(false)
+                        s.syntaxes
+                            .as_ref()
+                            .map(|sx| sx.name == "default")
+                            .unwrap_or(false)
                     });
-                    if let Some(new_items) = grab_and_store_build("header", rest_after_kw, is_default) {
+                    if let Some(new_items) =
+                        grab_and_store_build("header", rest_after_kw, is_default)
+                    {
                         with_state_mut(|s| {
                             if let Some(ref mut sx) = s.syntaxes {
                                 append_regex_list(&mut sx.headers, new_items);
@@ -2017,9 +2328,14 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                 #[cfg(feature = "libmagic")]
                 if intros_only {
                     let is_default = with_state(|s| {
-                        s.syntaxes.as_ref().map(|sx| sx.name == "default").unwrap_or(false)
+                        s.syntaxes
+                            .as_ref()
+                            .map(|sx| sx.name == "default")
+                            .unwrap_or(false)
                     });
-                    if let Some(new_items) = grab_and_store_build("magic", rest_after_kw, is_default) {
+                    if let Some(new_items) =
+                        grab_and_store_build("magic", rest_after_kw, is_default)
+                    {
                         with_state_mut(|s| {
                             if let Some(ref mut sx) = s.syntaxes {
                                 append_regex_list(&mut sx.magics, new_items);
@@ -2038,7 +2354,10 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                     || keyword == "extendsyntax")
             {
                 if intros_only {
-                    jot_error(&format!("Command \"{}\" not allowed in included file", keyword));
+                    jot_error(&format!(
+                        "Command \"{}\" not allowed in included file",
+                        keyword
+                    ));
                 } else {
                     break;
                 }
@@ -2163,19 +2482,21 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
         // Dispatch on option name
         #[cfg(feature = "color")]
         match option {
-            "titlecolor"    => set_interface_color(TITLE_BAR, argument),
-            "numbercolor"   => set_interface_color(LINE_NUMBER, argument),
-            "stripecolor"   => set_interface_color(GUIDE_STRIPE, argument),
+            "titlecolor" => set_interface_color(TITLE_BAR, argument),
+            "numbercolor" => set_interface_color(LINE_NUMBER, argument),
+            "stripecolor" => set_interface_color(GUIDE_STRIPE, argument),
             "scrollercolor" => set_interface_color(SCROLL_BAR, argument),
             "selectedcolor" => set_interface_color(SELECTED_TEXT, argument),
             "spotlightcolor" => set_interface_color(SPOTLIGHTED, argument),
-            "minicolor"     => set_interface_color(MINI_INFOBAR, argument),
-            "promptcolor"   => set_interface_color(PROMPT_BAR, argument),
-            "statuscolor"   => set_interface_color(STATUS_BAR, argument),
-            "errorcolor"    => set_interface_color(ERROR_MESSAGE, argument),
-            "keycolor"      => set_interface_color(KEY_COMBO, argument),
+            "minicolor" => set_interface_color(MINI_INFOBAR, argument),
+            "promptcolor" => set_interface_color(PROMPT_BAR, argument),
+            "statuscolor" => set_interface_color(STATUS_BAR, argument),
+            "errorcolor" => set_interface_color(ERROR_MESSAGE, argument),
+            "keycolor" => set_interface_color(KEY_COMBO, argument),
             "functioncolor" => set_interface_color(FUNCTION_TAG, argument),
-            _ => { handle_non_color_option(option, argument); }
+            _ => {
+                handle_non_color_option(option, argument);
+            }
         }
 
         #[cfg(not(feature = "color"))]
@@ -2191,10 +2512,10 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
 
 /// Handle all non-color set options.
 fn handle_non_color_option(option: &str, argument: &str) {
-    use crate::utils::parse_num;
     use crate::chars::has_blank_char;
     #[cfg(not(feature = "tiny"))]
     use crate::chars::{char_length, mbstrlen};
+    use crate::utils::parse_num;
 
     #[cfg(feature = "operatingdir")]
     if option == "operatingdir" {
@@ -2358,9 +2679,13 @@ fn have_nanorc(path: Option<&str>, name: &str) -> bool {
 pub fn do_rcfiles() {
     let custom = with_state(|s| {
         #[cfg(feature = "nanorc")]
-        { s.custom_nanorc.clone() }
+        {
+            s.custom_nanorc.clone()
+        }
         #[cfg(not(feature = "nanorc"))]
-        { None::<String> }
+        {
+            None::<String>
+        }
     });
 
     if let Some(ref custom_path) = custom {
@@ -2391,7 +2716,10 @@ pub fn do_rcfiles() {
         // Try user nanorc in priority order
         let found = have_nanorc(homedir.as_deref(), &format!("/{}", HOME_RC_NAME))
             || have_nanorc(xdgconfdir.as_deref(), &format!("/nano/{}", RCFILE_NAME))
-            || have_nanorc(homedir.as_deref(), &format!("/.config/nano/{}", RCFILE_NAME));
+            || have_nanorc(
+                homedir.as_deref(),
+                &format!("/.config/nano/{}", RCFILE_NAME),
+            );
 
         if found {
             parse_one_nanorc();
@@ -2408,7 +2736,7 @@ pub fn do_rcfiles() {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "color")]
-    use super::expand_glob;
+    use super::{compile, expand_glob};
 
     #[cfg(feature = "nanorc")]
     fn reset_binding_test_state(menu: u32) {
@@ -2447,21 +2775,39 @@ mod tests {
         );
 
         let visible = format!("{}/*.nanorc", root.path().display());
-        assert!(!expand_glob(&visible).iter().any(|path| path.contains(".hidden")));
+        assert!(
+            !expand_glob(&visible)
+                .iter()
+                .any(|path| path.contains(".hidden"))
+        );
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn syntax_regexes_use_raw_offsets_and_match_internal_nul_sentinels() {
+        let with_sentinel = compile("^a.b$", false).unwrap();
+        assert!(with_sentinel.is_match(b"a\nb"));
+
+        let after_malformed_byte = compile("tag$", false).unwrap();
+        let found = after_malformed_byte.find(b"\xfftag").unwrap();
+        assert_eq!(found.start()..found.end(), 1..4);
     }
 
     #[cfg(feature = "nanorc")]
     #[test]
     fn quoted_function_name_remains_a_literal_string_bind() {
-        use crate::definitions::MWHEREIS;
         use crate::definitions::FuncPtr;
+        use crate::definitions::MWHEREIS;
         use crate::global::state;
 
         reset_binding_test_state(MWHEREIS);
         super::parse_binding("M-X \"left\" search", true);
 
         let state = state();
-        let binding = state.sclist.iter().find(|entry| entry.keystr == "M-X")
+        let binding = state
+            .sclist
+            .iter()
+            .find(|entry| entry.keystr == "M-X")
             .expect("quoted string binding");
         assert_eq!(binding.func, Some(super::implant_sentinel as FuncPtr));
         assert_eq!(binding.expansion.as_deref(), Some("left"));
@@ -2476,9 +2822,11 @@ mod tests {
         super::parse_binding("M-X \"text\" yesno", true);
 
         let errors = super::ERROR_LIST.with(|items| items.borrow().clone());
-        assert!(errors.iter().any(|message| {
-            message.contains("does not exist in menu 'yesno'")
-        }));
+        assert!(
+            errors
+                .iter()
+                .any(|message| { message.contains("does not exist in menu 'yesno'") })
+        );
     }
 
     #[cfg(feature = "nanorc")]
@@ -2528,6 +2876,9 @@ mod tests {
         crate::winio::implant("{not_a_nanorc_function}");
 
         assert_eq!(crate::winio::get_input(None), NO_SUCH_FUNCTION as i32);
-        assert_eq!(crate::global::state().commandname.as_deref(), Some("not_a_nanorc_function"));
+        assert_eq!(
+            crate::global::state().commandname.as_deref(),
+            Some("not_a_nanorc_function")
+        );
     }
 }

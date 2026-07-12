@@ -25,12 +25,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "nano-rs contributors"
             VALUE "FileDescription",  "nano-rs — GNU nano, Rust port"
-            VALUE "FileVersion",      "0.0.13"
+            VALUE "FileVersion",      "0.0.14"
             VALUE "InternalName",     "nano"
             VALUE "LegalCopyright",   "GNU GPLv3"
             VALUE "OriginalFilename", "nano.exe"
             VALUE "ProductName",      "nano-rs"
-            VALUE "ProductVersion",   "0.0.13"
+            VALUE "ProductVersion",   "0.0.14"
         END
     END
     BLOCK "VarFileInfo"

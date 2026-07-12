@@ -1,12 +1,225 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/definitions.h from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2017, 2020-2022, 2024 Benno Schulenberg
 
-
 // ---------------------------------------------------------------------------
 // Version constants
 // ---------------------------------------------------------------------------
+
+/// Authoritative bytes for one logical editor line.
+///
+/// Physical line endings are represented by links between `LineNode`s.  As in
+/// GNU nano, an LF byte inside this value is the reversible stand-in for an
+/// embedded NUL from the file.  Keeping this as bytes (instead of `String`) is
+/// what lets the editor retain malformed UTF-8 without changing it on save.
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
+pub struct LineData(Vec<u8>);
+
+impl LineData {
+    #[inline]
+    pub fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Construct document data from known-valid UI/configuration text.
+    #[inline]
+    pub fn from_utf8(text: &str) -> Self {
+        Self::from_external(text.as_bytes())
+    }
+
+    /// Construct one already-split line from external bytes, encoding NUL as
+    /// the internal LF sentinel used throughout nano's buffer machinery.
+    pub fn from_external(bytes: &[u8]) -> Self {
+        Self(
+            bytes
+                .iter()
+                .map(|&byte| if byte == 0 { b'\n' } else { byte })
+                .collect(),
+        )
+    }
+
+    /// Construct bytes already in nano's internal representation.
+    #[inline]
+    pub fn from_internal(bytes: Vec<u8>) -> Self {
+        debug_assert!(!bytes.contains(&0));
+        Self(bytes)
+    }
+
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    #[inline]
+    pub fn as_utf8(&self) -> Option<&str> {
+        std::str::from_utf8(&self.0).ok()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[inline]
+    pub fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+
+    #[inline]
+    pub fn split_off(&mut self, at: usize) -> Self {
+        Self(self.0.split_off(at))
+    }
+
+    #[inline]
+    pub fn extend_bytes(&mut self, bytes: &[u8]) {
+        debug_assert!(!bytes.contains(&0));
+        self.0.extend_from_slice(bytes);
+    }
+
+    #[inline]
+    pub fn push_str<T: AsRef<[u8]> + ?Sized>(&mut self, value: &T) {
+        self.extend_bytes(value.as_ref());
+    }
+
+    #[inline]
+    pub fn extend_external(&mut self, bytes: &[u8]) {
+        self.0.extend(
+            bytes
+                .iter()
+                .map(|&byte| if byte == 0 { b'\n' } else { byte }),
+        );
+    }
+
+    #[inline]
+    pub fn insert_bytes(&mut self, at: usize, bytes: &[u8]) {
+        debug_assert!(!bytes.contains(&0));
+        self.0.splice(at..at, bytes.iter().copied());
+    }
+
+    #[inline]
+    pub fn insert_str<T: AsRef<[u8]> + ?Sized>(&mut self, at: usize, value: &T) {
+        self.insert_bytes(at, value.as_ref());
+    }
+
+    #[inline]
+    pub fn insert_external(&mut self, at: usize, bytes: &[u8]) {
+        self.0.splice(
+            at..at,
+            bytes
+                .iter()
+                .map(|&byte| if byte == 0 { b'\n' } else { byte }),
+        );
+    }
+
+    #[inline]
+    pub fn replace_range_bytes(&mut self, range: impl std::ops::RangeBounds<usize>, bytes: &[u8]) {
+        debug_assert!(!bytes.contains(&0));
+        self.0.splice(range, bytes.iter().copied());
+    }
+
+    #[inline]
+    pub fn replace_range<T: AsRef<[u8]> + ?Sized>(
+        &mut self,
+        range: impl std::ops::RangeBounds<usize>,
+        value: &T,
+    ) {
+        self.replace_range_bytes(range, value.as_ref());
+    }
+
+    #[inline]
+    pub fn drain(&mut self, range: impl std::ops::RangeBounds<usize>) -> std::vec::Drain<'_, u8> {
+        self.0.drain(range)
+    }
+
+    /// Buffer positions are byte offsets.  Unlike `String`, malformed UTF-8
+    /// bytes are themselves valid character boundaries in nano.
+    #[inline]
+    pub fn is_char_boundary(&self, at: usize) -> bool {
+        at <= self.0.len()
+    }
+
+    #[inline]
+    pub fn push(&mut self, ch: char) {
+        let mut encoded = [0u8; 4];
+        self.extend_bytes(ch.encode_utf8(&mut encoded).as_bytes());
+    }
+
+    #[inline]
+    pub fn remove(&mut self, at: usize) -> u8 {
+        self.0.remove(at)
+    }
+
+    #[inline]
+    pub fn push_byte(&mut self, byte: u8) {
+        debug_assert_ne!(byte, 0);
+        self.0.push(byte);
+    }
+
+    /// Iterate bytes in on-disk form, reversing the internal NUL sentinel.
+    #[inline]
+    pub fn external_bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.0
+            .iter()
+            .map(|&byte| if byte == b'\n' { 0 } else { byte })
+    }
+}
+
+impl std::ops::Deref for LineData {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for LineData {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&str> for LineData {
+    #[inline]
+    fn from(value: &str) -> Self {
+        Self::from_utf8(value)
+    }
+}
+
+impl From<String> for LineData {
+    #[inline]
+    fn from(value: String) -> Self {
+        Self::from_external(value.as_bytes())
+    }
+}
+
+impl PartialEq<&str> for LineData {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl PartialEq<LineData> for &str {
+    fn eq(&self, other: &LineData) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
 
 /// The GNU nano release this port mirrors (shown as "GNU nano, version X" and
 /// written into lock files / the credits screen for compatibility). This is
@@ -29,32 +242,32 @@ pub const PATH_MAX: usize = 4096;
 // ---------------------------------------------------------------------------
 
 pub const BACKWARD: bool = false;
-pub const FORWARD:  bool = true;
+pub const FORWARD: bool = true;
 
-pub const YESORNO:     bool = false;
+pub const YESORNO: bool = false;
 pub const YESORALLORNO: bool = true;
 
-pub const YES:    i32 = 1;
-pub const ALL:    i32 = 2;
-pub const NO:     i32 = 0;
+pub const YES: i32 = 1;
+pub const ALL: i32 = 2;
+pub const NO: i32 = 0;
 pub const CANCEL: i32 = -1;
 
-pub const BLIND:   bool = false;
+pub const BLIND: bool = false;
 pub const VISIBLE: bool = true;
 
-pub const JUSTFIND:  i32 = 0;
+pub const JUSTFIND: i32 = 0;
 pub const REPLACING: i32 = 1;
-pub const INREGION:  i32 = 2;
+pub const INREGION: i32 = 2;
 
-pub const NORMAL:    bool = true;
-pub const SPECIAL:   bool = false;
+pub const NORMAL: bool = true;
+pub const SPECIAL: bool = false;
 pub const TEMPORARY: bool = false;
 
 pub const ANNOTATE: bool = true;
-pub const NONOTES:  bool = false;
+pub const NONOTES: bool = false;
 
-pub const PRUNE_DUPLICATE:    bool = true;
-pub const IGNORE_DUPLICATES:  bool = false;
+pub const PRUNE_DUPLICATE: bool = true;
+pub const IGNORE_DUPLICATES: bool = false;
 
 // ---------------------------------------------------------------------------
 // UTF-8 / character constants
@@ -99,16 +312,16 @@ pub const BAD_COLOR: i16 = -2;
 /// Multiline-regex coverage flags — stored in `LineNode::multidata`.
 /// The start/end regexes don't cover this line at all.
 #[cfg(feature = "color")]
-pub const NOTHING:    i16 = 1 << 1;
+pub const NOTHING: i16 = 1 << 1;
 /// The start regex matches on this line; the end regex on a later one.
 #[cfg(feature = "color")]
 pub const STARTSHERE: i16 = 1 << 2;
 /// Start matches on an earlier line; end matches on a later one.
 #[cfg(feature = "color")]
-pub const WHOLELINE:  i16 = 1 << 3;
+pub const WHOLELINE: i16 = 1 << 3;
 /// Start matches on an earlier line; end matches on this line.
 #[cfg(feature = "color")]
-pub const ENDSHERE:   i16 = 1 << 4;
+pub const ENDSHERE: i16 = 1 << 4;
 /// Both start and end match within this line.
 #[cfg(feature = "color")]
 pub const JUSTONTHIS: i16 = 1 << 5;
@@ -124,63 +337,63 @@ pub const DEL_CODE: u32 = 0x7F;
 // Modified / extended key codes (beyond ncurses KEY_MAX)
 // ---------------------------------------------------------------------------
 
-pub const CONTROL_LEFT:   u32 = 0x401;
-pub const CONTROL_RIGHT:  u32 = 0x402;
-pub const CONTROL_UP:     u32 = 0x403;
-pub const CONTROL_DOWN:   u32 = 0x404;
-pub const CONTROL_HOME:   u32 = 0x405;
-pub const CONTROL_END:    u32 = 0x406;
+pub const CONTROL_LEFT: u32 = 0x401;
+pub const CONTROL_RIGHT: u32 = 0x402;
+pub const CONTROL_UP: u32 = 0x403;
+pub const CONTROL_DOWN: u32 = 0x404;
+pub const CONTROL_HOME: u32 = 0x405;
+pub const CONTROL_END: u32 = 0x406;
 pub const CONTROL_DELETE: u32 = 0x40D;
 
-pub const SHIFT_CONTROL_LEFT:   u32 = 0x411;
-pub const SHIFT_CONTROL_RIGHT:  u32 = 0x412;
-pub const SHIFT_CONTROL_UP:     u32 = 0x413;
-pub const SHIFT_CONTROL_DOWN:   u32 = 0x414;
-pub const SHIFT_CONTROL_HOME:   u32 = 0x415;
-pub const SHIFT_CONTROL_END:    u32 = 0x416;
+pub const SHIFT_CONTROL_LEFT: u32 = 0x411;
+pub const SHIFT_CONTROL_RIGHT: u32 = 0x412;
+pub const SHIFT_CONTROL_UP: u32 = 0x413;
+pub const SHIFT_CONTROL_DOWN: u32 = 0x414;
+pub const SHIFT_CONTROL_HOME: u32 = 0x415;
+pub const SHIFT_CONTROL_END: u32 = 0x416;
 pub const CONTROL_SHIFT_DELETE: u32 = 0x41D;
 
-pub const ALT_LEFT:     u32 = 0x421;
-pub const ALT_RIGHT:    u32 = 0x422;
-pub const ALT_UP:       u32 = 0x423;
-pub const ALT_DOWN:     u32 = 0x424;
-pub const ALT_HOME:     u32 = 0x425;
-pub const ALT_END:      u32 = 0x426;
-pub const ALT_PAGEUP:   u32 = 0x427;
+pub const ALT_LEFT: u32 = 0x421;
+pub const ALT_RIGHT: u32 = 0x422;
+pub const ALT_UP: u32 = 0x423;
+pub const ALT_DOWN: u32 = 0x424;
+pub const ALT_HOME: u32 = 0x425;
+pub const ALT_END: u32 = 0x426;
+pub const ALT_PAGEUP: u32 = 0x427;
 pub const ALT_PAGEDOWN: u32 = 0x428;
-pub const ALT_INSERT:   u32 = 0x42C;
-pub const ALT_DELETE:   u32 = 0x42D;
+pub const ALT_INSERT: u32 = 0x42C;
+pub const ALT_DELETE: u32 = 0x42D;
 
-pub const SHIFT_ALT_LEFT:  u32 = 0x431;
+pub const SHIFT_ALT_LEFT: u32 = 0x431;
 pub const SHIFT_ALT_RIGHT: u32 = 0x432;
-pub const SHIFT_ALT_UP:    u32 = 0x433;
-pub const SHIFT_ALT_DOWN:  u32 = 0x434;
+pub const SHIFT_ALT_UP: u32 = 0x433;
+pub const SHIFT_ALT_DOWN: u32 = 0x434;
 
-pub const SHIFT_UP:       u32 = 0x453;
-pub const SHIFT_DOWN:     u32 = 0x454;
-pub const SHIFT_HOME:     u32 = 0x455;
-pub const SHIFT_END:      u32 = 0x456;
-pub const SHIFT_PAGEUP:   u32 = 0x457;
+pub const SHIFT_UP: u32 = 0x453;
+pub const SHIFT_DOWN: u32 = 0x454;
+pub const SHIFT_HOME: u32 = 0x455;
+pub const SHIFT_END: u32 = 0x456;
+pub const SHIFT_PAGEUP: u32 = 0x457;
 pub const SHIFT_PAGEDOWN: u32 = 0x458;
-pub const SHIFT_DELETE:   u32 = 0x45D;
-pub const SHIFT_TAB:      u32 = 0x45F;
+pub const SHIFT_DELETE: u32 = 0x45D;
+pub const SHIFT_TAB: u32 = 0x45F;
 
-pub const FOCUS_IN:  u32 = 0x491;
+pub const FOCUS_IN: u32 = 0x491;
 pub const FOCUS_OUT: u32 = 0x499;
 
 /// Start-of-bracketed-paste signal.
 pub const START_OF_PASTE: u32 = 0x4B5;
 /// End-of-bracketed-paste signal.
-pub const END_OF_PASTE:   u32 = 0x4BE;
+pub const END_OF_PASTE: u32 = 0x4BE;
 
 /// A string bind has been partially planted or has an unpaired opening brace.
-pub const MORE_PLANTS:       u32 = 0x4EA;
+pub const MORE_PLANTS: u32 = 0x4EA;
 /// A string bind has an unpaired opening brace.
-pub const MISSING_BRACE:     u32 = 0x4EB;
+pub const MISSING_BRACE: u32 = 0x4EB;
 /// A function in a string bind needs to be executed.
 pub const PLANTED_A_COMMAND: u32 = 0x4EC;
 /// A specified function name in a string bind is invalid.
-pub const NO_SUCH_FUNCTION:  u32 = 0x4EF;
+pub const NO_SUCH_FUNCTION: u32 = 0x4EF;
 
 /// Ctrl + centre key on the numeric keypad.
 #[cfg(not(feature = "tiny"))]
@@ -202,41 +415,51 @@ pub const KEY_FRESH: u32 = 0x4FE;
 #[cfg(not(feature = "tiny"))]
 pub const WAS_BACKSPACE_AT_EOF: i32 = 1 << 1;
 #[cfg(not(feature = "tiny"))]
-pub const WAS_WHOLE_LINE:       i32 = 1 << 2;
+pub const WAS_WHOLE_LINE: i32 = 1 << 2;
 #[cfg(not(feature = "tiny"))]
-pub const INCLUDED_LAST_LINE:   i32 = 1 << 3;
+pub const INCLUDED_LAST_LINE: i32 = 1 << 3;
 #[cfg(not(feature = "tiny"))]
-pub const MARK_WAS_SET:         i32 = 1 << 4;
+pub const MARK_WAS_SET: i32 = 1 << 4;
 #[cfg(not(feature = "tiny"))]
-pub const CURSOR_WAS_AT_HEAD:   i32 = 1 << 5;
+pub const CURSOR_WAS_AT_HEAD: i32 = 1 << 5;
 #[cfg(not(feature = "tiny"))]
-pub const HAD_ANCHOR_AT_START:  i32 = 1 << 6;
+pub const HAD_ANCHOR_AT_START: i32 = 1 << 6;
 
 // ---------------------------------------------------------------------------
 // Menu identifier bitmasks
 // ---------------------------------------------------------------------------
 
-pub const MMAIN:        u32 = 1 << 0;
-pub const MWHEREIS:     u32 = 1 << 1;
-pub const MREPLACE:     u32 = 1 << 2;
+pub const MMAIN: u32 = 1 << 0;
+pub const MWHEREIS: u32 = 1 << 1;
+pub const MREPLACE: u32 = 1 << 2;
 pub const MREPLACEWITH: u32 = 1 << 3;
-pub const MGOTOLINE:    u32 = 1 << 4;
-pub const MWRITEFILE:   u32 = 1 << 5;
-pub const MINSERTFILE:  u32 = 1 << 6;
-pub const MEXECUTE:     u32 = 1 << 7;
-pub const MHELP:        u32 = 1 << 8;
-pub const MSPELL:       u32 = 1 << 9;
-pub const MBROWSER:     u32 = 1 << 10;
+pub const MGOTOLINE: u32 = 1 << 4;
+pub const MWRITEFILE: u32 = 1 << 5;
+pub const MINSERTFILE: u32 = 1 << 6;
+pub const MEXECUTE: u32 = 1 << 7;
+pub const MHELP: u32 = 1 << 8;
+pub const MSPELL: u32 = 1 << 9;
+pub const MBROWSER: u32 = 1 << 10;
 pub const MWHEREISFILE: u32 = 1 << 11;
-pub const MGOTODIR:     u32 = 1 << 12;
-pub const MYESNO:       u32 = 1 << 13;
-pub const MLINTER:      u32 = 1 << 14;
-pub const MFINDINHELP:  u32 = 1 << 15;
+pub const MGOTODIR: u32 = 1 << 12;
+pub const MYESNO: u32 = 1 << 13;
+pub const MLINTER: u32 = 1 << 14;
+pub const MFINDINHELP: u32 = 1 << 15;
 
 /// Abbreviation for all menus except Help, Browser, and YesNo.
-pub const MMOST: u32 = MMAIN | MWHEREIS | MREPLACE | MREPLACEWITH | MGOTOLINE
-    | MWRITEFILE | MINSERTFILE | MEXECUTE | MWHEREISFILE | MGOTODIR
-    | MFINDINHELP | MSPELL | MLINTER;
+pub const MMOST: u32 = MMAIN
+    | MWHEREIS
+    | MREPLACE
+    | MREPLACEWITH
+    | MGOTOLINE
+    | MWRITEFILE
+    | MINSERTFILE
+    | MEXECUTE
+    | MWHEREISFILE
+    | MGOTODIR
+    | MFINDINHELP
+    | MSPELL
+    | MLINTER;
 
 /// Like MMOST but also includes the Browser menu (tiny: only MMAIN|MBROWSER).
 #[cfg(not(feature = "tiny"))]
@@ -257,6 +480,8 @@ pub enum FormatType {
     NixFile,
     /// DOS/Windows (CRLF) line endings.
     DosFile,
+    /// Classic Mac (CR-only) line endings.
+    MacFile,
 }
 
 impl Default for FormatType {
@@ -360,29 +585,29 @@ impl Default for UndoType {
 // ---------------------------------------------------------------------------
 
 /// Index into the color-pair array for the title bar.
-pub const TITLE_BAR:      usize = 0;
+pub const TITLE_BAR: usize = 0;
 /// Index for line numbers.
-pub const LINE_NUMBER:     usize = 1;
+pub const LINE_NUMBER: usize = 1;
 /// Index for the guide stripe.
-pub const GUIDE_STRIPE:    usize = 2;
+pub const GUIDE_STRIPE: usize = 2;
 /// Index for the scroll bar.
-pub const SCROLL_BAR:      usize = 3;
+pub const SCROLL_BAR: usize = 3;
 /// Index for selected (marked) text.
-pub const SELECTED_TEXT:   usize = 4;
+pub const SELECTED_TEXT: usize = 4;
 /// Index for spotlighted (found) text.
-pub const SPOTLIGHTED:     usize = 5;
+pub const SPOTLIGHTED: usize = 5;
 /// Index for the mini info bar.
-pub const MINI_INFOBAR:    usize = 6;
+pub const MINI_INFOBAR: usize = 6;
 /// Index for the prompt bar.
-pub const PROMPT_BAR:      usize = 7;
+pub const PROMPT_BAR: usize = 7;
 /// Index for the status bar.
-pub const STATUS_BAR:      usize = 8;
+pub const STATUS_BAR: usize = 8;
 /// Index for error messages.
-pub const ERROR_MESSAGE:   usize = 9;
+pub const ERROR_MESSAGE: usize = 9;
 /// Index for key-combo display.
-pub const KEY_COMBO:       usize = 10;
+pub const KEY_COMBO: usize = 10;
 /// Index for function-tag display.
-pub const FUNCTION_TAG:    usize = 11;
+pub const FUNCTION_TAG: usize = 11;
 /// Total number of independently colorable interface elements.
 pub const NUMBER_OF_ELEMENTS: usize = 12;
 
@@ -391,58 +616,58 @@ pub const NUMBER_OF_ELEMENTS: usize = 12;
 // Each constant is the bit position; use the FLAGS/FLAGMASK logic in global.rs.
 // ---------------------------------------------------------------------------
 
-pub const DONTUSE:            u32 = 0;
-pub const CASE_SENSITIVE:     u32 = 1;
-pub const CONSTANT_SHOW:      u32 = 2;
-pub const NO_HELP:            u32 = 3;
-pub const NO_WRAP:            u32 = 4;
-pub const AUTOINDENT:         u32 = 5;
-pub const VIEW_MODE:          u32 = 6;
-pub const USE_MOUSE:          u32 = 7;
-pub const USE_REGEXP:         u32 = 8;
-pub const SAVE_ON_EXIT:       u32 = 9;
-pub const CUT_FROM_CURSOR:    u32 = 10;
-pub const BACKWARDS_SEARCH:   u32 = 11;
-pub const MULTIBUFFER:        u32 = 12;
-pub const REBIND_DELETE:      u32 = 13;
-pub const RAW_SEQUENCES:      u32 = 14;
-pub const NO_CONVERT:         u32 = 15;
-pub const MAKE_BACKUP:        u32 = 16;
-pub const INSECURE_BACKUP:    u32 = 17;
-pub const NO_SYNTAX:          u32 = 18;
-pub const PRESERVE:           u32 = 19;
-pub const HISTORYLOG:         u32 = 20;
-pub const RESTRICTED:         u32 = 21;
-pub const SMART_HOME:         u32 = 22;
+pub const DONTUSE: u32 = 0;
+pub const CASE_SENSITIVE: u32 = 1;
+pub const CONSTANT_SHOW: u32 = 2;
+pub const NO_HELP: u32 = 3;
+pub const NO_WRAP: u32 = 4;
+pub const AUTOINDENT: u32 = 5;
+pub const VIEW_MODE: u32 = 6;
+pub const USE_MOUSE: u32 = 7;
+pub const USE_REGEXP: u32 = 8;
+pub const SAVE_ON_EXIT: u32 = 9;
+pub const CUT_FROM_CURSOR: u32 = 10;
+pub const BACKWARDS_SEARCH: u32 = 11;
+pub const MULTIBUFFER: u32 = 12;
+pub const REBIND_DELETE: u32 = 13;
+pub const RAW_SEQUENCES: u32 = 14;
+pub const NO_CONVERT: u32 = 15;
+pub const MAKE_BACKUP: u32 = 16;
+pub const INSECURE_BACKUP: u32 = 17;
+pub const NO_SYNTAX: u32 = 18;
+pub const PRESERVE: u32 = 19;
+pub const HISTORYLOG: u32 = 20;
+pub const RESTRICTED: u32 = 21;
+pub const SMART_HOME: u32 = 22;
 pub const WHITESPACE_DISPLAY: u32 = 23;
-pub const TABS_TO_SPACES:     u32 = 24;
-pub const QUICK_BLANK:        u32 = 25;
-pub const WORD_BOUNDS:        u32 = 26;
-pub const NO_NEWLINES:        u32 = 27;
-pub const BOLD_TEXT:          u32 = 28;
-pub const SOFTWRAP:           u32 = 29;
-pub const POSITIONLOG:        u32 = 30;
-pub const LOCKING:            u32 = 31;
-pub const NOREAD_MODE:        u32 = 32;
-pub const MAKE_IT_UNIX:       u32 = 33;
-pub const TRIM_BLANKS:        u32 = 34;
-pub const SHOW_CURSOR:        u32 = 35;
-pub const LINE_NUMBERS:       u32 = 36;
-pub const AT_BLANKS:          u32 = 37;
-pub const AFTER_ENDS:         u32 = 38;
-pub const LET_THEM_ZAP:       u32 = 39;
-pub const BREAK_LONG_LINES:   u32 = 40;
-pub const JUMPY_SCROLLING:    u32 = 41;
-pub const EMPTY_LINE:         u32 = 42;
-pub const INDICATOR:          u32 = 43;
-pub const BOOKSTYLE:          u32 = 44;
-pub const COLON_PARSING:      u32 = 45;
-pub const STATEFLAGS:         u32 = 46;
-pub const USE_MAGIC:          u32 = 47;
-pub const MINIBAR:            u32 = 48;
-pub const ZERO:               u32 = 49;
-pub const MODERN_BINDINGS:    u32 = 50;
-pub const SOLO_SIDESCROLL:    u32 = 51;
+pub const TABS_TO_SPACES: u32 = 24;
+pub const QUICK_BLANK: u32 = 25;
+pub const WORD_BOUNDS: u32 = 26;
+pub const NO_NEWLINES: u32 = 27;
+pub const BOLD_TEXT: u32 = 28;
+pub const SOFTWRAP: u32 = 29;
+pub const POSITIONLOG: u32 = 30;
+pub const LOCKING: u32 = 31;
+pub const NOREAD_MODE: u32 = 32;
+pub const MAKE_IT_UNIX: u32 = 33;
+pub const TRIM_BLANKS: u32 = 34;
+pub const SHOW_CURSOR: u32 = 35;
+pub const LINE_NUMBERS: u32 = 36;
+pub const AT_BLANKS: u32 = 37;
+pub const AFTER_ENDS: u32 = 38;
+pub const LET_THEM_ZAP: u32 = 39;
+pub const BREAK_LONG_LINES: u32 = 40;
+pub const JUMPY_SCROLLING: u32 = 41;
+pub const EMPTY_LINE: u32 = 42;
+pub const INDICATOR: u32 = 43;
+pub const BOOKSTYLE: u32 = 44;
+pub const COLON_PARSING: u32 = 45;
+pub const STATEFLAGS: u32 = 46;
+pub const USE_MAGIC: u32 = 47;
+pub const MINIBAR: u32 = 48;
+pub const ZERO: u32 = 49;
+pub const MODERN_BINDINGS: u32 = 50;
+pub const SOLO_SIDESCROLL: u32 = 51;
 
 // ---------------------------------------------------------------------------
 // Linked-list type aliases
@@ -467,9 +692,13 @@ pub struct LineWeak(std::rc::Weak<std::cell::RefCell<LineNode>>);
 
 impl LinePtr {
     #[inline(always)]
-    pub fn borrow(&self) -> std::cell::Ref<'_, LineNode> { self.0.borrow() }
+    pub fn borrow(&self) -> std::cell::Ref<'_, LineNode> {
+        self.0.borrow()
+    }
     #[inline(always)]
-    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, LineNode> { self.0.borrow_mut() }
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, LineNode> {
+        self.0.borrow_mut()
+    }
     /// Stable allocation identity, used only for pointer equality.
     #[inline(always)]
     pub fn as_ptr(&self) -> *const std::cell::RefCell<LineNode> {
@@ -482,11 +711,15 @@ impl LinePtr {
     }
     /// Whether two strong handles point at the same node.
     #[inline(always)]
-    pub fn ptr_eq(a: &LinePtr, b: &LinePtr) -> bool { std::rc::Rc::ptr_eq(&a.0, &b.0) }
+    pub fn ptr_eq(a: &LinePtr, b: &LinePtr) -> bool {
+        std::rc::Rc::ptr_eq(&a.0, &b.0)
+    }
 }
 
 impl PartialEq for LinePtr {
-    fn eq(&self, other: &Self) -> bool { Self::ptr_eq(self, other) }
+    fn eq(&self, other: &Self) -> bool {
+        Self::ptr_eq(self, other)
+    }
 }
 impl Eq for LinePtr {}
 impl std::hash::Hash for LinePtr {
@@ -508,7 +741,9 @@ impl LineWeak {
     }
 }
 impl PartialEq for LineWeak {
-    fn eq(&self, other: &Self) -> bool { std::rc::Weak::ptr_eq(&self.0, &other.0) }
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Weak::ptr_eq(&self.0, &other.0)
+    }
 }
 impl Eq for LineWeak {}
 impl std::hash::Hash for LineWeak {
@@ -528,7 +763,9 @@ impl std::fmt::Debug for LineWeak {
 pub struct LineArena;
 
 impl LineArena {
-    pub const fn new() -> Self { LineArena }
+    pub const fn new() -> Self {
+        LineArena
+    }
 
     /// Allocate an independently owned, runtime-borrow-checked line.
     #[inline]
@@ -543,11 +780,12 @@ impl LineArena {
 
 #[cfg(test)]
 mod line_handle_tests {
-    use super::{LineArena, LineNode, LinePtr};
+    use super::{LineArena, LineData, LineNode, LinePtr};
+    use proptest::prelude::*;
 
     fn node(data: &str) -> LineNode {
         LineNode {
-            data: data.to_owned(),
+            data: LineData::from_utf8(data),
             lineno: 1,
             next: None,
             prev: None,
@@ -558,17 +796,111 @@ mod line_handle_tests {
     }
 
     #[test]
+    fn line_data_round_trips_every_external_byte() {
+        // A LineData is one already-split logical line, so a physical LF is
+        // structural and cannot occur in this input.  NUL remains data and is
+        // represented internally by nano's LF sentinel.
+        let external: Vec<u8> = (0..=255).filter(|byte| *byte != b'\n').collect();
+        let data = LineData::from_external(&external);
+        assert!(!data.as_bytes().contains(&0));
+        assert_eq!(data.external_bytes().collect::<Vec<_>>(), external);
+    }
+
+    fn external_line_byte() -> impl Strategy<Value = u8> {
+        any::<u8>().prop_filter("physical LF separates logical lines", |byte| *byte != b'\n')
+    }
+
+    fn property_config() -> ProptestConfig {
+        let mut config = ProptestConfig::with_cases(if cfg!(miri) { 4 } else { 256 });
+        if cfg!(miri) {
+            config.failure_persistence = None;
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(property_config())]
+
+        #[test]
+        fn arbitrary_external_line_data_round_trips(
+            external in prop::collection::vec(
+                external_line_byte(),
+                0..if cfg!(miri) { 64 } else { 8192 },
+            ),
+        ) {
+            let data = LineData::from_external(&external);
+            prop_assert!(!data.as_bytes().contains(&0));
+            prop_assert_eq!(data.external_bytes().collect::<Vec<_>>(), external);
+        }
+
+        #[test]
+        fn byte_edit_operations_match_a_vec_reference_model(
+            operations in prop::collection::vec(
+                (0u8..4, any::<usize>(), any::<usize>(), 1u8..=u8::MAX),
+                0..if cfg!(miri) { 32 } else { 512 },
+            ),
+        ) {
+            let mut actual = LineData::empty();
+            let mut model = Vec::new();
+
+            for (kind, first, second, byte) in operations {
+                match kind {
+                    0 => {
+                        let at = first % (model.len() + 1);
+                        actual.insert_bytes(at, &[byte]);
+                        model.insert(at, byte);
+                    }
+                    1 if !model.is_empty() => {
+                        let at = first % model.len();
+                        actual.drain(at..=at);
+                        model.remove(at);
+                    }
+                    2 => {
+                        let at = first % (model.len() + 1);
+                        let suffix = actual.split_off(at);
+                        actual.extend_bytes(suffix.as_bytes());
+                    }
+                    _ => {
+                        let left = first % (model.len() + 1);
+                        let right = second % (model.len() + 1);
+                        let range = left.min(right)..left.max(right);
+                        actual.replace_range_bytes(range.clone(), &[byte]);
+                        model.splice(range, [byte]);
+                    }
+                }
+
+                prop_assert_eq!(actual.as_bytes(), model.as_slice());
+                prop_assert_eq!(
+                    actual.external_bytes().collect::<Vec<_>>(),
+                    model
+                        .iter()
+                        .map(|&value| if value == b'\n' { 0 } else { value })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_replacement_and_private_use_scalars_are_not_escape_markers() {
+        let text = "\u{FFFD}\u{E000}\u{F8FF}\u{10FFFF}";
+        let data = LineData::from_utf8(text);
+        assert_eq!(data.as_utf8(), Some(text));
+        assert_eq!(data.external_bytes().collect::<Vec<_>>(), text.as_bytes());
+    }
+
+    #[test]
     fn allocation_cannot_invalidate_a_live_line_borrow() {
         let mut arena = LineArena::new();
         let first = arena.alloc(node("stable"));
         let held = first.borrow();
-        let data = held.data.as_str();
+        let data = held.data.as_bytes();
 
         for index in 0..256 {
             let _ = arena.alloc(node(&index.to_string()));
         }
 
-        assert_eq!(data, "stable");
+        assert_eq!(data, b"stable");
     }
 
     #[test]
@@ -580,11 +912,14 @@ mod line_handle_tests {
         let overlap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = line.borrow_mut();
         }));
-        assert!(overlap.is_err(), "overlapping line mutation must be rejected");
+        assert!(
+            overlap.is_err(),
+            "overlapping line mutation must be rejected"
+        );
 
-        first.data = "after".to_owned();
+        first.data = LineData::from_utf8("after");
         drop(first);
-        assert_eq!(line.borrow().data, "after");
+        assert_eq!(line.borrow().data.as_bytes(), b"after");
     }
 
     #[test]
@@ -619,9 +954,9 @@ pub struct ColorType {
     /// Pair number and brightness composed into ready-to-use attributes.
     pub attributes: i32,
     /// The compiled start regex (or the only regex for single-line rules).
-    pub start: Option<regex_lite::Regex>,
+    pub start: Option<regex::bytes::Regex>,
     /// The compiled end regex (for multiline rules), if any.
-    pub end: Option<regex_lite::Regex>,
+    pub end: Option<regex::bytes::Regex>,
     /// Next color combination in the syntax's list.
     pub next: Option<Box<ColorType>>,
 }
@@ -648,7 +983,7 @@ impl Default for ColorType {
 #[derive(Debug)]
 pub struct RegexListType {
     /// A compiled regex to match things that imply a certain syntax.
-    pub one_rgx: Option<regex_lite::Regex>,
+    pub one_rgx: Option<regex::bytes::Regex>,
     /// The next regex in the list.
     pub next: Option<Box<RegexListType>>,
 }
@@ -656,7 +991,10 @@ pub struct RegexListType {
 #[cfg(feature = "color")]
 impl Default for RegexListType {
     fn default() -> Self {
-        RegexListType { one_rgx: None, next: None }
+        RegexListType {
+            one_rgx: None,
+            next: None,
+        }
     }
 }
 
@@ -787,7 +1125,7 @@ impl Default for LintStruct {
 #[derive(Debug)]
 pub struct LineNode {
     /// The text content of this line (without the newline terminator).
-    pub data: String,
+    pub data: LineData,
     /// 1-based line number within the file.
     pub lineno: isize,
     /// Owned forward link to the next line.
@@ -804,7 +1142,7 @@ pub struct LineNode {
 impl Default for LineNode {
     fn default() -> Self {
         LineNode {
-            data: String::new(),
+            data: LineData::empty(),
             lineno: 0,
             next: None,
             prev: None,
@@ -826,7 +1164,7 @@ pub struct GroupStruct {
     /// The 1-based line number of the last line in the group.
     pub bottom_line: isize,
     /// The saved indentation strings, one per affected line.
-    pub indentations: Vec<String>,
+    pub indentations: Vec<LineData>,
     /// The next group record, if any.
     pub next: Option<Box<GroupStruct>>,
 }
@@ -854,8 +1192,10 @@ pub struct UndoStruct {
     pub head_lineno: isize,
     /// X position where the operation began or ended.
     pub head_x: usize,
-    /// Saved string data needed to restore the affected line.
-    pub strdata: Option<String>,
+    /// Raw document bytes needed to restore the affected line.
+    pub payload: Option<LineData>,
+    /// Human-readable action description used by undo status messages.
+    pub description: Option<String>,
     /// File size before the action.
     pub wassize: usize,
     /// File size after the action.
@@ -879,7 +1219,8 @@ impl Default for UndoStruct {
             xflags: 0,
             head_lineno: 0,
             head_x: 0,
-            strdata: None,
+            payload: None,
+            description: None,
             wassize: 0,
             newsize: 0,
             grouping: None,
@@ -1024,8 +1365,6 @@ pub struct OpenFileStruct {
     pub last_action: UndoType,
     /// Whether this buffer has unsaved changes.
     pub modified: bool,
-    /// Whether reading this buffer encountered bytes that were not valid UTF-8.
-    pub had_invalid_utf8: bool,
     /// The syntax definition that applies to this file (if any).
     #[cfg(feature = "color")]
     pub syntax: Option<*mut SyntaxType>,
@@ -1070,7 +1409,6 @@ impl Default for OpenFileStruct {
             last_saved: std::ptr::null_mut(),
             last_action: UndoType::Other,
             modified: false,
-            had_invalid_utf8: false,
             #[cfg(feature = "color")]
             syntax: None,
             #[cfg(feature = "multibuffer")]
@@ -1200,6 +1538,9 @@ pub struct CompletionStruct {
 #[cfg(feature = "wordcomp")]
 impl Default for CompletionStruct {
     fn default() -> Self {
-        CompletionStruct { word: String::new(), next: None }
+        CompletionStruct {
+            word: String::new(),
+            next: None,
+        }
     }
 }

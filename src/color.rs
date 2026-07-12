@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/color.c from GNU nano.
 // C original: Copyright (C) 2001-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2017, 2020, 2021 Benno Schulenberg
@@ -6,24 +10,23 @@
 #[allow(unused_imports)] // some of these are used only under feature gates
 use crate::definitions::*;
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::global::{state, state_mut, with_state, with_state_mut, A_REVERSE};
+use crate::global::{A_REVERSE, state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
 
-
 // ncurses attribute constants (matching winio.rs conventions)
-pub const A_NORMAL:  i32 = 0;
-pub const A_BOLD:    i32 = 0x0200_0000;
-pub const A_ITALIC:  i32 = 0x0008_0000;
+pub const A_NORMAL: i32 = 0;
+pub const A_BOLD: i32 = 0x0200_0000;
+pub const A_ITALIC: i32 = 0x0008_0000;
 
 // ncurses COLOR_* constants (matching ncurses values)
-pub const COLOR_BLACK:   i16 = 0;
-pub const COLOR_RED:     i16 = 1;
-pub const COLOR_GREEN:   i16 = 2;
-pub const COLOR_YELLOW:  i16 = 3;
-pub const COLOR_BLUE:    i16 = 4;
+pub const COLOR_BLACK: i16 = 0;
+pub const COLOR_RED: i16 = 1;
+pub const COLOR_GREEN: i16 = 2;
+pub const COLOR_YELLOW: i16 = 3;
+pub const COLOR_BLUE: i16 = 4;
 pub const COLOR_MAGENTA: i16 = 5;
-pub const COLOR_CYAN:    i16 = 6;
-pub const COLOR_WHITE:   i16 = 7;
+pub const COLOR_CYAN: i16 = 6;
+pub const COLOR_WHITE: i16 = 7;
 
 // ---------------------------------------------------------------------------
 // Encode a color pair + attributes as an i32 for interface_color_pair[].
@@ -50,8 +53,12 @@ pub fn set_interface_colorpairs() {
             if let Some(mut combo) = s.color_combo[index].take() {
                 // If no-default-colors fallback: remap THE_DEFAULT to white/black.
                 if !defaults_allowed {
-                    if combo.fg == THE_DEFAULT { combo.fg = COLOR_WHITE; }
-                    if combo.bg == THE_DEFAULT { combo.bg = COLOR_BLACK; }
+                    if combo.fg == THE_DEFAULT {
+                        combo.fg = COLOR_WHITE;
+                    }
+                    if combo.bg == THE_DEFAULT {
+                        combo.bg = COLOR_BLACK;
+                    }
                 }
                 // Encode the pair index and attributes.
                 let pair_val = encode_pair(index + 1, combo.attributes);
@@ -112,8 +119,12 @@ pub fn set_syntax_colorpairs(sntx: &mut SyntaxType) {
         let mut fg = node.fg;
         let mut bg = node.bg;
         if !defaults_allowed {
-            if fg == THE_DEFAULT { fg = COLOR_WHITE; }
-            if bg == THE_DEFAULT { bg = COLOR_BLACK; }
+            if fg == THE_DEFAULT {
+                fg = COLOR_WHITE;
+            }
+            if bg == THE_DEFAULT {
+                bg = COLOR_BLACK;
+            }
             node.fg = fg;
             node.bg = bg;
         }
@@ -149,7 +160,7 @@ pub fn prepare_palette() {
 /// Try to match the given shibboleth string with one of the regexes in the list.
 /// C: bool found_in_list(regexlisttype *head, const char *shibboleth)
 #[cfg(feature = "color")]
-pub fn found_in_list(head: Option<&RegexListType>, shibboleth: &str) -> bool {
+pub fn found_in_list(head: Option<&RegexListType>, shibboleth: &[u8]) -> bool {
     let mut item = head;
     while let Some(node) = item {
         if let Some(ref regex) = node.one_rgx {
@@ -181,7 +192,8 @@ pub fn find_and_prime_applicable_syntax() {
     // We will walk the Box-linked list by raw pointer to avoid borrow issues
     // when we eventually need to assign the found syntax to openfile.syntax.
     let syntaxes_ptr: *mut SyntaxType = with_state_mut(|s| {
-        s.syntaxes.as_deref_mut()
+        s.syntaxes
+            .as_deref_mut()
             .map(|p| p as *mut SyntaxType)
             .unwrap_or(std::ptr::null_mut())
     });
@@ -205,7 +217,9 @@ pub fn find_and_prime_applicable_syntax() {
                 break;
             }
             sntx = unsafe {
-                (*sntx).next.as_deref_mut()
+                (*sntx)
+                    .next
+                    .as_deref_mut()
                     .map(|p| p as *mut SyntaxType)
                     .unwrap_or(std::ptr::null_mut())
             };
@@ -220,22 +234,25 @@ pub fn find_and_prime_applicable_syntax() {
     if found.is_null() && !inhelp {
         // Get the full path of the current file.
         let filename = with_state(|s| {
-            s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
+            s.openfile
+                .as_ref()
+                .map(|f| f.filename.clone())
+                .unwrap_or_default()
         });
-        let fullname = crate::files::get_full_path(&filename)
-            .unwrap_or_else(|| filename.clone());
+        let fullname = crate::files::get_full_path(&filename).unwrap_or_else(|| filename.clone());
 
         let mut sntx = syntaxes_ptr;
         while !sntx.is_null() {
-            let matches = unsafe {
-                found_in_list((*sntx).extensions.as_deref(), &fullname)
-            };
+            let matches =
+                unsafe { found_in_list((*sntx).extensions.as_deref(), fullname.as_bytes()) };
             if matches {
                 found = sntx;
                 break;
             }
             sntx = unsafe {
-                (*sntx).next.as_deref_mut()
+                (*sntx)
+                    .next
+                    .as_deref_mut()
                     .map(|p| p as *mut SyntaxType)
                     .unwrap_or(std::ptr::null_mut())
             };
@@ -245,22 +262,24 @@ pub fn find_and_prime_applicable_syntax() {
     // If filename didn't match, try the first line of the file.
     if found.is_null() && !inhelp {
         let first_line = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.filetop.as_ref())
                 .map(|lp| lp.borrow().data.clone())
                 .unwrap_or_default()
         });
         let mut sntx = syntaxes_ptr;
         while !sntx.is_null() {
-            let matches = unsafe {
-                found_in_list((*sntx).headers.as_deref(), &first_line)
-            };
+            let matches =
+                unsafe { found_in_list((*sntx).headers.as_deref(), first_line.as_bytes()) };
             if matches {
                 found = sntx;
                 break;
             }
             sntx = unsafe {
-                (*sntx).next.as_deref_mut()
+                (*sntx)
+                    .next
+                    .as_deref_mut()
                     .map(|p| p as *mut SyntaxType)
                     .unwrap_or(std::ptr::null_mut())
             };
@@ -273,7 +292,10 @@ pub fn find_and_prime_applicable_syntax() {
         let use_magic = state().flag_isset(USE_MAGIC);
         if use_magic {
             let filename = with_state(|s| {
-                s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default()
+                s.openfile
+                    .as_ref()
+                    .map(|f| f.filename.clone())
+                    .unwrap_or_default()
             });
             if !filename.is_empty() {
                 let description = magic::Cookie::open(Default::default())
@@ -284,14 +306,16 @@ pub fn find_and_prime_applicable_syntax() {
                     let mut sntx = syntaxes_ptr;
                     while !sntx.is_null() {
                         let matches = unsafe {
-                            found_in_list((*sntx).magics.as_deref(), &magicstring)
+                            found_in_list((*sntx).magics.as_deref(), magicstring.as_bytes())
                         };
                         if matches {
                             found = sntx;
                             break;
                         }
                         sntx = unsafe {
-                            (*sntx).next.as_deref_mut()
+                            (*sntx)
+                                .next
+                                .as_deref_mut()
                                 .map(|p| p as *mut SyntaxType)
                                 .unwrap_or(std::ptr::null_mut())
                         };
@@ -311,7 +335,9 @@ pub fn find_and_prime_applicable_syntax() {
                 break;
             }
             sntx = unsafe {
-                (*sntx).next.as_deref_mut()
+                (*sntx)
+                    .next
+                    .as_deref_mut()
                     .map(|p| p as *mut SyntaxType)
                     .unwrap_or(std::ptr::null_mut())
             };
@@ -333,17 +359,22 @@ pub fn find_and_prime_applicable_syntax() {
 
             // The list head (and thus our pointer) may have changed.
             found = with_state_mut(|s| {
-                s.syntaxes.as_deref_mut()
+                s.syntaxes
+                    .as_deref_mut()
                     .map(|p| p as *mut SyntaxType)
                     .unwrap_or(std::ptr::null_mut())
             });
             if !found.is_null() {
                 // Indicate that this syntax has been loaded.
-                unsafe { (*found).filename.clear(); }
+                unsafe {
+                    (*found).filename.clear();
+                }
             }
         }
         if !found.is_null() {
-            unsafe { set_syntax_colorpairs(&mut *found); }
+            unsafe {
+                set_syntax_colorpairs(&mut *found);
+            }
         }
     }
 
@@ -359,7 +390,11 @@ pub fn find_and_prime_applicable_syntax() {
 /// the head, so the parser's "live syntax is the list head" convention holds.
 #[cfg(feature = "color")]
 fn move_syntax_to_head(s: &mut crate::global::AppState, name: &str) {
-    if s.syntaxes.as_ref().map(|sx| sx.name == name).unwrap_or(true) {
+    if s.syntaxes
+        .as_ref()
+        .map(|sx| sx.name == name)
+        .unwrap_or(true)
+    {
         return; // already at head (or list empty)
     }
     let mut detached: Option<Box<SyntaxType>> = None;
@@ -384,12 +419,8 @@ fn move_syntax_to_head(s: &mut crate::global::AppState, name: &str) {
 /// C: void check_the_multis(linestruct *line)
 #[cfg(feature = "color")]
 pub fn check_the_multis(line_ptr: &LinePtr) {
-    
-
     // If there is no syntax or no multiline regex, there is nothing to do.
-    let syntax_ptr = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.syntax)
-    });
+    let syntax_ptr = with_state(|s| s.openfile.as_ref().and_then(|f| f.syntax));
 
     let syntax_ptr = match syntax_ptr {
         Some(p) => p,
@@ -411,7 +442,9 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
 
     // Walk each color rule looking for multiline regexes.
     let mut ink_ptr: *const ColorType = unsafe {
-        (*syntax_ptr).color.as_deref()
+        (*syntax_ptr)
+            .color
+            .as_deref()
             .map(|p| p as *const ColorType)
             .unwrap_or(std::ptr::null())
     };
@@ -421,7 +454,9 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
 
         // If it's not a multiline regex, skip.
         if ink.end.is_none() {
-            ink_ptr = ink.next.as_deref()
+            ink_ptr = ink
+                .next
+                .as_deref()
                 .map(|p| p as *const ColorType)
                 .unwrap_or(std::ptr::null());
             continue;
@@ -430,7 +465,9 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
         let start_regex = match &ink.start {
             Some(r) => r,
             None => {
-                ink_ptr = ink.next.as_deref()
+                ink_ptr = ink
+                    .next
+                    .as_deref()
                     .map(|p| p as *const ColorType)
                     .unwrap_or(std::ptr::null());
                 continue;
@@ -440,15 +477,20 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
         let id = ink.id as usize;
 
         // astart: whether the start regex matches somewhere on this line
-        let start_match = start_regex.find(&line_data);
+        let start_match = start_regex.find(line_data.as_bytes());
         let astart = start_match.is_some();
         let start_eo = start_match.map(|m| m.end()).unwrap_or(0);
 
         // afterstart: search for end after the start match end
-        let afterstart = &line_data[start_eo..];
+        let afterstart = &line_data.as_bytes()[start_eo..];
         let anend = end_regex.find(afterstart).is_some();
 
-        let multidata_val = line_ptr.borrow().multidata.get(id).copied().unwrap_or(NOTHING);
+        let multidata_val = line_ptr
+            .borrow()
+            .multidata
+            .get(id)
+            .copied()
+            .unwrap_or(NOTHING);
 
         let matches_current = match multidata_val {
             x if x == NOTHING => {
@@ -458,7 +500,7 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
             x if x == WHOLELINE => {
                 // Expect: no end on this line (and either no start, or start but end
                 // doesn't appear before start).
-                let end_from_start = end_regex.find(&line_data).is_some();
+                let end_from_start = end_regex.find(line_data.as_bytes()).is_some();
                 !anend && (!astart || !end_from_start)
             }
             x if x == JUSTONTHIS => {
@@ -466,7 +508,9 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
                 if astart && anend {
                     let end_match = end_regex.find(afterstart);
                     let combined_end = start_eo + end_match.map(|m| m.end()).unwrap_or(0);
-                    start_regex.find_at(&line_data, combined_end).is_none()
+                    start_regex
+                        .find_at(line_data.as_bytes(), combined_end)
+                        .is_none()
                 } else {
                     false
                 }
@@ -491,7 +535,9 @@ pub fn check_the_multis(line_ptr: &LinePtr) {
             return;
         }
 
-        ink_ptr = ink.next.as_deref()
+        ink_ptr = ink
+            .next
+            .as_deref()
             .map(|p| p as *const ColorType)
             .unwrap_or(std::ptr::null());
     }
@@ -508,9 +554,7 @@ pub fn precalc_multicolorinfo() {
         return;
     }
 
-    let syntax_ptr = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.syntax)
-    });
+    let syntax_ptr = with_state(|s| s.openfile.as_ref().and_then(|f| f.syntax));
 
     let syntax_ptr = match syntax_ptr {
         Some(p) => p,
@@ -522,10 +566,12 @@ pub fn precalc_multicolorinfo() {
         return;
     }
 
-    let (filetop, filebot) = with_state(|s| (
-        s.openfile.as_ref().and_then(|f| f.filetop.clone()),
-        s.openfile.as_ref().and_then(|f| f.filebot.clone()),
-    ));
+    let (filetop, filebot) = with_state(|s| {
+        (
+            s.openfile.as_ref().and_then(|f| f.filetop.clone()),
+            s.openfile.as_ref().and_then(|f| f.filebot.clone()),
+        )
+    });
 
     // For each line, allocate cache space for the multiline-regex info.
     let mut walker = filetop.clone();
@@ -541,7 +587,9 @@ pub fn precalc_multicolorinfo() {
 
     // Walk each color rule.
     let mut ink_ptr: *const ColorType = unsafe {
-        (*syntax_ptr).color.as_deref()
+        (*syntax_ptr)
+            .color
+            .as_deref()
             .map(|p| p as *const ColorType)
             .unwrap_or(std::ptr::null())
     };
@@ -551,7 +599,9 @@ pub fn precalc_multicolorinfo() {
 
         // If this is not a multi-line regex, skip it.
         let (Some(start_regex), Some(end_regex)) = (&ink.start, &ink.end) else {
-            ink_ptr = ink.next.as_deref()
+            ink_ptr = ink
+                .next
+                .as_deref()
                 .map(|p| p as *const ColorType)
                 .unwrap_or(std::ptr::null());
             continue;
@@ -565,7 +615,9 @@ pub fn precalc_multicolorinfo() {
             // Assume nothing applies until proven otherwise below.
             {
                 let mut b = lp.borrow_mut();
-                if id < b.multidata.len() { b.multidata[id] = NOTHING; }
+                if id < b.multidata.len() {
+                    b.multidata[id] = NOTHING;
+                }
             }
 
             // When the line contains a start match, look for an end,
@@ -575,7 +627,9 @@ pub fn precalc_multicolorinfo() {
             loop {
                 let sm = {
                     let b = lp.borrow();
-                    start_regex.find_at(&b.data, index).map(|m| (m.start(), m.end()))
+                    start_regex
+                        .find_at(b.data.as_bytes(), index)
+                        .map(|m| (m.start(), m.end()))
                 };
                 let Some((sm_so, sm_eo)) = sm else { break };
 
@@ -586,12 +640,14 @@ pub fn precalc_multicolorinfo() {
                 // but continue looking for other starts after it.
                 let em = {
                     let b = lp.borrow();
-                    end_regex.find_at(&b.data, index).map(|m| m.end())
+                    end_regex.find_at(b.data.as_bytes(), index).map(|m| m.end())
                 };
                 if let Some(em_eo) = em {
                     {
                         let mut b = lp.borrow_mut();
-                        if id < b.multidata.len() { b.multidata[id] = JUSTONTHIS; }
+                        if id < b.multidata.len() {
+                            b.multidata[id] = JUSTONTHIS;
+                        }
                     }
 
                     // If the total match has zero length, force an advance.
@@ -602,8 +658,13 @@ pub fn precalc_multicolorinfo() {
                     if zero_length {
                         // When at end-of-line, there is no other start.
                         let at_eol = index >= lp.borrow().data.len();
-                        if at_eol { break; }
-                        index = { let b = lp.borrow(); step_right(&b.data, index) };
+                        if at_eol {
+                            break;
+                        }
+                        index = {
+                            let b = lp.borrow();
+                            step_right(&b.data, index)
+                        };
                     }
                     continue;
                 }
@@ -613,26 +674,38 @@ pub fn precalc_multicolorinfo() {
                 let mut tail_end_eo = 0usize;
                 loop {
                     let Some(tl) = tailline.clone() else { break };
-                    let found = { let b = tl.borrow(); end_regex.find(&b.data).map(|m| m.end()) };
+                    let found = {
+                        let b = tl.borrow();
+                        end_regex.find(b.data.as_bytes()).map(|m| m.end())
+                    };
                     match found {
-                        Some(eo) => { tail_end_eo = eo; break; }
+                        Some(eo) => {
+                            tail_end_eo = eo;
+                            break;
+                        }
                         None => tailline = tl.borrow().next.clone(),
                     }
                 }
 
                 {
                     let mut b = lp.borrow_mut();
-                    if id < b.multidata.len() { b.multidata[id] = STARTSHERE; }
+                    if id < b.multidata.len() {
+                        b.multidata[id] = STARTSHERE;
+                    }
                 }
 
                 // Mark all lines between this one and the tail as WHOLELINE.
                 // (In C this also advances `line` in the main loop.)
                 let mut mid = lp.borrow().next.clone();
                 while let Some(m) = mid {
-                    if tailline.as_ref().is_some_and(|t| LinePtr::ptr_eq(&m, t)) { break; }
+                    if tailline.as_ref().is_some_and(|t| LinePtr::ptr_eq(&m, t)) {
+                        break;
+                    }
                     {
                         let mut b = m.borrow_mut();
-                        if id < b.multidata.len() { b.multidata[id] = WHOLELINE; }
+                        if id < b.multidata.len() {
+                            b.multidata[id] = WHOLELINE;
+                        }
                     }
                     mid = m.borrow().next.clone();
                 }
@@ -640,13 +713,17 @@ pub fn precalc_multicolorinfo() {
                 match tailline {
                     None => {
                         // C: line = openfile->filebot; break;
-                        if let Some(fb) = filebot.clone() { lp = fb; }
+                        if let Some(fb) = filebot.clone() {
+                            lp = fb;
+                        }
                         break;
                     }
                     Some(t) => {
                         {
                             let mut b = t.borrow_mut();
-                            if id < b.multidata.len() { b.multidata[id] = ENDSHERE; }
+                            if id < b.multidata.len() {
+                                b.multidata[id] = ENDSHERE;
+                            }
                         }
                         // Look for a possible new start after the end match,
                         // continuing the scan on the tail line.
@@ -659,8 +736,29 @@ pub fn precalc_multicolorinfo() {
             line = lp.borrow().next.clone();
         }
 
-        ink_ptr = ink.next.as_deref()
+        ink_ptr = ink
+            .next
+            .as_deref()
             .map(|p| p as *const ColorType)
             .unwrap_or(std::ptr::null());
+    }
+}
+
+#[cfg(all(test, feature = "color"))]
+mod tests {
+    use super::found_in_list;
+    use crate::definitions::RegexListType;
+    use regex::bytes::RegexBuilder;
+
+    #[test]
+    fn regex_lists_scan_malformed_utf8_as_raw_bytes() {
+        let regex = RegexBuilder::new("tag$").unicode(true).build().unwrap();
+        let list = RegexListType {
+            one_rgx: Some(regex),
+            next: None,
+        };
+
+        assert!(found_in_list(Some(&list), b"\xfftag"));
+        assert!(!found_in_list(Some(&list), b"\xfftag!"));
     }
 }

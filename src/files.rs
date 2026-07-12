@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/files.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2015-2022, 2025 Benno Schulenberg
@@ -6,14 +10,14 @@
 use crate::definitions::*;
 use crate::global::{state, state_mut, with_state, with_state_mut};
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::{ISSET, SET, UNSET, TOGGLE};
+use crate::{ISSET, SET, TOGGLE, UNSET};
+#[cfg(feature = "operatingdir")]
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(not(feature = "tiny"))]
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "operatingdir")]
-use std::cell::RefCell;
 
 // Re-export stubs for winio/text/search/nano functions referenced here.
 // These will be replaced by real implementations when those modules are ported.
@@ -51,10 +55,12 @@ fn relative_to_root(root: &OperatingRoot, path: &Path) -> io::Result<PathBuf> {
                     relative.to_path_buf()
                 }
             })
-            .map_err(|_| io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "path is outside the operating directory",
-            ))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "path is outside the operating directory",
+                )
+            })
     } else {
         Ok(path.to_path_buf())
     }
@@ -77,8 +83,7 @@ fn with_operating_root<T>(
 fn operating_root_required_but_unavailable() -> bool {
     #[cfg(feature = "operatingdir")]
     {
-        state().operating_dir.is_some()
-            && OPERATING_ROOT.with(|slot| slot.borrow().is_none())
+        state().operating_dir.is_some() && OPERATING_ROOT.with(|slot| slot.borrow().is_none())
     }
     #[cfg(not(feature = "operatingdir"))]
     {
@@ -162,10 +167,13 @@ fn open_path_with(path: &Path, options: PathOpenOptions) -> io::Result<File> {
 }
 
 fn open_path(path: &Path) -> io::Result<File> {
-    open_path_with(path, PathOpenOptions {
-        read: true,
-        ..PathOpenOptions::default()
-    })
+    open_path_with(
+        path,
+        PathOpenOptions {
+            read: true,
+            ..PathOpenOptions::default()
+        },
+    )
 }
 
 fn path_exists_nofollow(path: &Path) -> io::Result<bool> {
@@ -180,8 +188,10 @@ fn path_exists_nofollow(path: &Path) -> io::Result<bool> {
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -192,14 +202,15 @@ fn path_exists_nofollow(path: &Path) -> io::Result<bool> {
 
 fn remove_path(path: &Path) -> io::Result<()> {
     #[cfg(feature = "operatingdir")]
-    if let Some(result) = with_operating_root(path, |root, relative| {
-        root.dir.remove_file(relative)
-    }) {
+    if let Some(result) = with_operating_root(path, |root, relative| root.dir.remove_file(relative))
+    {
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     std::fs::remove_file(path)
 }
@@ -229,8 +240,10 @@ fn rename_path(from: &Path, to: &Path, source: &File) -> io::Result<()> {
         }
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     std::fs::rename(from, to)
 }
@@ -259,7 +272,9 @@ fn replace_capability_file_on_windows(
             "replacement destination has no file name",
         )
     })?;
-    let parent = destination.parent().filter(|path| !path.as_os_str().is_empty())
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let parent = root.dir.open_dir(parent)?;
 
@@ -274,9 +289,7 @@ fn final_path_from_handle(file: &File) -> io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
-    };
+    use windows::Win32::Storage::FileSystem::{FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW};
 
     let mut buffer = vec![0u16; 512];
     loop {
@@ -291,7 +304,9 @@ fn final_path_from_handle(file: &File) -> io::Result<PathBuf> {
             return Err(io::Error::last_os_error());
         }
         if length <= buffer.len() {
-            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length])));
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(
+                &buffer[..length],
+            )));
         }
         buffer.resize(length, 0);
     }
@@ -306,8 +321,10 @@ fn sync_parent_of(path: &Path) -> io::Result<()> {
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     File::open(parent)?.sync_all()
 }
@@ -318,13 +335,17 @@ pub(crate) fn confined_is_dir(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref();
     #[cfg(feature = "operatingdir")]
     if let Some(result) = with_operating_root(path, |root, relative| {
-        root.dir.metadata(relative).map(|metadata| metadata.is_dir())
+        root.dir
+            .metadata(relative)
+            .map(|metadata| metadata.is_dir())
     }) {
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     std::fs::metadata(path).map(|metadata| metadata.is_dir())
 }
@@ -365,8 +386,10 @@ fn path_info(path: &Path) -> io::Result<PathInfo> {
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
 
     let metadata = std::fs::metadata(path)?;
@@ -406,8 +429,10 @@ pub(crate) fn confined_read_dir(path: impl AsRef<Path>) -> io::Result<Vec<std::f
         return result;
     }
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     std::fs::read_dir(path)?
         .map(|entry| entry.map(|entry| entry.file_name()))
@@ -420,17 +445,34 @@ pub(crate) fn confined_read_dir(path: impl AsRef<Path>) -> io::Result<Vec<std::f
 
 // ---- Delegating wrappers: call the real implementations ----
 
-#[inline] fn statusline(level: MessageType, msg: &str) { crate::winio::statusline(level, msg); }
-#[inline] fn statusbar(msg: &str) { crate::winio::statusbar(msg); }
-#[inline] fn titlebar(extra: Option<&str>) { crate::winio::titlebar(extra); }
-fn blank_bottombars() { crate::winio::blank_bottombars(); }
-fn wipe_statusbar() { crate::winio::wipe_statusbar(); }
+#[inline]
+fn statusline(level: MessageType, msg: &str) {
+    crate::winio::statusline(level, msg);
+}
+#[inline]
+fn statusbar(msg: &str) {
+    crate::winio::statusbar(msg);
+}
+#[inline]
+fn titlebar(extra: Option<&str>) {
+    crate::winio::titlebar(extra);
+}
+fn blank_bottombars() {
+    crate::winio::blank_bottombars();
+}
+fn wipe_statusbar() {
+    crate::winio::wipe_statusbar();
+}
 /// C: beep() — ncurses; ring the terminal bell.
 #[inline]
-fn beep() { crate::winio::beep() }
+fn beep() {
+    crate::winio::beep()
+}
 /// C: napms(ms) — ncurses; lets flash messages linger to be read.
 #[inline]
-fn napms(ms: i32) { crate::winio::napms(ms.max(0) as u64) }
+fn napms(ms: i32) {
+    crate::winio::napms(ms.max(0) as u64)
+}
 
 fn usable_parent(path: &Path) -> &Path {
     match path.parent() {
@@ -439,8 +481,7 @@ fn usable_parent(path: &Path) -> &Path {
     }
 }
 
-static STAGING_SEQUENCE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static STAGING_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct CapabilityTempFile {
     relative_path: PathBuf,
@@ -500,9 +541,7 @@ impl StagingFile {
 
     fn persist(self, destination: &Path) -> io::Result<File> {
         match self {
-            Self::Ambient(file) => file
-                .persist(destination)
-                .map_err(|error| error.error),
+            Self::Ambient(file) => file.persist(destination).map_err(|error| error.error),
             Self::Capability(file) => file.persist(destination),
         }
     }
@@ -557,8 +596,10 @@ fn create_staging_file(parent: &Path, prefix: &str) -> io::Result<StagingFile> {
     }
 
     if operating_root_required_but_unavailable() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "operating-directory capability is not initialized"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating-directory capability is not initialized",
+        ));
     }
     tempfile::Builder::new()
         .prefix(prefix)
@@ -656,16 +697,26 @@ fn make_new_node(prev: Option<LinePtr>) -> LinePtr {
     crate::nano::make_new_node(prev.as_ref())
 }
 
-#[inline] fn ingraft_buffer(topline: LinePtr) { crate::cut::ingraft_buffer(topline); }
-#[inline] fn xplustabs() -> usize { crate::utils::xplustabs() }
+#[inline]
+fn ingraft_buffer(topline: LinePtr) {
+    crate::cut::ingraft_buffer(topline);
+}
+#[inline]
+fn xplustabs() -> usize {
+    crate::utils::xplustabs()
+}
 
 #[cfg(feature = "color")]
-fn precalc_multicolorinfo() { crate::color::precalc_multicolorinfo(); }
+fn precalc_multicolorinfo() {
+    crate::color::precalc_multicolorinfo();
+}
 #[cfg(not(feature = "color"))]
 fn precalc_multicolorinfo() {}
 
 #[cfg(feature = "color")]
-fn find_and_prime_applicable_syntax() { crate::color::find_and_prime_applicable_syntax(); }
+fn find_and_prime_applicable_syntax() {
+    crate::color::find_and_prime_applicable_syntax();
+}
 #[cfg(not(feature = "color"))]
 fn find_and_prime_applicable_syntax() {}
 
@@ -681,46 +732,87 @@ fn leftedge_for(xpt: usize, current: Option<&LinePtr>) -> usize {
 }
 
 #[cfg(not(feature = "tiny"))]
-fn ensure_firstcolumn_is_aligned() { crate::winio::ensure_firstcolumn_is_aligned(); }
+fn ensure_firstcolumn_is_aligned() {
+    crate::winio::ensure_firstcolumn_is_aligned();
+}
 #[cfg(feature = "tiny")]
 fn ensure_firstcolumn_is_aligned() {}
 
-#[inline] fn warn_and_briefly_pause(msg: &str) { crate::winio::warn_and_briefly_pause(msg); }
-fn ask_user(yesno: bool, msg: &str) -> i32 { crate::prompt::ask_user(yesno, msg) }
-fn in_restricted_mode() -> bool { crate::ISSET!(crate::definitions::RESTRICTED) }
-fn breadth(s: &str) -> usize { crate::utils::breadth(s) }
+#[inline]
+fn warn_and_briefly_pause(msg: &str) {
+    crate::winio::warn_and_briefly_pause(msg);
+}
+fn ask_user(yesno: bool, msg: &str) -> i32 {
+    crate::prompt::ask_user(yesno, msg)
+}
+fn in_restricted_mode() -> bool {
+    crate::ISSET!(crate::definitions::RESTRICTED)
+}
+fn breadth(s: &str) -> usize {
+    crate::utils::breadth(s)
+}
 fn display_string(s: &str, from: usize, room: usize, isdata: bool, isprompt: bool) -> String {
     crate::winio::display_string(s, from, room, isdata, isprompt)
 }
 fn mbstrcasecmp(a: &str, b: &str) -> i32 {
-    let a_lc = a.to_lowercase(); let b_lc = b.to_lowercase();
+    let a_lc = a.to_lowercase();
+    let b_lc = b.to_lowercase();
     a_lc.cmp(&b_lc) as i32
 }
 
 /// C: reconnect_and_store_state() — nano.c; reattach the keyboard to stdin.
 #[inline]
-fn reconnect_and_store_state() { crate::nano::reconnect_and_store_state(); }
-fn terminal_init() { crate::nano::terminal_init(); }
-fn doupdate() {}  // stub: no crate::winio::doupdate exists
-fn isendwin() -> bool { false }  // stub: no crate::winio::isendwin exists
+fn reconnect_and_store_state() {
+    crate::nano::reconnect_and_store_state();
+}
+fn terminal_init() {
+    crate::nano::terminal_init();
+}
+fn doupdate() {} // stub: no crate::winio::doupdate exists
+fn isendwin() -> bool {
+    false
+} // stub: no crate::winio::isendwin exists
 
-#[inline] fn install_handler_for_Ctrl_C() { crate::nano::install_handler_for_Ctrl_C(); }
-#[inline] fn restore_handler_for_Ctrl_C() { crate::nano::restore_handler_for_Ctrl_C(); }
-#[inline] fn block_sigwinch(block: bool) { crate::nano::block_sigwinch(block); }
-fn enable_kb_interrupt() { crate::nano::enable_kb_interrupt(); }
-fn close_and_go() { crate::nano::close_and_go() }
-fn finish() { crate::nano::finish() }
+#[inline]
+fn install_handler_for_Ctrl_C() {
+    crate::nano::install_handler_for_Ctrl_C();
+}
+#[inline]
+fn restore_handler_for_Ctrl_C() {
+    crate::nano::restore_handler_for_Ctrl_C();
+}
+#[inline]
+fn block_sigwinch(block: bool) {
+    crate::nano::block_sigwinch(block);
+}
+fn enable_kb_interrupt() {
+    crate::nano::enable_kb_interrupt();
+}
+fn close_and_go() {
+    crate::nano::close_and_go()
+}
+fn finish() {
+    crate::nano::finish()
+}
 
 // Undo record delegation
-#[inline] fn add_undo(utype: UndoType, msg: Option<&str>) { crate::text::add_undo(utype, msg); }
-#[inline] fn update_undo(utype: UndoType) { crate::text::update_undo(utype); }
+#[inline]
+fn add_undo(utype: UndoType, msg: Option<&str>) {
+    crate::text::add_undo(utype, msg);
+}
+#[inline]
+fn update_undo(utype: UndoType) {
+    crate::text::update_undo(utype);
+}
 fn discard_until(target: *mut crate::definitions::UndoStruct) {
     crate::text::discard_until(target as *const crate::definitions::UndoStruct)
 }
 /// C: get_region(&top, &top_x, &bot, &bot_x) — frame the marked region.
 fn get_region(
-    topline: &mut Option<LinePtr>, top_x: &mut usize,
-    botline: &mut Option<LinePtr>, bot_x: &mut usize,
+    topline: &mut Option<LinePtr>,
+    top_x: &mut usize,
+    botline: &mut Option<LinePtr>,
+    bot_x: &mut usize,
 ) {
     let (t_ln, t_x, b_ln, b_x) = crate::utils::get_region();
     *topline = crate::utils::line_from_number(t_ln as isize);
@@ -730,7 +822,9 @@ fn get_region(
 }
 
 // Signature adapter: call site passes LinePtr by value, real fn takes &LinePtr.
-fn delete_node(node: LinePtr) { crate::nano::delete_node(&node); }
+fn delete_node(node: LinePtr) {
+    crate::nano::delete_node(&node);
+}
 
 /// C: add_or_remove_pipe_symbol_from_answer() — prompt.c.
 fn add_or_remove_pipe_symbol_from_answer() {
@@ -765,17 +859,28 @@ fn do_prompt(
 ) -> i32 {
     crate::prompt::do_prompt(menu, Some(given), history_kind, Some(refresh), msg)
 }
-#[inline] fn edit_refresh() { crate::winio::edit_refresh(); }
+#[inline]
+fn edit_refresh() {
+    crate::winio::edit_refresh();
+}
 
 /// C: browse_in(path) — browser.c; pick a file via the file browser.
 fn browse_in(path: &str) -> Option<String> {
     #[cfg(feature = "browser")]
-    { crate::browser::browse_in(path) }
+    {
+        crate::browser::browse_in(path)
+    }
     #[cfg(not(feature = "browser"))]
-    { let _ = path; None }
+    {
+        let _ = path;
+        None
+    }
 }
 
-#[inline] fn func_from_key(response: i32) -> Option<FuncPtr> { crate::global::func_from_key(response) }
+#[inline]
+fn func_from_key(response: i32) -> Option<FuncPtr> {
+    crate::global::func_from_key(response)
+}
 
 /// C: update_history(&execute_history, answer, PRUNE_DUPLICATE) — history.c.
 /// The only call site updates the execute-command history.
@@ -783,7 +888,9 @@ fn update_history(_history: &mut Option<LinePtr>, s: &str, prune: bool) {
     #[cfg(feature = "histories")]
     crate::history::update_history(crate::history::HistoryKind::Execute, s, prune);
     #[cfg(not(feature = "histories"))]
-    { let _ = (s, prune); }
+    {
+        let _ = (s, prune);
+    }
 }
 
 // Stub display helper
@@ -833,24 +940,30 @@ pub fn delete_lockfile(_lockfilename: impl AsRef<Path>, _lockfile: Option<&File>
 fn open_lockfile_for_create(lockfilename: &Path) -> io::Result<File> {
     // O_EXCL is the ownership boundary: another editor (or a racing symlink)
     // must never be unlinked and silently replaced.
-    open_path_with(lockfilename, PathOpenOptions {
-        read: true,
-        write: true,
-        create_new: true,
-        nofollow: true,
-        mode: 0o666,
-        ..PathOpenOptions::default()
-    })
+    open_path_with(
+        lockfilename,
+        PathOpenOptions {
+            read: true,
+            write: true,
+            create_new: true,
+            nofollow: true,
+            mode: 0o666,
+            ..PathOpenOptions::default()
+        },
+    )
 }
 
 #[cfg(not(feature = "tiny"))]
 fn open_existing_lockfile(lockfilename: &Path) -> io::Result<File> {
-    let file = open_path_with(lockfilename, PathOpenOptions {
-        read: true,
-        write: true,
-        nofollow: true,
-        ..PathOpenOptions::default()
-    })?;
+    let file = open_path_with(
+        lockfilename,
+        PathOpenOptions {
+            read: true,
+            write: true,
+            nofollow: true,
+            ..PathOpenOptions::default()
+        },
+    )?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -883,7 +996,7 @@ fn windows_file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
 
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
@@ -909,11 +1022,14 @@ fn lockfile_still_names(file: &File, lockfilename: &Path) -> bool {
     // held descriptor is the only object ever mutated; this second descriptor
     // is solely an identity check, so a subsequent rename cannot redirect the
     // write to an attacker-selected object.
-    let named_file = match open_path_with(lockfilename, PathOpenOptions {
-        read: true,
-        nofollow: true,
-        ..PathOpenOptions::default()
-    }) {
+    let named_file = match open_path_with(
+        lockfilename,
+        PathOpenOptions {
+            read: true,
+            nofollow: true,
+            ..PathOpenOptions::default()
+        },
+    ) {
         Ok(file) => file,
         Err(_) => return false,
     };
@@ -954,8 +1070,13 @@ fn lockfile_still_names(file: &File, lockfilename: &Path) -> bool {
 pub fn delete_lockfile(lockfilename: impl AsRef<Path>, lockfile: Option<&File>) -> bool {
     let lockfilename = lockfilename.as_ref();
     let Some(lockfile) = lockfile else {
-        statusline(MessageType::Mild,
-            &format!("Refusing to delete lock file without its handle: {}", lockfilename.display()));
+        statusline(
+            MessageType::Mild,
+            &format!(
+                "Refusing to delete lock file without its handle: {}",
+                lockfilename.display()
+            ),
+        );
         return false;
     };
 
@@ -965,8 +1086,13 @@ pub fn delete_lockfile(lockfilename: impl AsRef<Path>, lockfile: Option<&File>) 
         if matches!(path_exists_nofollow(lockfilename), Ok(false)) {
             return true;
         }
-        statusline(MessageType::Mild,
-            &format!("Refusing to delete changed lock file: {}", lockfilename.display()));
+        statusline(
+            MessageType::Mild,
+            &format!(
+                "Refusing to delete changed lock file: {}",
+                lockfilename.display()
+            ),
+        );
         return false;
     }
 
@@ -974,8 +1100,10 @@ pub fn delete_lockfile(lockfilename: impl AsRef<Path>, lockfile: Option<&File>) 
         Ok(_) => true,
         Err(e) if e.kind() == io::ErrorKind::NotFound => true,
         Err(e) => {
-            statusline(MessageType::Mild,
-                &format!("Error deleting lock file {}: {}", lockfilename.display(), e));
+            statusline(
+                MessageType::Mild,
+                &format!("Error deleting lock file {}: {}", lockfilename.display(), e),
+            );
             false
         }
     }
@@ -991,7 +1119,10 @@ fn build_lockdata(filename: &Path, modified: bool) -> Option<Vec<u8>> {
             let uid = libc::geteuid();
             let pw = libc::getpwuid(uid);
             if pw.is_null() {
-                statusline(MessageType::Mild, "Couldn't determine my identity for lock file");
+                statusline(
+                    MessageType::Mild,
+                    "Couldn't determine my identity for lock file",
+                );
                 return None;
             }
             let name = std::ffi::CStr::from_ptr((*pw).pw_name);
@@ -1006,8 +1137,13 @@ fn build_lockdata(filename: &Path, modified: bool) -> Option<Vec<u8>> {
         let mut buf = [0u8; 32];
         let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, 31) };
         if ret < 0 {
-            statusline(MessageType::Mild,
-                &format!("Couldn't determine hostname: {}", io::Error::last_os_error()));
+            statusline(
+                MessageType::Mild,
+                &format!(
+                    "Couldn't determine hostname: {}",
+                    io::Error::last_os_error()
+                ),
+            );
             return None;
         }
         buf[31] = 0;
@@ -1016,7 +1152,8 @@ fn build_lockdata(filename: &Path, modified: bool) -> Option<Vec<u8>> {
     };
 
     #[cfg(not(unix))]
-    let hostname: String = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
+    let hostname: String =
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
 
     let mut lockdata = vec![0u8; LOCKSIZE];
     lockdata[0] = 0x62;
@@ -1062,7 +1199,10 @@ pub fn write_lockfile(
     modified: bool,
 ) -> bool {
     if !lockfile_still_names(lockfile, lockfilename) {
-        statusline(MessageType::Mild, &format!("Lock file changed: {}", lockfilename.display()));
+        statusline(
+            MessageType::Mild,
+            &format!("Lock file changed: {}", lockfilename.display()),
+        );
         return false;
     }
     let lockdata = match build_lockdata(filename, modified) {
@@ -1075,12 +1215,21 @@ pub fn write_lockfile(
         .and_then(|_| lockfile.write_all(&lockdata))
         .and_then(|_| lockfile.sync_all());
     if let Err(error) = result {
-        statusline(MessageType::Mild,
-            &format!("Error writing lock file {}: {}", lockfilename.display(), error));
+        statusline(
+            MessageType::Mild,
+            &format!(
+                "Error writing lock file {}: {}",
+                lockfilename.display(),
+                error
+            ),
+        );
         return false;
     }
     if !lockfile_still_names(lockfile, lockfilename) {
-        statusline(MessageType::Mild, &format!("Lock file changed: {}", lockfilename.display()));
+        statusline(
+            MessageType::Mild,
+            &format!("Lock file changed: {}", lockfilename.display()),
+        );
         return false;
     }
     true
@@ -1091,8 +1240,14 @@ fn create_lockfile(lockfilename: &Path, filename: &Path, modified: bool) -> Opti
     let mut lockfile = match open_lockfile_for_create(lockfilename) {
         Ok(file) => file,
         Err(error) => {
-            statusline(MessageType::Mild,
-                &format!("Error writing lock file {}: {}", lockfilename.display(), error));
+            statusline(
+                MessageType::Mild,
+                &format!(
+                    "Error writing lock file {}: {}",
+                    lockfilename.display(),
+                    error
+                ),
+            );
             return None;
         }
     };
@@ -1131,8 +1286,10 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
     let lock_exists = match path_exists_nofollow(&lockfilename) {
         Ok(exists) => exists,
         Err(error) => {
-            statusline(MessageType::Alert,
-                &format!("Error checking lock file {}: {}", lockfilename_str, error));
+            statusline(
+                MessageType::Alert,
+                &format!("Error checking lock file {}: {}", lockfilename_str, error),
+            );
             return Ok(None);
         }
     };
@@ -1145,8 +1302,10 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
         // Read and parse the lock file
         match open_existing_lockfile(&lockfilename) {
             Err(e) => {
-                statusline(MessageType::Alert,
-                    &format!("Error opening lock file {}: {}", lockfilename_str, e));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error opening lock file {}: {}", lockfilename_str, e),
+                );
                 return Ok(None);
             }
             Ok(mut f) => {
@@ -1157,16 +1316,20 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
                 {
                     Ok(amount) => amount,
                     Err(e) => {
-                        statusline(MessageType::Alert,
-                            &format!("Error reading lock file {}: {}", lockfilename_str, e));
+                        statusline(
+                            MessageType::Alert,
+                            &format!("Error reading lock file {}: {}", lockfilename_str, e),
+                        );
                         return Ok(None);
                     }
                 };
 
                 // Validate magic bytes and minimum size
                 if readamt < 68 || lockbuf[0] != 0x62 || lockbuf[1] != 0x30 {
-                    statusline(MessageType::Alert,
-                        &format!("Bad lock file is ignored: {}", lockfilename_str));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("Bad lock file is ignored: {}", lockfilename_str),
+                    );
                     return Ok(None);
                 }
 
@@ -1232,8 +1395,7 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
         }
     }
 
-    Ok(create_lockfile(&lockfilename, filename, false)
-        .map(|lockfile| (lockfilename, lockfile)))
+    Ok(create_lockfile(&lockfilename, filename, false).map(|lockfile| (lockfilename, lockfile)))
 }
 
 /* C: void stat_with_alloc(const char *filename, struct stat **pstat)
@@ -1246,9 +1408,9 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
     {
         use std::os::unix::fs::MetadataExt;
         #[cfg(feature = "operatingdir")]
-        if let Some(result) = with_operating_root(filename, |root, relative| {
-            root.dir.metadata(relative)
-        }) {
+        if let Some(result) =
+            with_operating_root(filename, |root, relative| root.dir.metadata(relative))
+        {
             use cap_std::fs::MetadataExt as _;
             return result.ok().map(|meta| FileStat {
                 st_mtime: meta.mtime(),
@@ -1266,30 +1428,30 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
             return None;
         }
         match std::fs::metadata(filename) {
-            Ok(meta) => {
-                Some(FileStat {
-                    st_mtime: meta.mtime(),
-                    st_dev: meta.dev(),
-                    st_ino: meta.ino(),
-                    st_uid: meta.uid(),
-                    st_gid: meta.gid(),
-                    st_mode: meta.mode(),
-                    st_atime: meta.atime(),
-                    st_atime_nsec: meta.atime_nsec() as i64,
-                    st_mtime_nsec: meta.mtime_nsec() as i64,
-                })
-            }
+            Ok(meta) => Some(FileStat {
+                st_mtime: meta.mtime(),
+                st_dev: meta.dev(),
+                st_ino: meta.ino(),
+                st_uid: meta.uid(),
+                st_gid: meta.gid(),
+                st_mode: meta.mode(),
+                st_atime: meta.atime(),
+                st_atime_nsec: meta.atime_nsec() as i64,
+                st_mtime_nsec: meta.mtime_nsec() as i64,
+            }),
             Err(_) => None,
         }
     }
     #[cfg(not(unix))]
     {
         #[cfg(feature = "operatingdir")]
-        if let Some(result) = with_operating_root(filename, |root, relative| {
-            root.dir.metadata(relative)
-        }) {
+        if let Some(result) =
+            with_operating_root(filename, |root, relative| root.dir.metadata(relative))
+        {
             return result.ok().map(|meta| FileStat {
-                st_mtime: meta.modified().ok()
+                st_mtime: meta
+                    .modified()
+                    .ok()
                     .and_then(|t| t.into_std().duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0),
@@ -1301,16 +1463,16 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
             return None;
         }
         match std::fs::metadata(filename) {
-            Ok(meta) => {
-                Some(FileStat {
-                    st_mtime: meta.modified().ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0),
-                    st_dev: 0,
-                    st_ino: 0,
-                })
-            }
+            Ok(meta) => Some(FileStat {
+                st_mtime: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+                st_dev: 0,
+                st_ino: 0,
+            }),
             Err(_) => None,
         }
     }
@@ -1337,19 +1499,25 @@ pub fn has_valid_path(filename: impl AsRef<Path>) -> bool {
 
     match confined_is_dir(parentdir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            statusline(MessageType::Alert,
-                &format!("Directory '{}' does not exist", parentdir_str));
+            statusline(
+                MessageType::Alert,
+                &format!("Directory '{}' does not exist", parentdir_str),
+            );
             false
         }
         Err(e) => {
-            statusline(MessageType::Alert,
-                &format!("Path '{}': {}", parentdir_str, e));
+            statusline(
+                MessageType::Alert,
+                &format!("Path '{}': {}", parentdir_str, e),
+            );
             false
         }
         Ok(is_directory) => {
             if !is_directory {
-                statusline(MessageType::Alert,
-                    &format!("Path '{}' is not a directory", parentdir_str));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Path '{}' is not a directory", parentdir_str),
+                );
                 return false;
             }
 
@@ -1369,8 +1537,10 @@ pub fn has_valid_path(filename: impl AsRef<Path>) -> bool {
                 };
                 let x_ok = unsafe { libc::access(cpath.as_ptr(), libc::X_OK) };
                 if x_ok < 0 {
-                    statusline(MessageType::Alert,
-                        &format!("Path '{}' is not accessible", parentdir_str));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("Path '{}' is not accessible", parentdir_str),
+                    );
                     return false;
                 }
             }
@@ -1390,8 +1560,10 @@ pub fn has_valid_path(filename: impl AsRef<Path>) -> bool {
                         };
                         let w_ok = unsafe { libc::access(cpath.as_ptr(), libc::W_OK) };
                         if w_ok < 0 {
-                            statusline(MessageType::Mild,
-                                &format!("Directory '{}' is not writable", parentdir_str));
+                            statusline(
+                                MessageType::Mild,
+                                &format!("Directory '{}' is not writable", parentdir_str),
+                            );
                         }
                     }
                 }
@@ -1410,7 +1582,7 @@ pub fn make_new_buffer() {
     // Allocate before borrowing AppState mutably: LinePtr allocation itself
     // enters the state allocator, and RefCell correctly rejects re-entrancy.
     let filetop = make_new_node(None);
-    filetop.borrow_mut().data = String::new();
+    filetop.borrow_mut().data = LineData::empty();
     filetop.borrow_mut().lineno = 1;
 
     with_state_mut(|s| {
@@ -1460,7 +1632,9 @@ pub fn make_new_buffer() {
         newnode.modified = false;
 
         #[cfg(feature = "wrapping")]
-        { newnode.spillage_line = None; }
+        {
+            newnode.spillage_line = None;
+        }
 
         #[cfg(not(feature = "tiny"))]
         {
@@ -1477,10 +1651,14 @@ pub fn make_new_buffer() {
         }
 
         #[cfg(feature = "multibuffer")]
-        { newnode.errormessage = None; }
+        {
+            newnode.errormessage = None;
+        }
 
         #[cfg(feature = "color")]
-        { newnode.syntax = None; }
+        {
+            newnode.syntax = None;
+        }
 
         s.openfile = Some(newnode);
     });
@@ -1527,14 +1705,17 @@ pub fn open_buffer_impl(filename: impl AsRef<Path>, new_one: bool) -> bool {
     #[cfg(feature = "operatingdir")]
     {
         let confined = with_state(|s| {
-            s.operating_dir.as_deref()
+            s.operating_dir
+                .as_deref()
                 .map(|_od| outside_of_confinement_path(filename, false))
                 .unwrap_or(false)
         });
         if confined {
             let od = state().operating_dir.clone().unwrap_or_default();
-            statusline(MessageType::Alert,
-                &format!("Can't read file from outside of {}", od));
+            statusline(
+                MessageType::Alert,
+                &format!("Can't read file from outside of {}", od),
+            );
             return false;
         }
     }
@@ -1547,25 +1728,36 @@ pub fn open_buffer_impl(filename: impl AsRef<Path>, new_one: bool) -> bool {
     if filename_given {
         if let Ok(info) = path_info(&realname) {
             if info.is_dir {
-                statusline(MessageType::Alert, &format!("\"{}\" is a directory", realname_str));
+                statusline(
+                    MessageType::Alert,
+                    &format!("\"{}\" is a directory", realname_str),
+                );
                 return false;
             }
             // Check for block/char device and FIFO (requires libc)
             if info.is_special {
-                statusline(MessageType::Alert, &format!("\"{}\" is a device file", realname_str));
+                statusline(
+                    MessageType::Alert,
+                    &format!("\"{}\" is a device file", realname_str),
+                );
                 return false;
             }
             #[cfg(feature = "tiny")]
             if info.is_fifo {
-                statusline(MessageType::Alert, &format!("\"{}\" is a FIFO", realname_str));
+                statusline(
+                    MessageType::Alert,
+                    &format!("\"{}\" is a FIFO", realname_str),
+                );
                 return false;
             }
             #[cfg(all(not(feature = "tiny"), unix))]
             {
                 let euid = unsafe { libc::geteuid() };
                 if new_one && (info.mode & 0o222) == 0 && euid == ROOT_UID {
-                    statusline(MessageType::Alert,
-                        &format!("{} is meant to be read-only", realname_str));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("{} is meant to be read-only", realname_str),
+                    );
                 }
             }
         }
@@ -1629,7 +1821,10 @@ pub fn open_buffer_impl(filename: impl AsRef<Path>, new_one: bool) -> bool {
             #[cfg(not(feature = "tiny"))]
             {
                 let has_stat = with_state(|s| {
-                    s.openfile.as_ref().map(|of| of.statinfo.is_some()).unwrap_or(false)
+                    s.openfile
+                        .as_ref()
+                        .map(|of| of.statinfo.is_some())
+                        .unwrap_or(false)
                 });
                 if !has_stat {
                     let st = stat_with_alloc(&realname);
@@ -1689,7 +1884,9 @@ pub fn set_modified() {
     {
         let (mut lock_file, lock_path, buf_path) = with_state_mut(|s| {
             if let Some(ref mut of) = s.openfile {
-                let lock_path = of.lock_path.clone()
+                let lock_path = of
+                    .lock_path
+                    .clone()
                     .or_else(|| of.lock_filename.as_deref().map(PathBuf::from));
                 let buf_path = match openfile_filename_path(of) {
                     Some(path) => path.to_path_buf(),
@@ -1701,9 +1898,7 @@ pub fn set_modified() {
             }
         });
         let keep_lock = match (lock_file.as_mut(), lock_path.as_deref()) {
-            (Some(file), Some(path)) => {
-                write_lockfile(file, path, &buf_path, true)
-            }
+            (Some(file), Some(path)) => write_lockfile(file, path, &buf_path, true),
             (None, None) => true,
             _ => false,
         };
@@ -1736,7 +1931,8 @@ pub fn prepare_for_display() {
     #[cfg(feature = "color")]
     {
         let needs_precalc = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.filetop.as_ref())
                 .map(|ft| ft.borrow().multidata.is_empty())
                 .unwrap_or(false)
@@ -1760,7 +1956,9 @@ pub fn mention_name_and_linecount() {
     let (count, filename) = with_state(|s| {
         if let Some(ref of) = s.openfile {
             let bot_lineno = of.filebot.as_ref().map(|b| b.borrow().lineno).unwrap_or(0);
-            let bot_empty = of.filebot.as_ref()
+            let bot_empty = of
+                .filebot
+                .as_ref()
                 .map(|b| b.borrow().data.is_empty())
                 .unwrap_or(true);
             let count = bot_lineno - (if bot_empty { 1 } else { 0 });
@@ -1782,21 +1980,37 @@ pub fn mention_name_and_linecount() {
             return;
         }
         let fmt = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.fmt).unwrap_or(FormatType::Unspecified)
+            s.openfile
+                .as_ref()
+                .map(|of| of.fmt)
+                .unwrap_or(FormatType::Unspecified)
         });
-        if fmt == FormatType::DosFile {
-            let name = if filename.is_empty() { "New Buffer" } else { &filename };
-            let msg = if count == 1 {
-                format!("{} -- {} line ({})", name, count, "DOS")
+        if fmt == FormatType::DosFile || fmt == FormatType::MacFile {
+            let name = if filename.is_empty() {
+                "New Buffer"
             } else {
-                format!("{} -- {} lines ({})", name, count, "DOS")
+                &filename
+            };
+            let format_name = if fmt == FormatType::DosFile {
+                "DOS"
+            } else {
+                "Mac"
+            };
+            let msg = if count == 1 {
+                format!("{} -- {} line ({})", name, count, format_name)
+            } else {
+                format!("{} -- {} lines ({})", name, count, format_name)
             };
             statusline(MessageType::Hush, &msg);
             return;
         }
     }
 
-    let name = if filename.is_empty() { "New Buffer" } else { &filename };
+    let name = if filename.is_empty() {
+        "New Buffer"
+    } else {
+        &filename
+    };
     let msg = if count == 1 {
         format!("{} -- {} line", name, count)
     } else {
@@ -1886,7 +2100,10 @@ pub fn rotate_to_buffer_named(name: &str) -> bool {
     let total = with_state(|s| s.buffer_ring.len() + usize::from(s.openfile.is_some()));
     for _ in 0..total {
         let matches = with_state(|s| {
-            s.openfile.as_ref().map(|f| f.filename == name).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|f| f.filename == name)
+                .unwrap_or(false)
         });
         if matches {
             return true;
@@ -1926,24 +2143,99 @@ pub fn close_buffer_impl() {
 // encode_data — encode NUL bytes in a buffer as LF bytes
 // C: char *encode_data(char *text, size_t length)
 // ---------------------------------------------------------------------------
-pub fn encode_data(buf: &[u8]) -> (String, bool) {
-    // Fast path: the overwhelmingly common case is a line with no NUL bytes, so
-    // skip the recode allocation entirely and validate the slice in place.
-    if !buf.contains(&0) {
-        return match std::str::from_utf8(buf) {
-            Ok(s) => (s.to_owned(), false),
-            Err(_) => (String::from_utf8_lossy(buf).into_owned(), true),
-        };
+pub fn encode_data(buf: &[u8]) -> LineData {
+    LineData::from_external(buf)
+}
+
+/// Detect the file's format from its first line separator, as historical GNU
+/// nano did while supporting classic-Mac files.  A CR followed by LF is DOS;
+/// a standalone CR is Mac; and a bare LF is Unix.  With conversion disabled,
+/// only LF is structural and CR remains document data.
+fn detect_format(content: &[u8], convert: bool) -> FormatType {
+    if !convert {
+        return FormatType::NixFile;
     }
-    // NUL present: replace NUL bytes with LF (0x0A) as in C's recode_NUL_to_LF,
-    // then decode (lossily, matching the previous behaviour exactly).
-    let recoded: Vec<u8> = buf.iter().map(|&b| if b == 0 { b'\n' } else { b }).collect();
-    match String::from_utf8(recoded) {
-        Ok(s) => (s, false),
-        Err(e) => {
-            let bytes = e.into_bytes();
-            (String::from_utf8_lossy(&bytes).into_owned(), true)
+
+    let mut index = 0;
+    while index < content.len() {
+        match content[index] {
+            b'\r' => {
+                if content.get(index + 1) == Some(&b'\n') {
+                    return FormatType::DosFile;
+                }
+                return FormatType::MacFile;
+            }
+            b'\n' => return FormatType::NixFile,
+            _ => index += 1,
         }
+    }
+
+    FormatType::NixFile
+}
+
+/// Split external bytes into nano lines while preserving every non-separator
+/// byte.  The returned count follows GNU nano: an empty final magic line is not
+/// counted, while a non-terminated final line is.
+fn decode_file_data(content: &[u8], convert: bool) -> (Vec<LineData>, FormatType, usize) {
+    let format = detect_format(content, convert);
+
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    let mut count = 0usize;
+
+    while index < content.len() {
+        let separator_len = if format == FormatType::MacFile && convert {
+            match content[index] {
+                b'\r' if content.get(index + 1) == Some(&b'\n') => 2,
+                b'\r' | b'\n' => 1,
+                _ => 0,
+            }
+        } else if content[index] == b'\n' {
+            1
+        } else {
+            0
+        };
+
+        if separator_len == 0 {
+            index += 1;
+            continue;
+        }
+
+        let mut end = index;
+        if convert && format != FormatType::MacFile && end > start && content[end - 1] == b'\r' {
+            // GNU nano strips CR before every LF once conversion is enabled;
+            // only the first separator determines the format retained on save.
+            end -= 1;
+        }
+        lines.push(encode_data(&content[start..end]));
+        count += 1;
+        index += separator_len;
+        start = index;
+    }
+
+    if start == content.len() {
+        lines.push(LineData::empty());
+    } else if convert && format != FormatType::MacFile && content.last() == Some(&b'\r') {
+        // Historical GNU nano treats a final standalone CR as a line ending,
+        // even when an earlier separator selected Unix or DOS output format.
+        lines.push(encode_data(&content[start..content.len() - 1]));
+        lines.push(LineData::empty());
+        count += 1;
+    } else {
+        lines.push(encode_data(&content[start..]));
+        count += 1;
+    }
+
+    (lines, format, count)
+}
+
+#[inline]
+fn separator_for_format(format: FormatType) -> &'static [u8] {
+    match format {
+        FormatType::DosFile => b"\r\n",
+        FormatType::MacFile => b"\r",
+        _ => b"\n",
     }
 }
 
@@ -1985,7 +2277,8 @@ pub fn read_file_impl<R: Read>(
 ) -> bool {
     let filename = filename.as_ref();
     let was_lineno = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|of| of.current.as_ref())
             .map(|c| c.borrow().lineno)
             .unwrap_or(1)
@@ -1995,21 +2288,21 @@ pub fn read_file_impl<R: Read>(
     #[cfg(not(feature = "tiny"))]
     {
         was_leftedge = if ISSET!(SOFTWRAP) {
-            let cur = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.current.clone())
-            });
+            let cur = with_state(|s| s.openfile.as_ref().and_then(|of| of.current.clone()));
             leftedge_for(xplustabs(), cur.as_ref())
         } else {
             0
         };
     }
     #[cfg(feature = "tiny")]
-    { was_leftedge = 0; }
+    {
+        was_leftedge = 0;
+    }
 
     let topline = make_new_node(None);
     topline.borrow_mut().lineno = 1;
     let mut bottomline = topline.clone();
-    let mut num_lines: usize = 0;
+    let num_lines: usize;
 
     let mut error_occurred = false;
     let mut error_msg = String::new();
@@ -2017,26 +2310,19 @@ pub fn read_file_impl<R: Read>(
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(true);
 
-    crate::nano::CONTROL_C_WAS_PRESSED.store(
-        false,
-        std::sync::atomic::Ordering::SeqCst,
-    );
+    crate::nano::CONTROL_C_WAS_PRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
 
     // Read in bounded chunks so a SIGINT interruption is observed between
     // reads.  The signal handler publishes only to the atomic flag.
-    let (content, interrupted) = match read_until_cancelled(
-        &mut f,
-        &crate::nano::CONTROL_C_WAS_PRESSED,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            error_occurred = true;
-            error_msg = error.to_string();
-            (Vec::new(), false)
-        }
-    };
-    let mut had_invalid_utf8 = false;
-
+    let (content, interrupted) =
+        match read_until_cancelled(&mut f, &crate::nano::CONTROL_C_WAS_PRESSED) {
+            Ok(result) => result,
+            Err(error) => {
+                error_occurred = true;
+                error_msg = error.to_string();
+                (Vec::new(), false)
+            }
+        };
     #[cfg(not(feature = "tiny"))]
     block_sigwinch(false);
 
@@ -2071,8 +2357,7 @@ pub fn read_file_impl<R: Read>(
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            let cname = std::ffi::CString::new(filename.as_os_str().as_bytes())
-                .unwrap_or_default();
+            let cname = std::ffi::CString::new(filename.as_os_str().as_bytes()).unwrap_or_default();
             let access_ret = unsafe { libc::access(cname.as_ptr(), libc::W_OK) };
             access_ret == 0
         }
@@ -2084,56 +2369,26 @@ pub fn read_file_impl<R: Read>(
         true
     };
 
-    // Parse the content into lines. Walk newline-to-newline over slices of the
-    // already-read buffer instead of copying byte-by-byte into a scratch Vec; the
-    // newline search auto-vectorizes and each line is sliced, not re-copied.
-    #[cfg(not(feature = "tiny"))]
-    let mut format = FormatType::NixFile;
-
     // Pre-size the line arena from the file length so the slab Vec doesn't have to
     // grow-and-memcpy repeatedly while reading (avg line ~48 bytes incl. newline).
     state_mut().lines.reserve(content.len() / 48 + 8);
 
-    let mut start = 0usize;
-    while start < content.len() {
-        let nl = match content[start..].iter().position(|&b| b == b'\n') {
-            Some(rel) => start + rel,
-            None => break, // no further newline; trailing bytes handled below
-        };
-        let mut line: &[u8] = &content[start..nl];
-        #[cfg(not(feature = "tiny"))]
-        {
-            // Strip a CR immediately before the LF (DOS line ending).
-            if line.last() == Some(&b'\r') && !ISSET!(NO_CONVERT) {
-                if num_lines == 0 {
-                    format = FormatType::DosFile;
-                }
-                line = &line[..line.len() - 1];
-            }
+    #[cfg(not(feature = "tiny"))]
+    let convert = !ISSET!(NO_CONVERT);
+    #[cfg(feature = "tiny")]
+    let convert = false;
+
+    let (decoded_lines, format, decoded_count) = decode_file_data(&content, convert);
+    num_lines = decoded_count;
+    let line_count = decoded_lines.len();
+    for (index, data) in decoded_lines.into_iter().enumerate() {
+        bottomline.borrow_mut().data = data;
+        if index + 1 < line_count {
+            let newline = make_new_node(Some(bottomline.clone()));
+            newline.borrow_mut().lineno = (index + 2) as isize;
+            bottomline.borrow_mut().next = Some(newline.clone());
+            bottomline = newline;
         }
-        let (data, invalid_utf8) = encode_data(line);
-        had_invalid_utf8 |= invalid_utf8;
-        bottomline.borrow_mut().data = data;
-
-        // Make a new node for the next line.
-        let newline = make_new_node(Some(bottomline.clone()));
-        newline.borrow_mut().lineno = (num_lines + 2) as isize;
-        bottomline.borrow_mut().next = Some(newline.clone());
-        bottomline = newline;
-        num_lines += 1;
-        start = nl + 1;
-    }
-
-    // Handle the final segment after the last newline (may be empty when the file
-    // ends in '\n').
-    let tail: &[u8] = &content[start..];
-    if tail.is_empty() {
-        bottomline.borrow_mut().data = String::new();
-    } else {
-        let (data, invalid_utf8) = encode_data(tail);
-        had_invalid_utf8 |= invalid_utf8;
-        bottomline.borrow_mut().data = data;
-        num_lines += 1;
     }
 
     // Capture the undo origin only after the complete input is available; a
@@ -2151,13 +2406,14 @@ pub fn read_file_impl<R: Read>(
     with_state_mut(|s| {
         if let Some(ref mut of) = s.openfile {
             of.placewewant = xpt;
-            of.had_invalid_utf8 |= had_invalid_utf8;
         }
     });
 
     if !writable {
-        statusline(MessageType::Alert,
-            &format!("File '{}' is unwritable", printable_path(filename)));
+        statusline(
+            MessageType::Alert,
+            &format!("File '{}' is unwritable", printable_path(filename)),
+        );
     } else {
         let zero = ISSET!(ZERO);
         let minibar = ISSET!(MINIBAR);
@@ -2166,7 +2422,14 @@ pub fn read_file_impl<R: Read>(
             // No blurb for new buffers with --zero or --mini
         } else {
             #[cfg(not(feature = "tiny"))]
-            if format == FormatType::DosFile {
+            if format == FormatType::MacFile {
+                let msg = if num_lines == 1 {
+                    format!("Read {} line (converted from Mac format)", num_lines)
+                } else {
+                    format!("Read {} lines (converted from Mac format)", num_lines)
+                };
+                statusline(MessageType::Remark, &msg);
+            } else if format == FormatType::DosFile {
                 let msg = if num_lines == 1 {
                     format!("Read {} line (converted from DOS format)", num_lines)
                 } else {
@@ -2194,12 +2457,6 @@ pub fn read_file_impl<R: Read>(
     }
 
     state_mut().report_size = true;
-    if had_invalid_utf8 {
-        statusline(
-            MessageType::Alert,
-            "File contains invalid UTF-8; normal save is disabled",
-        );
-    }
 
     // If we inserted less than a screenful, don't center the cursor.
     if undoable && less_than_a_screenful(was_lineno, was_leftedge) {
@@ -2270,15 +2527,19 @@ pub fn open_file_impl(filename: &Path, new_one: bool, out_file: &mut Option<File
                 statusline(MessageType::Remark, "New File");
                 0
             } else if err_kind == io::ErrorKind::NotFound {
-                statusline(MessageType::Alert,
-                    &format!("File \"{}\" not found", printable_path(filename)));
+                statusline(
+                    MessageType::Alert,
+                    &format!("File \"{}\" not found", printable_path(filename)),
+                );
                 -1
             } else if err_kind == io::ErrorKind::Interrupted {
                 statusline(MessageType::Alert, "Interrupted");
                 -1
             } else {
-                statusline(MessageType::Alert,
-                    &format!("Error reading {}: {}", printable_path(filename), e));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error reading {}: {}", printable_path(filename), e),
+                );
                 -1
             }
         }
@@ -2298,7 +2559,7 @@ pub fn open_file_impl(filename: &Path, new_one: bool, out_file: &mut Option<File
 
             // Store file handle; we use fd 1 to signal success (actual fd varies)
             *out_file = Some(f);
-            1  // signal success; caller uses the file handle
+            1 // signal success; caller uses the file handle
         }
     }
 }
@@ -2307,26 +2568,36 @@ pub fn open_file_impl(filename: &Path, new_one: bool, out_file: &mut Option<File
 // get_next_filename — return the first available extension of a filename
 // C: char *get_next_filename(const char *name, const char *suffix)
 // ---------------------------------------------------------------------------
-pub fn get_next_filename(name: &str, suffix: &str) -> String {
-    let base = format!("{}{}", name, suffix);
+pub fn get_next_filename_path(name: impl AsRef<Path>, suffix: &str) -> PathBuf {
+    let mut base_name = name.as_ref().as_os_str().to_os_string();
+    base_name.push(suffix);
+    let base = PathBuf::from(base_name);
 
-    match path_exists_nofollow(Path::new(&base)) {
+    match path_exists_nofollow(&base) {
         Ok(false) => return base,
         Ok(true) => {}
-        Err(_) => return String::new(),
+        Err(_) => return PathBuf::new(),
     }
 
     for i in 1u64..100_000 {
-        let candidate = format!("{}.{}", base, i);
-        match path_exists_nofollow(Path::new(&candidate)) {
+        let mut candidate_name = base.as_os_str().to_os_string();
+        candidate_name.push(format!(".{i}"));
+        let candidate = PathBuf::from(candidate_name);
+        match path_exists_nofollow(&candidate) {
             Ok(false) => return candidate,
             Ok(true) => {}
-            Err(_) => return String::new(),
+            Err(_) => return PathBuf::new(),
         }
     }
 
-    // No possible save file
-    String::new()
+    PathBuf::new()
+}
+
+pub fn get_next_filename(name: &str, suffix: &str) -> String {
+    get_next_filename_path(name, suffix)
+        .into_os_string()
+        .into_string()
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -2440,7 +2711,9 @@ pub fn cancel_the_command(_signal: i32) {
             }
         }
         if piping && pid_snd > 0 {
-            unsafe { libc::kill(pid_snd, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid_snd, libc::SIGKILL);
+            }
         }
     }
     #[cfg(not(unix))]
@@ -2495,7 +2768,7 @@ pub fn send_data(line: Option<LinePtr>, fd: i32) {
             }
 
             // Recode LF as NUL before writing
-            let recoded: Vec<u8> = data.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+            let recoded: Vec<u8> = data.external_bytes().collect();
             if tube.write_all(&recoded).is_err() {
                 std::process::exit(5);
             }
@@ -2518,8 +2791,11 @@ pub fn send_data(line: Option<LinePtr>, fd: i32) {
 }
 
 #[cfg(not(feature = "tiny"))]
-fn append_pipe_text(output: &mut Vec<u8>, text: &str) {
-    output.extend(text.bytes().map(|byte| if byte == b'\n' { 0 } else { byte }));
+fn append_pipe_text(output: &mut Vec<u8>, text: &[u8]) {
+    output.extend(
+        text.iter()
+            .map(|&byte| if byte == b'\n' { 0 } else { byte }),
+    );
 }
 
 #[cfg(not(feature = "tiny"))]
@@ -2603,11 +2879,11 @@ fn send_snapshot(data: &[u8], fd: i32) -> ! {
 pub fn execute_command(command: &str) {
     #[cfg(unix)]
     {
-        
         use std::os::unix::io::{AsRawFd, FromRawFd};
 
         let should_pipe = command.starts_with('|');
-        let capture_output = !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
+        let capture_output =
+            !(should_pipe && command.len() > 1 && command.chars().nth(1) == Some('|'));
         let filter_mode = should_pipe && capture_output;
 
         SHOULD_PIPE.store(should_pipe, Ordering::SeqCst);
@@ -2616,16 +2892,21 @@ pub fn execute_command(command: &str) {
 
         // The actual command string passed to the shell
         let cmd_str = if should_pipe {
-            if capture_output { &command[1..] } else { &command[2..] }
+            if capture_output {
+                &command[1..]
+            } else {
+                &command[2..]
+            }
         } else {
             command
         };
-        let input_was_marked = should_pipe && with_state(|s| {
-            s.openfile
-                .as_ref()
-                .and_then(|buffer| buffer.mark.as_ref())
-                .is_some()
-        });
+        let input_was_marked = should_pipe
+            && with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .and_then(|buffer| buffer.mark.as_ref())
+                    .is_some()
+            });
         let command_input = if should_pipe {
             Some(command_input_snapshot())
         } else {
@@ -2638,8 +2919,10 @@ pub fn execute_command(command: &str) {
             match tempfile::NamedTempFile::new() {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    statusline(MessageType::Alert,
-                        &format!("Could not create filter output: {}", error));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("Could not create filter output: {}", error),
+                    );
                     return;
                 }
             }
@@ -2650,8 +2933,10 @@ pub fn execute_command(command: &str) {
             match tempfile::NamedTempFile::new() {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    statusline(MessageType::Alert,
-                        &format!("Could not create filter diagnostics: {}", error));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("Could not create filter diagnostics: {}", error),
+                    );
                     return;
                 }
             }
@@ -2665,8 +2950,10 @@ pub fn execute_command(command: &str) {
         } else {
             let mut fds = [0i32; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-                statusline(MessageType::Alert,
-                    &format!("Could not create pipe: {}", io::Error::last_os_error()));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not create pipe: {}", io::Error::last_os_error()),
+                );
                 return;
             }
             (fds[0], fds[1])
@@ -2676,10 +2963,15 @@ pub fn execute_command(command: &str) {
         let (to_read_fd, to_write_fd) = if should_pipe {
             let mut fds = [0i32; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-                statusline(MessageType::Alert,
-                    &format!("Could not create pipe: {}", io::Error::last_os_error()));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not create pipe: {}", io::Error::last_os_error()),
+                );
                 if !filter_mode {
-                    unsafe { libc::close(from_read_fd); libc::close(from_write_fd); }
+                    unsafe {
+                        libc::close(from_read_fd);
+                        libc::close(from_write_fd);
+                    }
                 }
                 return;
             }
@@ -2692,8 +2984,10 @@ pub fn execute_command(command: &str) {
         let mut session = match CommandSession::start(!capture_output) {
             Ok(session) => session,
             Err(error) => {
-                statusline(MessageType::Alert,
-                    &format!("Could not prepare command session: {}", error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not prepare command session: {}", error),
+                );
                 unsafe {
                     if !filter_mode {
                         libc::close(from_read_fd);
@@ -2742,8 +3036,7 @@ pub fn execute_command(command: &str) {
                 }
 
                 let shell_cstr = std::ffi::CString::new(shell.as_str()).unwrap();
-                let shell_tail = std::ffi::CString::new(
-                    crate::utils::tail(&shell)).unwrap();
+                let shell_tail = std::ffi::CString::new(crate::utils::tail(&shell)).unwrap();
                 let minus_c = std::ffi::CString::new("-c").unwrap();
                 let cmd_cstr = std::ffi::CString::new(cmd_str).unwrap();
 
@@ -2760,17 +3053,26 @@ pub fn execute_command(command: &str) {
 
         // Parent
         if !filter_mode {
-            unsafe { libc::close(from_write_fd); }
+            unsafe {
+                libc::close(from_write_fd);
+            }
         }
 
         if pid < 0 {
-            statusline(MessageType::Alert,
-                &format!("Could not fork: {}", io::Error::last_os_error()));
+            statusline(
+                MessageType::Alert,
+                &format!("Could not fork: {}", io::Error::last_os_error()),
+            );
             if !filter_mode {
-                unsafe { libc::close(from_read_fd); }
+                unsafe {
+                    libc::close(from_read_fd);
+                }
             }
             if should_pipe {
-                unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
+                unsafe {
+                    libc::close(to_read_fd);
+                    libc::close(to_write_fd);
+                }
             }
             return;
         }
@@ -2796,14 +3098,19 @@ pub fn execute_command(command: &str) {
             }
 
             if pid_sender < 0 {
-                statusline(MessageType::Alert,
-                    &format!("Could not fork: {}", io::Error::last_os_error()));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not fork: {}", io::Error::last_os_error()),
+                );
             }
 
             if pid_sender > 0 {
                 PID_OF_SENDER.store(pid_sender, Ordering::SeqCst);
             }
-            unsafe { libc::close(to_read_fd); libc::close(to_write_fd); }
+            unsafe {
+                libc::close(to_read_fd);
+                libc::close(to_write_fd);
+            }
         } else {
             pid_sender = -1;
         }
@@ -2821,7 +3128,10 @@ pub fn execute_command(command: &str) {
         let (command_status, command_waited) = match wait_for_command(pid) {
             Ok(status) => (status, true),
             Err(error) => {
-                statusline(MessageType::Alert, &format!("Could not wait for command: {}", error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not wait for command: {}", error),
+                );
                 (0, false)
             }
         };
@@ -2863,27 +3173,35 @@ pub fn execute_command(command: &str) {
                     let mut bytes = Vec::new();
                     if let Some(diagnostics) = filter_stderr.as_mut() {
                         let _ = diagnostics.as_file_mut().seek(SeekFrom::Start(0));
-                        let _ = diagnostics.as_file_mut().take(16 * 1024).read_to_end(&mut bytes);
+                        let _ = diagnostics
+                            .as_file_mut()
+                            .take(16 * 1024)
+                            .read_to_end(&mut bytes);
                     }
                     let text = String::from_utf8_lossy(&bytes);
                     text.lines().next().unwrap_or("---").to_string()
                 } else {
                     // Try to extract an error message from the inserted output.
                     with_state(|s| {
-                        s.openfile.as_ref()
+                        s.openfile
+                            .as_ref()
                             .and_then(|of| of.current.as_ref())
                             .and_then(|c| {
                                 let b = c.borrow();
-                                b.prev.as_ref()
-                                    .and_then(|pw| pw.upgrade())
-                                    .map(|prev| {
-                                        let pb = prev.borrow();
-                                        if let Some(pos) = pb.data.find(": ") {
-                                            pb.data[pos + 2..].to_string()
-                                        } else {
-                                            "---".to_string()
-                                        }
-                                    })
+                                b.prev.as_ref().and_then(|pw| pw.upgrade()).map(|prev| {
+                                    let pb = prev.borrow();
+                                    if let Some(pos) = pb
+                                        .data
+                                        .as_bytes()
+                                        .windows(2)
+                                        .position(|window| window == b": ")
+                                    {
+                                        String::from_utf8_lossy(&pb.data.as_bytes()[pos + 2..])
+                                            .into_owned()
+                                    } else {
+                                        "---".to_string()
+                                    }
+                                })
                             })
                             .unwrap_or_else(|| "---".to_string())
                     })
@@ -2899,7 +3217,10 @@ pub fn execute_command(command: &str) {
                 .flush()
                 .and_then(|_| output.as_file().sync_all());
             if let Err(error) = staged_ok {
-                statusline(MessageType::Alert, &format!("Could not sync filter output: {}", error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Could not sync filter output: {}", error),
+                );
             } else {
                 let output_path = output.path().to_string_lossy().into_owned();
                 let action = if input_was_marked {
@@ -2921,14 +3242,20 @@ pub fn execute_command(command: &str) {
         if output_was_ingrafted && last_msg == MessageType::Alert {
             do_undo();
             let current_undo = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.current_undo).unwrap_or(std::ptr::null_mut())
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.current_undo)
+                    .unwrap_or(std::ptr::null_mut())
             });
             discard_until(current_undo);
         }
     }
     #[cfg(not(unix))]
     {
-        statusline(MessageType::Alert, "Command execution not supported on this platform");
+        statusline(
+            MessageType::Alert,
+            "Command execution not supported on this platform",
+        );
     }
 }
 
@@ -2969,7 +3296,9 @@ pub fn insert_a_file_or(execute: bool) {
                 msg = "Command to execute";
             }
             #[cfg(not(feature = "multibuffer"))]
-            { msg = "Command to execute"; }
+            {
+                msg = "Command to execute";
+            }
         } else {
             #[cfg(feature = "multibuffer")]
             if ISSET!(MULTIBUFFER) {
@@ -2980,7 +3309,9 @@ pub fn insert_a_file_or(execute: bool) {
                     msg = "File to read into new buffer [from %s]";
                 }
                 #[cfg(feature = "tiny")]
-                { msg = "File to read into new buffer [from %s]"; }
+                {
+                    msg = "File to read into new buffer [from %s]";
+                }
             } else {
                 #[cfg(not(feature = "tiny"))]
                 if ISSET!(NO_CONVERT) {
@@ -2989,7 +3320,9 @@ pub fn insert_a_file_or(execute: bool) {
                     msg = "File to insert [from %s]";
                 }
                 #[cfg(feature = "tiny")]
-                { msg = "File to insert [from %s]"; }
+                {
+                    msg = "File to insert [from %s]";
+                }
             }
             #[cfg(not(feature = "multibuffer"))]
             {
@@ -3000,27 +3333,39 @@ pub fn insert_a_file_or(execute: bool) {
                     msg = "File to insert [from %s]";
                 }
                 #[cfg(feature = "tiny")]
-                { msg = "File to insert [from %s]"; }
+                {
+                    msg = "File to insert [from %s]";
+                }
             }
         }
         #[cfg(feature = "tiny")]
-        { msg = "File to insert [from %s]"; }
+        {
+            msg = "File to insert [from %s]";
+        }
 
         state_mut().present_path = Some("./".to_string());
 
         let menu = if execute { MEXECUTE } else { MINSERTFILE };
         let operating_dir_str = with_state(|s| {
             #[cfg(feature = "operatingdir")]
-            { s.operating_dir.clone() }
+            {
+                s.operating_dir.clone()
+            }
             #[cfg(not(feature = "operatingdir"))]
-            { None::<String> }
+            {
+                None::<String>
+            }
         });
 
         let prompt_default = operating_dir_str.as_deref().unwrap_or("./");
         response = do_prompt(
             menu,
             &given,
-            if execute { Some(crate::history::HistoryKind::Execute) } else { None },
+            if execute {
+                Some(crate::history::HistoryKind::Execute)
+            } else {
+                None
+            },
             edit_refresh,
             msg,
             prompt_default,
@@ -3035,14 +3380,13 @@ pub fn insert_a_file_or(execute: bool) {
         }
 
         let was_lineno = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|of| of.current.as_ref())
                 .map(|c| c.borrow().lineno)
                 .unwrap_or(0)
         });
-        let was_x = with_state(|s| {
-            s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
-        });
+        let was_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
 
         let answer = state().answer.clone();
         given = answer.clone();
@@ -3149,14 +3493,13 @@ pub fn insert_a_file_or(execute: bool) {
             prepare_for_display();
         } else {
             let cur_lineno = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| of.current.as_ref())
                     .map(|c| c.borrow().lineno)
                     .unwrap_or(0)
             });
-            let cur_x = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0)
-            });
+            let cur_x = with_state(|s| s.openfile.as_ref().map(|of| of.current_x).unwrap_or(0));
             if cur_lineno != was_lineno || cur_x != was_x {
                 set_modified();
             }
@@ -3167,7 +3510,11 @@ pub fn insert_a_file_or(execute: bool) {
     }
 
     #[cfg(feature = "multibuffer")]
-    if was_multibuffer { SET!(MULTIBUFFER); } else { UNSET!(MULTIBUFFER); }
+    if was_multibuffer {
+        SET!(MULTIBUFFER);
+    } else {
+        UNSET!(MULTIBUFFER);
+    }
 }
 
 /* C: void do_insertfile(void)
@@ -3233,9 +3580,7 @@ pub fn get_full_path_buf(origpath: &Path) -> Option<PathBuf> {
             }
 
             match std::fs::canonicalize(parent) {
-                Ok(canonical_parent) => {
-                    Some(canonical_parent.join(filename))
-                }
+                Ok(canonical_parent) => Some(canonical_parent.join(filename)),
                 Err(_) => None,
             }
         }
@@ -3245,10 +3590,7 @@ pub fn get_full_path_buf(origpath: &Path) -> Option<PathBuf> {
 pub fn get_full_path(origpath: &str) -> Option<String> {
     let full = get_full_path_buf(Path::new(origpath))?;
     let mut display = printable_path(&full);
-    if full.is_dir()
-        && full.parent().is_some()
-        && !display.ends_with(std::path::MAIN_SEPARATOR)
-    {
+    if full.is_dir() && full.parent().is_some() && !display.ends_with(std::path::MAIN_SEPARATOR) {
         display.push(std::path::MAIN_SEPARATOR);
     }
     Some(display)
@@ -3341,16 +3683,14 @@ pub fn init_operating_dir() {
             // set_current_dir even if its old name is immediately replaced.
             // Retain that exact object as the capability root, rather than
             // reopening the attacker-mutable pathname a second time.
-            let directory = match cap_std::fs::Dir::open_ambient_dir(
-                ".",
-                cap_std::ambient_authority(),
-            ) {
-                Ok(directory) => directory,
-                Err(_) => {
-                    eprintln!("Invalid operating directory: {}", od);
-                    std::process::exit(1);
-                }
-            };
+            let directory =
+                match cap_std::fs::Dir::open_ambient_dir(".", cap_std::ambient_authority()) {
+                    Ok(directory) => directory,
+                    Err(_) => {
+                        eprintln!("Invalid operating directory: {}", od);
+                        std::process::exit(1);
+                    }
+                };
             let display_path = PathBuf::from(&t);
             OPERATING_ROOT.with(|slot| {
                 *slot.borrow_mut() = Some(OperatingRoot {
@@ -3441,11 +3781,17 @@ pub fn copy_file(mut inn: File, mut out: File, close_out: bool) -> i32 {
         let n = match inn.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(_) => { retval = -1; break; }
+            Err(_) => {
+                retval = -1;
+                break;
+            }
         };
         match out.write_all(&buf[..n]) {
             Ok(_) => {}
-            Err(_) => { retval = 2; break; }
+            Err(_) => {
+                retval = 2;
+                break;
+            }
         }
     }
 
@@ -3453,16 +3799,22 @@ pub fn copy_file(mut inn: File, mut out: File, close_out: bool) -> i32 {
     drop(inn);
 
     if retval != 0 {
-        if !close_out { let _ = out.flush(); }
+        if !close_out {
+            let _ = out.flush();
+        }
         drop(out);
         return retval;
     }
 
     if close_out {
-        if out.flush().is_err() { retval = 4; }
+        if out.flush().is_err() {
+            retval = 4;
+        }
         drop(out);
     } else {
-        if out.flush().is_err() { retval = 4; }
+        if out.flush().is_err() {
+            retval = 4;
+        }
     }
 
     retval
@@ -3511,8 +3863,7 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
         PathBuf::from(name)
     } else {
         let bd = backup_dir.as_ref().unwrap();
-        let source_path = get_full_path_buf(realname)
-            .unwrap_or_else(|| realname.to_path_buf());
+        let source_path = get_full_path_buf(realname).unwrap_or_else(|| realname.to_path_buf());
         // backup_path_key hex-encodes the path bytes, so the result is plain
         // ASCII and safe to handle as a string.
         let thename = backup_path_key(&source_path);
@@ -3528,10 +3879,17 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
     let fail = |reason: &str| {
         warn_and_briefly_pause("Cannot make backup");
         warn_and_briefly_pause(reason);
-        if ask_user(YESORNO, "Cannot make backup; continue and save actual file? ") == YES {
+        if ask_user(
+            YESORNO,
+            "Cannot make backup; continue and save actual file? ",
+        ) == YES
+        {
             true
         } else {
-            statusline(MessageType::Hush, &format!("Cannot make backup: {}", reason));
+            statusline(
+                MessageType::Hush,
+                &format!("Cannot make backup: {}", reason),
+            );
             false
         }
     };
@@ -3560,19 +3918,34 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
         let fd = staging.as_file().as_raw_fd();
         let ownership = unsafe { libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid) };
         if ownership != 0 {
-            return fail(&format!("Cannot preserve backup ownership: {}", io::Error::last_os_error()));
+            return fail(&format!(
+                "Cannot preserve backup ownership: {}",
+                io::Error::last_os_error()
+            ));
         }
         let permissions = unsafe { libc::fchmod(fd, fileinfo.st_mode & 0o7777) };
         if permissions != 0 {
-            return fail(&format!("Cannot preserve backup permissions: {}", io::Error::last_os_error()));
+            return fail(&format!(
+                "Cannot preserve backup permissions: {}",
+                io::Error::last_os_error()
+            ));
         }
 
         let times = [
-            libc::timespec { tv_sec: fileinfo.st_atime, tv_nsec: fileinfo.st_atime_nsec },
-            libc::timespec { tv_sec: fileinfo.st_mtime, tv_nsec: fileinfo.st_mtime_nsec },
+            libc::timespec {
+                tv_sec: fileinfo.st_atime,
+                tv_nsec: fileinfo.st_atime_nsec,
+            },
+            libc::timespec {
+                tv_sec: fileinfo.st_mtime,
+                tv_nsec: fileinfo.st_mtime_nsec,
+            },
         ];
         if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
-            return fail(&format!("Cannot preserve backup timestamps: {}", io::Error::last_os_error()));
+            return fail(&format!(
+                "Cannot preserve backup timestamps: {}",
+                io::Error::last_os_error()
+            ));
         }
     }
 
@@ -3616,28 +3989,16 @@ pub fn write_file(
     #[cfg(feature = "operatingdir")]
     if normal {
         let confined = with_state(|s| {
-            s.operating_dir.as_deref()
+            s.operating_dir
+                .as_deref()
                 .map(|_od| outside_of_confinement_path(&realname, false))
                 .unwrap_or(false)
         });
         if confined {
             let od = state().operating_dir.clone().unwrap_or_default();
-            statusline(MessageType::Alert, &format!("Can't write outside of {}", od));
-            return false;
-        }
-    }
-
-    if normal {
-        let has_lossy_data = with_state(|s| {
-            s.openfile
-                .as_ref()
-                .map(|of| of.had_invalid_utf8)
-                .unwrap_or(false)
-        });
-        if has_lossy_data {
             statusline(
                 MessageType::Alert,
-                "Cannot safely save: buffer contains invalid UTF-8 bytes",
+                &format!("Can't write outside of {}", od),
             );
             return false;
         }
@@ -3654,9 +4015,7 @@ pub fn write_file(
     let mut lineswritten: usize = 0;
 
     #[cfg(not(feature = "tiny"))]
-    let is_existing_file = {
-        normal && path_info(&realname).is_ok()
-    };
+    let is_existing_file = { normal && path_info(&realname).is_ok() };
 
     // Make backup if needed
     #[cfg(not(feature = "tiny"))]
@@ -3683,21 +4042,29 @@ pub fn write_file(
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if is_fifo {
-            statusline(MessageType::Alert, &format!("Error writing {}: FIFO", realname_str));
+            statusline(
+                MessageType::Alert,
+                &format!("Error writing {}: FIFO", realname_str),
+            );
             return false;
         }
 
         let source = match open_path(&realname) {
             Err(e) => {
-                statusline(MessageType::Alert,
-                    &format!("Error reading {}: {}", realname_str, e));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error reading {}: {}", realname_str, e),
+                );
                 return false;
             }
             Ok(f) => f,
         };
         #[cfg(not(unix))]
         {
-            prepend_permissions = source.metadata().ok().map(|metadata| metadata.permissions());
+            prepend_permissions = source
+                .metadata()
+                .ok()
+                .map(|metadata| metadata.permissions());
         }
         #[cfg(unix)]
         {
@@ -3708,7 +4075,10 @@ pub fn write_file(
         prepend_staging = match create_staging_file(parent, ".nano-prepend.") {
             Ok(file) => Some(file),
             Err(error) => {
-                statusline(MessageType::Alert, &format!("Error creating prepend staging file: {}", error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error creating prepend staging file: {}", error),
+                );
                 return false;
             }
         };
@@ -3731,7 +4101,10 @@ pub fn write_file(
         Some(staging) => match staging.as_file().try_clone() {
             Ok(file) => Some(file),
             Err(error) => {
-                statusline(MessageType::Alert, &format!("Error opening prepend staging file: {}", error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error opening prepend staging file: {}", error),
+                );
                 return false;
             }
         },
@@ -3748,7 +4121,9 @@ pub fn write_file(
             #[cfg(not(feature = "tiny"))]
             block_sigwinch(true);
             #[cfg(not(feature = "tiny"))]
-            if normal { install_handler_for_Ctrl_C(); }
+            if normal {
+                install_handler_for_Ctrl_C();
+            }
 
             let open_result = match method {
                 KindOfWritingType::Append => open_path_with(
@@ -3783,7 +4158,9 @@ pub fn write_file(
             };
 
             #[cfg(not(feature = "tiny"))]
-            if normal { restore_handler_for_Ctrl_C(); }
+            if normal {
+                restore_handler_for_Ctrl_C();
+            }
             #[cfg(not(feature = "tiny"))]
             block_sigwinch(false);
 
@@ -3793,8 +4170,10 @@ pub fn write_file(
                     if kind == io::ErrorKind::Interrupted {
                         statusline(MessageType::Alert, "Interrupted");
                     } else {
-                        statusline(MessageType::Alert,
-                            &format!("Error writing {}: {}", realname_str, e));
+                        statusline(
+                            MessageType::Alert,
+                            &format!("Error writing {}: {}", realname_str, e),
+                        );
                     }
                     return false;
                 }
@@ -3818,7 +4197,10 @@ pub fn write_file(
     // The line ending (DOS vs Unix) is loop-invariant — fetch it once.
     #[cfg(not(feature = "tiny"))]
     let fmt = with_state(|s| {
-        s.openfile.as_ref().map(|of| of.fmt).unwrap_or(FormatType::Unspecified)
+        s.openfile
+            .as_ref()
+            .map(|of| of.fmt)
+            .unwrap_or(FormatType::Unspecified)
     });
 
     // Write the buffer line by line
@@ -3839,8 +4221,10 @@ pub fn write_file(
             let nb = node.borrow();
             let bytes = nb.data.as_bytes();
             let res = if bytes.contains(&b'\n') {
-                let recoded: Vec<u8> =
-                    bytes.iter().map(|&b| if b == b'\n' { 0 } else { b }).collect();
+                let recoded: Vec<u8> = bytes
+                    .iter()
+                    .map(|&b| if b == b'\n' { 0 } else { b })
+                    .collect();
                 writer.write_all(&recoded)
             } else {
                 writer.write_all(bytes)
@@ -3850,7 +4234,10 @@ pub fn write_file(
 
         if data_res.is_err() {
             let e = io::Error::last_os_error();
-            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
+            statusline(
+                MessageType::Alert,
+                &format!("Error writing {}: {}", realname_str, e),
+            );
             return false;
         }
 
@@ -3862,19 +4249,17 @@ pub fn write_file(
             break;
         }
 
-        // Write newline (preceded by CR for DOS format)
         #[cfg(not(feature = "tiny"))]
-        if fmt == FormatType::DosFile {
-            if writer.write_all(b"\r").is_err() {
-                let e = io::Error::last_os_error();
-                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
-                return false;
-            }
-        }
+        let separator = separator_for_format(fmt);
+        #[cfg(feature = "tiny")]
+        let separator = b"\n".as_slice();
 
-        if writer.write_all(b"\n").is_err() {
+        if writer.write_all(separator).is_err() {
             let e = io::Error::last_os_error();
-            statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
+            statusline(
+                MessageType::Alert,
+                &format!("Error writing {}: {}", realname_str, e),
+            );
             return false;
         }
 
@@ -3893,15 +4278,19 @@ pub fn write_file(
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) => {
-                        statusline(MessageType::Alert,
-                            &format!("Error reading {}: {}", realname_str, e));
+                        statusline(
+                            MessageType::Alert,
+                            &format!("Error reading {}: {}", realname_str, e),
+                        );
                         return false;
                     }
                 };
                 if writer.write_all(&buf[..n]).is_err() {
                     let e = io::Error::last_os_error();
-                    statusline(MessageType::Alert,
-                        &format!("Error writing {}: {}", realname_str, e));
+                    statusline(
+                        MessageType::Alert,
+                        &format!("Error writing {}: {}", realname_str, e),
+                    );
                     return false;
                 }
             }
@@ -3912,7 +4301,10 @@ pub fn write_file(
     // durability sync below (sync_all is a File method, not on the BufWriter).
     if writer.flush().is_err() {
         let e = io::Error::last_os_error();
-        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
+        statusline(
+            MessageType::Alert,
+            &format!("Error writing {}: {}", realname_str, e),
+        );
         return false;
     }
     drop(writer);
@@ -3926,7 +4318,10 @@ pub fn write_file(
         if !is_fifo {
             if the_file.flush().is_err() || the_file.sync_all().is_err() {
                 let e = io::Error::last_os_error();
-                statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error writing {}: {}", realname_str, e),
+                );
                 drop(the_file);
                 return false;
             }
@@ -3936,7 +4331,10 @@ pub fn write_file(
     // Close the file
     if the_file.flush().is_err() {
         let e = io::Error::last_os_error();
-        statusline(MessageType::Alert, &format!("Error writing {}: {}", realname_str, e));
+        statusline(
+            MessageType::Alert,
+            &format!("Error writing {}: {}", realname_str, e),
+        );
 
         // Check for ENOSPC
         #[cfg(not(feature = "tiny"))]
@@ -3952,8 +4350,10 @@ pub fn write_file(
                 statusline(MessageType::Alert, "File on disk has been truncated!");
                 napms(3200);
                 state_mut().lastmessage = MessageType::Vacuum;
-                statusline(MessageType::Alert,
-                    "Maybe ^T^Z, make room on disk, resume, then ^S^X");
+                statusline(
+                    MessageType::Alert,
+                    "Maybe ^T^Z, make room on disk, resume, then ^S^X",
+                );
                 let st = stat_with_alloc(&realname);
                 with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
@@ -3982,19 +4382,25 @@ pub fn write_file(
             use std::os::unix::io::AsRawFd;
             let fd = staging.as_file().as_raw_fd();
             if unsafe { libc::fchown(fd, info.st_uid, info.st_gid) } != 0 {
-                statusline(MessageType::Alert, &format!(
-                    "Error preserving ownership of {}: {}",
-                    realname_str,
-                    io::Error::last_os_error()
-                ));
+                statusline(
+                    MessageType::Alert,
+                    &format!(
+                        "Error preserving ownership of {}: {}",
+                        realname_str,
+                        io::Error::last_os_error()
+                    ),
+                );
                 return false;
             }
             if unsafe { libc::fchmod(fd, info.st_mode & 0o7777) } != 0 {
-                statusline(MessageType::Alert, &format!(
-                    "Error preserving permissions of {}: {}",
-                    realname_str,
-                    io::Error::last_os_error()
-                ));
+                statusline(
+                    MessageType::Alert,
+                    &format!(
+                        "Error preserving permissions of {}: {}",
+                        realname_str,
+                        io::Error::last_os_error()
+                    ),
+                );
                 return false;
             }
         }
@@ -4002,30 +4408,46 @@ pub fn write_file(
         #[cfg(not(unix))]
         if let Some(permissions) = prepend_permissions.take() {
             if let Err(error) = staging.as_file().set_permissions(permissions) {
-                statusline(MessageType::Alert, &format!(
-                    "Error preserving permissions of {}: {}",
-                    realname_str, error
-                ));
+                statusline(
+                    MessageType::Alert,
+                    &format!(
+                        "Error preserving permissions of {}: {}",
+                        realname_str, error
+                    ),
+                );
                 return false;
             }
         }
 
-        if let Err(error) = staging.as_file_mut().flush().and_then(|_| staging.as_file().sync_all()) {
-            statusline(MessageType::Alert, &format!("Error syncing {}: {}", realname_str, error));
+        if let Err(error) = staging
+            .as_file_mut()
+            .flush()
+            .and_then(|_| staging.as_file().sync_all())
+        {
+            statusline(
+                MessageType::Alert,
+                &format!("Error syncing {}: {}", realname_str, error),
+            );
             return false;
         }
 
         match staging.persist(&realname) {
             Ok(file) => drop(file),
             Err(error) => {
-                statusline(MessageType::Alert, &format!("Error installing {}: {}", realname_str, error));
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error installing {}: {}", realname_str, error),
+                );
                 return false;
             }
         }
 
         #[cfg(unix)]
         if let Err(error) = sync_parent_of(&realname) {
-            statusline(MessageType::Alert, &format!("Error syncing directory for {}: {}", realname_str, error));
+            statusline(
+                MessageType::Alert,
+                &format!("Error syncing directory for {}: {}", realname_str, error),
+            );
             return false;
         }
     }
@@ -4035,12 +4457,13 @@ pub fn write_file(
         // Compare against the authoritative path; fall back to the display
         // string only for buffers that never had a real path recorded.
         let name_changed = with_state(|s| {
-            s.openfile.as_ref().map(|of| {
-                match openfile_filename_path(of) {
+            s.openfile
+                .as_ref()
+                .map(|of| match openfile_filename_path(of) {
                     Some(old_path) => old_path != realname,
                     None => of.filename != realname_str,
-                }
-            }).unwrap_or(true)
+                })
+                .unwrap_or(true)
         });
 
         if name_changed {
@@ -4048,7 +4471,11 @@ pub fn write_file(
             {
                 let (lock_file, lock_fname, lock_path) = with_state_mut(|s| {
                     if let Some(ref mut of) = s.openfile {
-                        (of.lock_file.take(), of.lock_filename.take(), of.lock_path.take())
+                        (
+                            of.lock_file.take(),
+                            of.lock_filename.take(),
+                            of.lock_path.take(),
+                        )
                     } else {
                         (None, None, None)
                     }
@@ -4082,11 +4509,17 @@ pub fn write_file(
             #[cfg(feature = "color")]
             {
                 let was_syntax = with_state(|s| {
-                    s.openfile.as_ref().and_then(|of| of.syntax).map(|p| p as usize)
+                    s.openfile
+                        .as_ref()
+                        .and_then(|of| of.syntax)
+                        .map(|p| p as usize)
                 });
                 find_and_prime_applicable_syntax();
                 let new_syntax = with_state(|s| {
-                    s.openfile.as_ref().and_then(|of| of.syntax).map(|p| p as usize)
+                    s.openfile
+                        .as_ref()
+                        .and_then(|of| of.syntax)
+                        .map(|p| p as usize)
                 });
                 if was_syntax != new_syntax {
                     // Clear multidata and recompute
@@ -4173,7 +4606,7 @@ pub fn write_region_to_file(
     // When needed, prepare a magic end line
     let stopper: Option<LinePtr> = if normal && bot_x > 0 && !ISSET!(NO_NEWLINES) {
         let new_node = make_new_node(botline.clone());
-        new_node.borrow_mut().data = String::new();
+        new_node.borrow_mut().data = LineData::empty();
         if let Some(ref bot) = botline {
             bot.borrow_mut().next = Some(new_node.clone());
         }
@@ -4195,7 +4628,7 @@ pub fn write_region_to_file(
     // Logically truncate botline at bot_x and attach the magic stopper (if any).
     if let Some(ref bot) = botline {
         let mut b = bot.borrow_mut();
-        if bot_x <= b.data.len() && b.data.is_char_boundary(bot_x) {
+        if bot_x <= b.data.len() {
             b.data.truncate(bot_x);
         }
         b.next = stopper.clone();
@@ -4205,9 +4638,9 @@ pub fn write_region_to_file(
     // the truncate above, yielding data[top_x..bot_x] — exactly C's behaviour.
     if let Some(ref top) = topline {
         let mut t = top.borrow_mut();
-        if top_x <= t.data.len() && t.data.is_char_boundary(top_x) {
-            let moved = t.data[top_x..].to_string();
-            t.data = moved;
+        if top_x <= t.data.len() {
+            let moved = t.data.as_bytes()[top_x..].to_vec();
+            t.data = LineData::from_internal(moved);
         }
     }
 
@@ -4257,23 +4690,39 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
         #[cfg(not(feature = "tiny"))]
         {
             let mark_on = with_state(|s| {
-                s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+                s.openfile
+                    .as_ref()
+                    .and_then(|of| of.mark.as_ref())
+                    .is_some()
             });
             if mark_on && !exiting {
                 String::new()
             } else {
-                with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default())
+                with_state(|s| {
+                    s.openfile
+                        .as_ref()
+                        .map(|of| of.filename.clone())
+                        .unwrap_or_default()
+                })
             }
         }
         #[cfg(feature = "tiny")]
         {
-            with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default())
+            with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.filename.clone())
+                    .unwrap_or_default()
+            })
         }
     };
 
     let mut given = given;
     let maychange_initial = with_state(|s| {
-        s.openfile.as_ref().map(|of| of.filename.is_empty()).unwrap_or(true)
+        s.openfile
+            .as_ref()
+            .map(|of| of.filename.is_empty())
+            .unwrap_or(true)
     });
     let mut maychange = maychange_initial;
     let mut method = KindOfWritingType::Overwrite;
@@ -4290,9 +4739,16 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
         #[cfg(not(feature = "tiny"))]
         let formatstr = {
             let fmt = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.fmt).unwrap_or(FormatType::Unspecified)
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.fmt)
+                    .unwrap_or(FormatType::Unspecified)
             });
-            if fmt == FormatType::DosFile { " [DOS Format]" } else { "" }
+            match fmt {
+                FormatType::DosFile => " [DOS Format]",
+                FormatType::MacFile => " [Mac Format]",
+                _ => "",
+            }
         };
         #[cfg(feature = "tiny")]
         let formatstr = "";
@@ -4306,19 +4762,22 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
             #[cfg(not(feature = "tiny"))]
             {
                 let mark_on = with_state(|s| {
-                    s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+                    s.openfile
+                        .as_ref()
+                        .and_then(|of| of.mark.as_ref())
+                        .is_some()
                 });
                 let restricted = ISSET!(RESTRICTED);
                 if mark_on && !exiting && !restricted {
                     match method {
                         KindOfWritingType::Prepend => "Prepend Selection to File",
-                        KindOfWritingType::Append  => "Append Selection to File",
-                        _                          => "Write Selection to File",
+                        KindOfWritingType::Append => "Append Selection to File",
+                        _ => "Write Selection to File",
                     }
                 } else if method != KindOfWritingType::Overwrite {
                     match method {
                         KindOfWritingType::Prepend => "Prepend to File",
-                        _                          => "Append to File",
+                        _ => "Append to File",
                     }
                 } else {
                     "Write to File"
@@ -4332,25 +4791,26 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
         let save_on_exit = ISSET!(SAVE_ON_EXIT);
         let has_filename = with_state(|s| {
-            s.openfile.as_ref().map(|of| !of.filename.is_empty()).unwrap_or(false)
+            s.openfile
+                .as_ref()
+                .map(|of| !of.filename.is_empty())
+                .unwrap_or(false)
         });
 
         let skip_prompt = (!withprompt || (save_on_exit && exiting)) && has_filename;
 
         if skip_prompt {
-            let fname = with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default());
+            let fname = with_state(|s| {
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.filename.clone())
+                    .unwrap_or_default()
+            });
             state_mut().answer = fname;
             response = 0;
         } else {
             let prompt_str = format!("{}{}{}", msg, formatstr, backupstr);
-            response = do_prompt(
-                MWRITEFILE,
-                &given,
-                None,
-                edit_refresh,
-                &prompt_str,
-                "",
-            );
+            response = do_prompt(MWRITEFILE, &given, None, edit_refresh, &prompt_str, "");
         }
 
         if response < 0 {
@@ -4397,6 +4857,18 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                 });
                 continue;
             }
+            if function == Some(crate::global::mac_format as FuncPtr) {
+                with_state_mut(|s| {
+                    if let Some(ref mut of) = s.openfile {
+                        of.fmt = if of.fmt == FormatType::MacFile {
+                            FormatType::NixFile
+                        } else {
+                            FormatType::MacFile
+                        };
+                    }
+                });
+                continue;
+            }
             let restricted = ISSET!(RESTRICTED);
             if function == Some(crate::global::back_it_up as FuncPtr) && !restricted {
                 TOGGLE!(MAKE_BACKUP);
@@ -4420,7 +4892,10 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                     };
                 }
                 let of_fname = with_state(|s| {
-                    s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default()
+                    s.openfile
+                        .as_ref()
+                        .map(|of| of.filename.clone())
+                        .unwrap_or_default()
                 });
                 if answer2 == of_fname {
                     given.clear();
@@ -4437,10 +4912,16 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
         #[cfg(feature = "extra")]
         {
             let of_fname = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default()
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.filename.clone())
+                    .unwrap_or_default()
             });
-            if exiting && !ISSET!(SAVE_ON_EXIT) && of_fname.is_empty()
-                && answer2 == "zzy" && !did_credits
+            if exiting
+                && !ISSET!(SAVE_ON_EXIT)
+                && of_fname.is_empty()
+                && answer2 == "zzy"
+                && !did_credits
             {
                 let lines = LINES();
                 let cols = COLS();
@@ -4462,15 +4943,24 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
         if method == KindOfWritingType::Overwrite {
             let full_answer = get_full_path(&answer2);
             let full_filename = with_state(|s| {
-                s.openfile.as_ref()
+                s.openfile
+                    .as_ref()
                     .and_then(|of| get_full_path(&of.filename))
             });
             let of_filename_empty = with_state(|s| {
-                s.openfile.as_ref().map(|of| of.filename.is_empty()).unwrap_or(true)
+                s.openfile
+                    .as_ref()
+                    .map(|of| of.filename.is_empty())
+                    .unwrap_or(true)
             });
             let answer_path = full_answer.as_deref().unwrap_or(&answer2);
             let of_filename_string: String = full_filename.clone().unwrap_or_else(|| {
-                with_state(|s| s.openfile.as_ref().map(|of| of.filename.clone()).unwrap_or_default())
+                with_state(|s| {
+                    s.openfile
+                        .as_ref()
+                        .map(|of| of.filename.clone())
+                        .unwrap_or_default()
+                })
             });
             let of_path: &str = &of_filename_string;
             let name_exists = path_exists_nofollow(Path::new(answer_path)).unwrap_or(false);
@@ -4491,7 +4981,10 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                     #[cfg(not(feature = "tiny"))]
                     {
                         let mark_on = with_state(|s| {
-                            s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+                            s.openfile
+                                .as_ref()
+                                .and_then(|of| of.mark.as_ref())
+                                .is_some()
                         });
                         if exiting || !mark_on {
                             if ask_user(YESORNO, "Save file under DIFFERENT NAME? ") != YES {
@@ -4537,31 +5030,43 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
                         if stat_changed {
                             let new_st = stat_with_alloc(&answer2);
-                            let changed = new_st.as_ref().map(|ns| {
-                                ns.st_mtime > stat_mtime
-                                || ns.st_dev != stat_dev
-                                || ns.st_ino != stat_ino
-                            }).unwrap_or(false);
+                            let changed = new_st
+                                .as_ref()
+                                .map(|ns| {
+                                    ns.st_mtime > stat_mtime
+                                        || ns.st_dev != stat_dev
+                                        || ns.st_ino != stat_ino
+                                })
+                                .unwrap_or(false);
 
                             if changed {
                                 warn_and_briefly_pause("File on disk has changed");
-                                choice = ask_user(YESORNO,
-                                    "File was modified since you opened it; continue saving? ");
+                                choice = ask_user(
+                                    YESORNO,
+                                    "File was modified since you opened it; continue saving? ",
+                                );
                                 wipe_statusbar();
 
                                 if ISSET!(SAVE_ON_EXIT) && withprompt {
                                     // Saving to the buffer's own file: use the
                                     // authoritative path when one is recorded.
                                     let fname = with_state(|s| {
-                                        s.openfile.as_ref().map(|of| {
-                                            match openfile_filename_path(of) {
+                                        s.openfile
+                                            .as_ref()
+                                            .map(|of| match openfile_filename_path(of) {
                                                 Some(path) => path.to_path_buf(),
                                                 None => PathBuf::from(&of.filename),
-                                            }
-                                        }).unwrap_or_default()
+                                            })
+                                            .unwrap_or_default()
                                     });
                                     if choice == YES {
-                                        return write_file(&fname, None, NORMAL, KindOfWritingType::Overwrite, NONOTES) as i32;
+                                        return write_file(
+                                            &fname,
+                                            None,
+                                            NORMAL,
+                                            KindOfWritingType::Overwrite,
+                                            NONOTES,
+                                        ) as i32;
                                     } else if choice == NO {
                                         return 2; // Discard
                                     } else {
@@ -4595,12 +5100,16 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                 None
             }
         })
-    }).unwrap_or_else(|| PathBuf::from(&final_answer));
+    })
+    .unwrap_or_else(|| PathBuf::from(&final_answer));
 
     #[cfg(not(feature = "tiny"))]
     {
         let mark_on = with_state(|s| {
-            s.openfile.as_ref().and_then(|of| of.mark.as_ref()).is_some()
+            s.openfile
+                .as_ref()
+                .and_then(|of| of.mark.as_ref())
+                .is_some()
         });
         if mark_on && withprompt && !exiting && !ISSET!(RESTRICTED) {
             return write_region_to_file(&target, None, NORMAL, method) as i32;
@@ -4693,7 +5202,11 @@ pub fn diralphasort(a: &str, b: &str) -> std::cmp::Ordering {
     // Case-insensitive compare
     let diff = mbstrcasecmp(a, b);
     if diff != 0 {
-        if diff < 0 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }
+        if diff < 0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
     } else {
         a.cmp(b)
     }
@@ -4729,7 +5242,11 @@ pub fn username_completion(morsel: &str, length: usize) -> Vec<String> {
                 .to_string_lossy()
                 .into_owned();
             // morsel starts with ~, so morsel[1..length-1] is the fragment
-            let _fragment = if morsel.len() >= 1 { &morsel[1..length.saturating_sub(0)] } else { "" };
+            let _fragment = if morsel.len() >= 1 {
+                &morsel[1..length.saturating_sub(0)]
+            } else {
+                ""
+            };
             // Actually compare against morsel+1 .. length-1
             let frag = if morsel.len() > 1 { &morsel[1..] } else { "" };
             if name.starts_with(frag) {
@@ -4825,12 +5342,7 @@ pub fn filename_completion(morsel: &str) -> Vec<String> {
 // C: char *input_tab(char *morsel, size_t *place, void (*refresh_func)(void), bool *listed)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "tabcomp")]
-pub fn input_tab(
-    morsel: &str,
-    place: &mut usize,
-    refresh_func: fn(),
-    listed: &mut bool,
-) -> String {
+pub fn input_tab(morsel: &str, place: &mut usize, refresh_func: fn(), listed: &mut bool) -> String {
     // If the cursor is not at the end of the fragment, do nothing.
     if *place < morsel.len() {
         beep();
@@ -4888,7 +5400,8 @@ pub fn input_tab(
                 // Compare at the byte level (like C's strncmp); slicing m as a &str
                 // could land on a non-char boundary and panic for multibyte names.
                 if first.as_bytes()[common_len..common_len + ch1_len]
-                    != m.as_bytes()[common_len..common_len + ch1_len] {
+                    != m.as_bytes()[common_len..common_len + ch1_len]
+                {
                     break 'outer;
                 }
             }
@@ -4938,11 +5451,17 @@ pub fn input_tab(
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_data, read_until_cancelled, temporary_suffix, usable_parent};
-    #[cfg(all(not(feature = "tiny"), any(unix, windows)))]
-    use super::{create_lockfile, delete_lockfile, open_lockfile_for_create, write_lockfile};
+    use crate::definitions::{FormatType, LineData};
+    use proptest::prelude::*;
+
     #[cfg(all(unix, not(feature = "tiny")))]
     use super::open_existing_lockfile;
+    #[cfg(all(not(feature = "tiny"), any(unix, windows)))]
+    use super::{create_lockfile, delete_lockfile, open_lockfile_for_create, write_lockfile};
+    use super::{
+        decode_file_data, encode_data, read_until_cancelled, separator_for_format,
+        temporary_suffix, usable_parent,
+    };
     use std::io::{self, Cursor, Read};
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
@@ -4971,10 +5490,9 @@ mod tests {
     impl TestOperatingRoot {
         fn install(path: &Path) -> Self {
             let display_path = std::fs::canonicalize(path).unwrap();
-            let directory = cap_std::fs::Dir::open_ambient_dir(
-                &display_path,
-                cap_std::ambient_authority(),
-            ).unwrap();
+            let directory =
+                cap_std::fs::Dir::open_ambient_dir(&display_path, cap_std::ambient_authority())
+                    .unwrap();
             let previous_root = super::OPERATING_ROOT.with(|slot| {
                 slot.borrow_mut().replace(super::OperatingRoot {
                     display_path: display_path.clone(),
@@ -4984,7 +5502,10 @@ mod tests {
             let previous_path = crate::global::state().operating_dir.clone();
             crate::global::state_mut().operating_dir =
                 Some(display_path.to_string_lossy().into_owned());
-            Self { previous_path, previous_root }
+            Self {
+                previous_path,
+                previous_root,
+            }
         }
     }
 
@@ -5009,12 +5530,12 @@ mod tests {
             let editor = state();
             editor.openfile.as_ref().unwrap().filetop.clone().unwrap()
         };
-        first.borrow_mut().data = lines[0].to_string();
+        first.borrow_mut().data = lines[0].into();
         let mut nodes = vec![first.clone()];
         let mut previous = first;
         for (index, data) in lines.iter().enumerate().skip(1) {
             let node = make_new_node(Some(previous.clone()));
-            node.borrow_mut().data = (*data).to_string();
+            node.borrow_mut().data = (*data).into();
             node.borrow_mut().lineno = (index + 1) as isize;
             previous.borrow_mut().next = Some(node.clone());
             nodes.push(node.clone());
@@ -5036,26 +5557,181 @@ mod tests {
 
         let mut line = {
             let editor = state();
-            editor.openfile.as_ref().and_then(|buffer| buffer.filetop.clone())
+            editor
+                .openfile
+                .as_ref()
+                .and_then(|buffer| buffer.filetop.clone())
         };
         let mut lines = Vec::new();
         while let Some(node) = line {
             let borrowed = node.borrow();
-            lines.push(borrowed.data.clone());
+            lines.push(String::from_utf8_lossy(borrowed.data.as_bytes()).into_owned());
             line = borrowed.next.clone();
         }
         lines
     }
 
     #[test]
-    fn encode_data_reports_invalid_utf8() {
-        let (valid, valid_lossy) = encode_data(b"hello");
-        assert_eq!(valid, "hello");
-        assert!(!valid_lossy);
+    fn encode_data_preserves_arbitrary_bytes_and_recodes_nul() {
+        let valid = encode_data(b"hello");
+        assert_eq!(valid.as_bytes(), b"hello");
 
-        let (invalid, invalid_lossy) = encode_data(&[b'a', 0xff, b'b']);
-        assert_eq!(invalid, "a\u{fffd}b");
-        assert!(invalid_lossy);
+        let invalid = encode_data(&[b'a', 0xff, 0, b'b']);
+        assert_eq!(invalid.as_bytes(), &[b'a', 0xff, b'\n', b'b']);
+        assert_eq!(
+            invalid.external_bytes().collect::<Vec<_>>(),
+            &[b'a', 0xff, 0, b'b']
+        );
+    }
+
+    fn serialize_decoded(lines: &[LineData], format: FormatType) -> Vec<u8> {
+        let mut output = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            output.extend(line.external_bytes());
+            if index + 1 < lines.len() {
+                output.extend_from_slice(separator_for_format(format));
+            }
+        }
+        output
+    }
+
+    fn physical_line_byte() -> impl Strategy<Value = u8> {
+        any::<u8>().prop_filter("CR and LF are physical separators", |byte| {
+            !matches!(*byte, b'\r' | b'\n')
+        })
+    }
+
+    fn property_config() -> ProptestConfig {
+        let mut config = ProptestConfig::with_cases(if cfg!(miri) { 4 } else { 128 });
+        if cfg!(miri) {
+            config.failure_persistence = None;
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(property_config())]
+
+        #[test]
+        fn arbitrary_file_bytes_round_trip_without_conversion(
+            input in prop::collection::vec(
+                any::<u8>(),
+                0..if cfg!(miri) { 256 } else { 32768 },
+            ),
+        ) {
+            let (lines, format, _) = decode_file_data(&input, false);
+            prop_assert_eq!(format, FormatType::NixFile);
+            prop_assert_eq!(serialize_decoded(&lines, format), input);
+        }
+
+        #[test]
+        fn arbitrary_content_round_trips_in_each_line_ending_format(
+            lines in prop::collection::vec(
+                prop::collection::vec(
+                    physical_line_byte(),
+                    0..if cfg!(miri) { 32 } else { 256 },
+                ),
+                2..if cfg!(miri) { 8 } else { 32 },
+            ),
+            format_index in 0u8..3,
+        ) {
+            let format = match format_index {
+                0 => FormatType::NixFile,
+                1 => FormatType::DosFile,
+                _ => FormatType::MacFile,
+            };
+            let separator = separator_for_format(format);
+            let mut input = Vec::new();
+            for (index, line) in lines.iter().enumerate() {
+                input.extend_from_slice(line);
+                if index + 1 < lines.len() {
+                    input.extend_from_slice(separator);
+                }
+            }
+
+            let (decoded, detected, _) = decode_file_data(&input, true);
+            prop_assert_eq!(detected, format);
+            prop_assert_eq!(serialize_decoded(&decoded, detected), input);
+        }
+    }
+
+    #[test]
+    fn no_convert_no_magic_round_trips_every_byte() {
+        let input: Vec<u8> = (0..=255).collect();
+        let (lines, format, _) = decode_file_data(&input, false);
+        assert_eq!(format, FormatType::NixFile);
+        assert_eq!(serialize_decoded(&lines, format), input);
+    }
+
+    #[test]
+    fn first_separator_normalizes_mixed_line_endings_like_gnu() {
+        let cases: &[(&[u8], &[u8], FormatType)] = &[
+            (b"a\rb\nc", b"a\rb\rc", FormatType::MacFile),
+            (b"a\nb\rc", b"a\nb\rc", FormatType::NixFile),
+            (b"a\r\nb\nc", b"a\r\nb\r\nc", FormatType::DosFile),
+            (b"a\nb\r\nc", b"a\nb\nc", FormatType::NixFile),
+        ];
+        for (input, expected, expected_format) in cases {
+            let (lines, format, _) = decode_file_data(input, true);
+            assert_eq!(format, *expected_format, "input={input:?}");
+            assert_eq!(
+                serialize_decoded(&lines, format),
+                *expected,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_file_data_uses_first_separator_and_preserves_mixed_input() {
+        use crate::definitions::FormatType;
+
+        let (lines, format, count) = decode_file_data(b"one\r\ntwo\nthree\r\nfour", true);
+        assert_eq!(format, FormatType::DosFile);
+        assert_eq!(count, 4);
+        assert_eq!(
+            lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
+            [b"one".as_slice(), b"two", b"three", b"four"]
+        );
+
+        let (lines, format, count) = decode_file_data(b"one\ntwo\r\nthree", true);
+        assert_eq!(format, FormatType::NixFile);
+        assert_eq!(count, 3);
+        assert_eq!(
+            lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
+            [b"one".as_slice(), b"two", b"three"]
+        );
+    }
+
+    #[test]
+    fn decode_file_data_supports_mac_and_no_convert() {
+        use crate::definitions::FormatType;
+
+        let (lines, format, count) = decode_file_data(b"one\rtwo\r", true);
+        assert_eq!(format, FormatType::MacFile);
+        assert_eq!(count, 2);
+        assert_eq!(
+            lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
+            [b"one".as_slice(), b"two", b""]
+        );
+
+        let (lines, format, count) = decode_file_data(b"one\rtwo\r\n", false);
+        assert_eq!(format, FormatType::NixFile);
+        assert_eq!(count, 1);
+        assert_eq!(
+            lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
+            [b"one\rtwo\r".as_slice(), b""]
+        );
+    }
+
+    #[test]
+    fn separators_match_each_retained_format() {
+        use crate::definitions::FormatType;
+
+        assert_eq!(separator_for_format(FormatType::NixFile), b"\n");
+        assert_eq!(separator_for_format(FormatType::DosFile), b"\r\n");
+        assert_eq!(separator_for_format(FormatType::MacFile), b"\r");
+        assert_eq!(separator_for_format(FormatType::Unspecified), b"\n");
     }
 
     #[test]
@@ -5169,8 +5845,8 @@ mod tests {
         let nested = backup_path_key(Path::new("directory/file"));
         let punctuation = backup_path_key(Path::new("directory!file"));
         assert_ne!(nested, punctuation);
-        assert!(!nested.contains(['/','\\']));
-        assert!(!punctuation.contains(['/','\\']));
+        assert!(!nested.contains(['/', '\\']));
+        assert!(!punctuation.contains(['/', '\\']));
     }
 
     struct InterruptedOnce {
@@ -5219,10 +5895,7 @@ mod tests {
                 self.0 = true;
                 let partial = b"partial\ncontent";
                 destination[..partial.len()].copy_from_slice(partial);
-                crate::nano::CONTROL_C_WAS_PRESSED.store(
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                );
+                crate::nano::CONTROL_C_WAS_PRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(partial.len())
             }
         }
@@ -5272,7 +5945,10 @@ mod tests {
         std::fs::remove_file(&parent_link).unwrap();
         symlink(outside.path(), &parent_link).unwrap();
         assert!(open_path(&through_parent).is_err());
-        assert_eq!(std::fs::read(outside.path().join("document")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(outside.path().join("document")).unwrap(),
+            b"outside"
+        );
 
         let leaf_link = root.path().join("leaf");
         symlink("inside/document", &leaf_link).unwrap();
@@ -5280,15 +5956,18 @@ mod tests {
         std::fs::remove_file(&leaf_link).unwrap();
         symlink(outside.path().join("document"), &leaf_link).unwrap();
         assert!(open_path(&leaf_link).is_err());
-        assert_eq!(std::fs::read(outside.path().join("document")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(outside.path().join("document")).unwrap(),
+            b"outside"
+        );
     }
 
     #[cfg(all(unix, feature = "operatingdir", not(feature = "tiny")))]
     #[test]
     fn writes_locks_directory_reads_and_staged_installs_cannot_cross_swapped_parent() {
         use super::{
-            confined_read_dir, create_staging_file, open_lockfile_for_create,
-            open_path_with, outside_of_confinement, PathOpenOptions,
+            PathOpenOptions, confined_read_dir, create_staging_file, open_lockfile_for_create,
+            open_path_with, outside_of_confinement,
         };
         use std::io::Write as _;
         use std::os::unix::fs::symlink;
@@ -5312,18 +5991,27 @@ mod tests {
         std::fs::remove_file(&parent_link).unwrap();
         symlink(outside.path(), &parent_link).unwrap();
 
-        assert!(open_path_with(&target, PathOpenOptions {
-            write: true,
-            create: true,
-            truncate: true,
-            mode: 0o666,
-            ..PathOpenOptions::default()
-        }).is_err());
+        assert!(
+            open_path_with(
+                &target,
+                PathOpenOptions {
+                    write: true,
+                    create: true,
+                    truncate: true,
+                    mode: 0o666,
+                    ..PathOpenOptions::default()
+                }
+            )
+            .is_err()
+        );
         assert!(open_lockfile_for_create(&parent_link.join(".victim.swp")).is_err());
         assert!(confined_read_dir(parent_link.to_str().unwrap()).is_err());
         assert!(staging.persist(&target).is_err());
 
-        assert_eq!(std::fs::read(outside.path().join("victim")).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::read(outside.path().join("victim")).unwrap(),
+            b"untouched"
+        );
         assert!(!outside.path().join(".victim.swp").exists());
     }
 
@@ -5473,6 +6161,36 @@ mod tests {
 
     #[cfg(all(unix, not(feature = "tiny")))]
     #[test]
+    fn arbitrary_document_bytes_round_trip_through_open_and_save() {
+        use crate::global::state_mut;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("all-bytes.bin");
+
+        // CR and LF are physical line-ending bytes in converted mode.  Every
+        // other byte, including NUL and all malformed UTF-8, is line content.
+        let line: Vec<u8> = (0..=255)
+            .filter(|byte| !matches!(*byte, b'\r' | b'\n'))
+            .collect();
+        let mut document = line.clone();
+        document.push(b'\n');
+        document.extend(line.iter().rev());
+        document.push(b'\n');
+        std::fs::write(&target, &document).unwrap();
+
+        state_mut().flags = [0; 4];
+        state_mut().backup_dir = None;
+        assert!(super::open_buffer_impl(&target, true));
+        state_mut().openfile.as_mut().unwrap().modified = true;
+        assert_eq!(super::write_it_out(false, false), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), document);
+
+        state_mut().openfile = None;
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
     fn non_utf8_filename_round_trips_through_open_edit_save_and_backup() {
         use crate::global::{state, state_mut, with_state};
         use std::os::unix::ffi::OsStrExt;
@@ -5506,7 +6224,7 @@ mod tests {
         // Edit the buffer, then save through the unprompted write_it_out path
         // (the do_savefile flow), with backups enabled.
         let first = state().openfile.as_ref().unwrap().filetop.clone().unwrap();
-        first.borrow_mut().data = "second version".to_string();
+        first.borrow_mut().data = "second version".into();
         crate::SET!(crate::definitions::MAKE_BACKUP);
         assert_eq!(super::write_it_out(false, false), 1);
 
@@ -5529,7 +6247,9 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join(std::ffi::OsStr::from_bytes(b"weird-\xFF-name"));
+        let target = directory
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"weird-\xFF-name"));
         std::fs::write(&target, b"content\n").unwrap();
 
         let (lock_path, lock_file) = super::do_lockfile(&target, false)
@@ -5567,7 +6287,7 @@ mod tests {
         state_mut().flags = [0; 4];
         make_new_buffer();
         let first = state().openfile.as_ref().unwrap().filetop.clone().unwrap();
-        first.borrow_mut().data = "new contents".to_string();
+        first.borrow_mut().data = "new contents".into();
         let end = make_new_node(Some(first.clone()));
         end.borrow_mut().lineno = 2;
         first.borrow_mut().next = Some(end.clone());
@@ -5587,17 +6307,20 @@ mod tests {
             std::fs::read(&target).unwrap(),
             b"new contents\nold contents\n"
         );
-        assert!(std::fs::read_dir(directory.path())
-            .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".nano-prepend.")));
+        assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nano-prepend.")
+        }));
     }
 
     #[cfg(all(unix, not(feature = "tiny")))]
     #[test]
     fn command_session_restores_signal_termios_tracking_state() {
         use super::{
-            cancel_command_trampoline, CommandSession, PID_OF_COMMAND, PID_OF_SENDER,
-            SHOULD_PIPE,
+            CommandSession, PID_OF_COMMAND, PID_OF_SENDER, SHOULD_PIPE, cancel_command_trampoline,
         };
         use std::sync::atomic::Ordering;
 
@@ -5681,7 +6404,7 @@ mod tests {
     #[cfg(all(unix, not(feature = "tiny")))]
     #[test]
     fn ctrl_c_cancels_command_and_restores_tracking() {
-        use super::{execute_command, PID_OF_COMMAND, PID_OF_SENDER};
+        use super::{PID_OF_COMMAND, PID_OF_SENDER, execute_command};
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 

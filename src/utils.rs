@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 use crate::definitions::*;
 use crate::global::STATE;
 
@@ -34,9 +38,9 @@ pub fn get_homedir() {
                 let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
                 if !dir.to_bytes().is_empty() {
                     use std::os::unix::ffi::OsStrExt;
-                    homenv = Some(std::path::PathBuf::from(
-                        std::ffi::OsStr::from_bytes(dir.to_bytes()),
-                    ));
+                    homenv = Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                        dir.to_bytes(),
+                    )));
                 }
             }
         }
@@ -96,22 +100,14 @@ pub fn concatenate(path: &str, name: &str) -> String {
 pub fn digits(n: isize) -> i32 {
     if n < 100_000 {
         if n < 1_000 {
-            if n < 100 {
-                2
-            } else {
-                3
-            }
+            if n < 100 { 2 } else { 3 }
         } else if n < 10_000 {
             4
         } else {
             5
         }
     } else if n < 10_000_000 {
-        if n < 1_000_000 {
-            6
-        } else {
-            7
-        }
+        if n < 1_000_000 { 6 } else { 7 }
     } else if n < 100_000_000 {
         8
     } else {
@@ -205,11 +201,12 @@ pub fn free_chararray(array: Vec<String>) {
  * Return TRUE when the word starting at position (of the given length) in text
  * is a separate word — not part of a longer word. */
 #[cfg(feature = "speller")]
-pub fn is_separate_word(position: usize, length: usize, text: &str) -> bool {
+pub fn is_separate_word<T: AsRef<[u8]> + ?Sized>(position: usize, length: usize, text: &T) -> bool {
     use crate::chars::is_alpha_char;
+    let bytes = text.as_ref();
     let before_pos = crate::chars::step_left(text, position);
-    let before = &text[before_pos..];
-    let after = &text[position + length..];
+    let before = &bytes[before_pos..];
+    let after = &bytes[position + length..];
 
     let left_ok = position == 0 || !is_alpha_char(before);
     let right_ok = after.is_empty() || !is_alpha_char(after);
@@ -221,11 +218,7 @@ pub fn is_separate_word(position: usize, length: usize, text: &str) -> bool {
  * Search for needle in haystack, respecting the USE_REGEXP, BACKWARDS_SEARCH, and
  * CASE_SENSITIVE flags stored in global state.  Returns the byte offset of the
  * match within `haystack`, or None. */
-pub fn strstrwrapper<'a>(
-    haystack: &'a str,
-    needle: &str,
-    start_offset: usize,
-) -> Option<usize> {
+pub fn strstrwrapper<'a>(haystack: &'a str, needle: &str, start_offset: usize) -> Option<usize> {
     let use_regexp = STATE.with(|s| s.borrow().flag_isset(crate::definitions::USE_REGEXP));
     let backwards = STATE.with(|s| s.borrow().flag_isset(crate::definitions::BACKWARDS_SEARCH));
     let case_sensitive = STATE.with(|s| s.borrow().flag_isset(crate::definitions::CASE_SENSITIVE));
@@ -240,13 +233,15 @@ pub fn strstrwrapper<'a>(
                     // Find last match that starts at or before start_offset
                     let mut last: Option<usize> = None;
                     let mut search_from = 0;
-                    while let Some(m) = re.find(&haystack[search_from..]) {
+                    while let Some(m) = re.find(&haystack.as_bytes()[search_from..]) {
                         let abs = search_from + m.start();
                         if abs > start_offset {
                             break;
                         }
                         last = Some(abs);
-                        let next = search_from + m.start() + crate::chars::char_length(&haystack[search_from + m.start()..]);
+                        let next = search_from
+                            + m.start()
+                            + crate::chars::char_length(&haystack[search_from + m.start()..]);
                         if next >= haystack.len() {
                             break;
                         }
@@ -254,7 +249,8 @@ pub fn strstrwrapper<'a>(
                     }
                     last
                 } else {
-                    re.find(&haystack[start_offset..]).map(|m| start_offset + m.start())
+                    re.find(&haystack.as_bytes()[start_offset..])
+                        .map(|m| start_offset + m.start())
                 }
             } else {
                 None
@@ -267,13 +263,14 @@ pub fn strstrwrapper<'a>(
         if backwards {
             revstrstr(haystack, needle, start_offset)
         } else {
-            haystack[start_offset..].find(needle).map(|p| start_offset + p)
+            haystack[start_offset..]
+                .find(needle)
+                .map(|p| start_offset + p)
         }
     } else if backwards {
         mbrevstrcasestr(haystack, needle, start_offset)
     } else {
-        crate::chars::mbstrcasestr(&haystack[start_offset..], needle)
-            .map(|p| start_offset + p)
+        crate::chars::mbstrcasestr(&haystack[start_offset..], needle).map(|p| start_offset + p)
     }
 }
 
@@ -359,15 +356,9 @@ pub fn mallocstrcpy(dest: &mut String, src: &str) {
 
 /* C: char *measured_copy(const char *string, size_t count)
  * Return an allocated copy of the first `count` bytes of `string`. */
-pub fn measured_copy(s: &str, count: usize) -> String {
-    // count is in bytes, not characters
-    let safe_count = count.min(s.len());
-    // Make sure we end on a char boundary
-    let boundary = (0..=safe_count)
-        .rev()
-        .find(|&i| s.is_char_boundary(i))
-        .unwrap_or(0);
-    s[..boundary].to_string()
+pub fn measured_copy<T: AsRef<[u8]> + ?Sized>(s: &T, count: usize) -> LineData {
+    let bytes = s.as_ref();
+    LineData::from_internal(bytes[..count.min(bytes.len())].to_vec())
 }
 
 /* C: char *copy_of(const char *string)
@@ -405,7 +396,11 @@ pub fn get_page_start(column: usize) -> usize {
                 return 0;
             } else if column < brink + cushion {
                 if jumpy {
-                    return if column > editwincols / 2 { column - editwincols / 2 } else { 0 };
+                    return if column > editwincols / 2 {
+                        column - editwincols / 2
+                    } else {
+                        0
+                    };
                 } else {
                     return column - cushion;
                 }
@@ -434,7 +429,10 @@ pub fn get_page_start(column: usize) -> usize {
     {
         let (editwincols, softwrap) = STATE.with(|s| {
             let st = s.borrow();
-            (st.editwincols.max(0) as usize, st.flag_isset(crate::definitions::SOFTWRAP))
+            (
+                st.editwincols.max(0) as usize,
+                st.flag_isset(crate::definitions::SOFTWRAP),
+            )
         });
         // Very narrow terminals are valid (the one-line layout can be only a
         // single column wide).  Use the same guarded arithmetic as the full
@@ -465,13 +463,13 @@ pub fn xplustabs() -> usize {
 /* C: size_t actual_x(const char *text, size_t column)
  * Return the byte index in `text` of the character that, when displayed,
  * will not overshoot the given column. */
-pub fn actual_x(text: &str, column: usize) -> usize {
+pub fn actual_x<T: AsRef<[u8]> + ?Sized>(text: &T, column: usize) -> usize {
+    let bytes = text.as_ref();
     let mut width: usize = 0;
     let mut pos: usize = 0;
-    let _bytes = text.as_bytes();
 
-    while pos < text.len() {
-        let charlen = crate::chars::advance_over(&text[pos..], &mut width);
+    while pos < bytes.len() {
+        let charlen = crate::chars::advance_over(&bytes[pos..], &mut width);
         if width > column {
             break;
         }
@@ -483,7 +481,8 @@ pub fn actual_x(text: &str, column: usize) -> usize {
 
 /* C: size_t wideness(const char *text, size_t maxlen)
  * How many columns wide are the first `maxlen` bytes of `text`? */
-pub fn wideness(text: &str, maxlen: usize) -> usize {
+pub fn wideness<T: AsRef<[u8]> + ?Sized>(text: &T, maxlen: usize) -> usize {
+    let bytes = text.as_ref();
     if maxlen == 0 {
         return 0;
     }
@@ -492,8 +491,8 @@ pub fn wideness(text: &str, maxlen: usize) -> usize {
     let mut remaining = maxlen;
     let mut pos: usize = 0;
 
-    while pos < text.len() {
-        let charlen = crate::chars::advance_over(&text[pos..], &mut width);
+    while pos < bytes.len() {
+        let charlen = crate::chars::advance_over(&bytes[pos..], &mut width);
         if remaining <= charlen {
             break;
         }
@@ -506,12 +505,13 @@ pub fn wideness(text: &str, maxlen: usize) -> usize {
 
 /* C: size_t breadth(const char *text)
  * Return the number of columns that the given text occupies. */
-pub fn breadth(text: &str) -> usize {
+pub fn breadth<T: AsRef<[u8]> + ?Sized>(text: &T) -> usize {
+    let bytes = text.as_ref();
     let mut span: usize = 0;
     let mut pos: usize = 0;
 
-    while pos < text.len() {
-        let charlen = crate::chars::advance_over(&text[pos..], &mut span);
+    while pos < bytes.len() {
+        let charlen = crate::chars::advance_over(&bytes[pos..], &mut span);
         pos += charlen;
     }
 

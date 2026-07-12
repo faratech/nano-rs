@@ -1,4 +1,8 @@
-#![allow(non_snake_case, non_camel_case_types, unpredictable_function_pointer_comparisons)]
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    unpredictable_function_pointer_comparisons
+)]
 // Port of src/winio.c from GNU nano.
 // C original: Copyright (C) 1999-2011, 2013-2026 Free Software Foundation, Inc.
 //             Copyright (C) 2014-2026 Benno Schulenberg
@@ -11,50 +15,50 @@
 // the integer code(s) that ncurses would have put in the buffer.
 
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crossterm::{
-    execute, queue,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, Clear, ClearType,
-               ScrollUp, ScrollDown},
-    cursor::{MoveTo, Hide, Show},
-    style::{
-        Print, SetForegroundColor, SetBackgroundColor, SetAttribute, Attribute, Color, ResetColor,
-    },
-    event::{
-        self, Event, KeyEvent, KeyCode, KeyModifiers, KeyEventKind,
-        MouseEvent, MouseEventKind, MouseButton,
-    },
+use crate::chars::{
+    advance_over, char_length, control_mbrep, is_blank_char, is_cntrl_char, step_left, step_right,
 };
-use std::io::{self, BufWriter, Stdout, Write, stdout};
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::Once;
-use std::time::Duration;
-use std::cell::{Cell, RefCell};
+#[cfg(feature = "utf8")]
+use crate::chars::{is_doublewidth, is_zerowidth, mbtowide};
 use crate::definitions::*;
 use crate::global::{
-    with_state, with_state_mut, state, state_mut, NanoWindow,
-    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
-    KEY_PPAGE, KEY_NPAGE, KEY_DC, KEY_IC, KEY_BACKSPACE,
-    key_f, A_REVERSE, shown_entries_for,
-    flag_index, flag_mask,
+    A_REVERSE, KEY_BACKSPACE, KEY_DC, KEY_DOWN, KEY_END, KEY_HOME, KEY_IC, KEY_LEFT, KEY_NPAGE,
+    KEY_PPAGE, KEY_RIGHT, KEY_UP, NanoWindow, flag_index, flag_mask, key_f, shown_entries_for,
+    state, state_mut, with_state, with_state_mut,
 };
 #[cfg(not(feature = "tiny"))]
 use crate::global::{KEY_ENTER, KEY_F0};
 #[allow(unused_imports)] // some of these are used only under feature gates
-use crate::chars::{
-    is_cntrl_char, control_mbrep, char_length,
-    step_left, step_right, advance_over, is_blank_char,
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
+    },
+    execute, queue,
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
+    terminal::{
+        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, ScrollDown, ScrollUp,
+    },
 };
-#[cfg(feature = "utf8")]
-use crate::chars::{is_doublewidth, is_zerowidth, mbtowide};
+use std::cell::{Cell, RefCell};
+use std::io::{self, BufWriter, Stdout, Write, stdout};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::Once;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::time::Duration;
 #[cfg(not(feature = "utf8"))]
-fn is_doublewidth(_s: &str) -> bool { false }
+fn is_doublewidth<T: AsRef<[u8]> + ?Sized>(_s: &T) -> bool {
+    false
+}
 #[cfg(not(feature = "utf8"))]
-fn is_zerowidth(s: &str) -> bool { false }
-use crate::utils::{
-    actual_x, wideness, breadth, get_page_start, xplustabs, digits,
-};
+fn is_zerowidth<T: AsRef<[u8]> + ?Sized>(_s: &T) -> bool {
+    false
+}
+use crate::utils::{actual_x, breadth, digits, get_page_start, wideness, xplustabs};
 
 // ---------------------------------------------------------------------------
 // Shared buffered terminal writer.
@@ -208,10 +212,14 @@ thread_local! {
 
 // Convenience helpers to read/write thread-locals without noise.
 macro_rules! tl_get {
-    ($var:ident) => { $var.with(|v| *v.borrow()) };
+    ($var:ident) => {
+        $var.with(|v| *v.borrow())
+    };
 }
 macro_rules! tl_set {
-    ($var:ident, $val:expr) => { $var.with(|v| *v.borrow_mut() = $val) };
+    ($var:ident, $val:expr) => {
+        $var.with(|v| *v.borrow_mut() = $val)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -265,8 +273,7 @@ static SAVED_TERMIOS: [AtomicU8; std::mem::size_of::<libc::termios>()] =
 #[cfg(windows)]
 static SAVED_CONSOLE_MODE_VALID: AtomicU8 = AtomicU8::new(0);
 #[cfg(windows)]
-static SAVED_CONSOLE_MODE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+static SAVED_CONSOLE_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Retain an exact, lock-free copy of the pre-raw terminal attributes.  The
 /// bytewise atomic representation is intentional: a fatal signal cannot lock
@@ -333,7 +340,7 @@ fn remember_pre_raw_console_mode() {
 #[cfg(windows)]
 fn restore_pre_raw_console_mode() -> bool {
     use windows::Win32::System::Console::{
-        CONSOLE_MODE, GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE,
+        CONSOLE_MODE, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
     };
 
     if SAVED_CONSOLE_MODE_VALID.swap(0, Ordering::AcqRel) == 0 {
@@ -681,7 +688,13 @@ fn calculate_window_layout(
         };
     }
 
-    let minimum = if zero { 3 } else if minibar { 4 } else { 5 };
+    let minimum = if zero {
+        3
+    } else if minibar {
+        4
+    } else {
+        5
+    };
     let mut top_rows = if empty_line && rows > minimum { 2 } else { 1 };
     let foot_rows = if no_help || rows < minimum { 1 } else { 3 };
 
@@ -766,11 +779,14 @@ fn resize_was_requested(input: Option<i32>, pending: bool) -> bool {
 #[cfg(not(feature = "tiny"))]
 pub fn record_macro() {
     let outcome = toggle_macro_recording();
-    statusline(MessageType::Remark, match outcome {
-        MacroRecordingOutcome::Started => "Recording a macro...",
-        MacroRecordingOutcome::Cancelled => "Cancelled",
-        MacroRecordingOutcome::Stopped => "Stopped recording",
-    });
+    statusline(
+        MessageType::Remark,
+        match outcome {
+            MacroRecordingOutcome::Started => "Recording a macro...",
+            MacroRecordingOutcome::Cancelled => "Cancelled",
+            MacroRecordingOutcome::Stopped => "Stopped recording",
+        },
+    );
 
     if state().flag_isset(STATEFLAGS) {
         titlebar(None);
@@ -956,8 +972,7 @@ pub fn get_code_from_plantation() -> i32 {
                             shortcut.menus = st.currmenu as i32;
 
                             if let Some(index) = st.sclist.iter().position(|entry| {
-                                entry.keystr.is_empty()
-                                    && entry.keycode == PLANTED_A_COMMAND as i32
+                                entry.keystr.is_empty() && entry.keycode == PLANTED_A_COMMAND as i32
                             }) {
                                 st.sclist[index] = shortcut;
                                 index
@@ -1069,7 +1084,8 @@ pub fn read_keys_from() {
     let lastmessage = state().lastmessage;
     let lines = screen_rows();
 
-    if reveal && (!spotlight || show_cursor_flag || currmenu == MSPELL)
+    if reveal
+        && (!spotlight || show_cursor_flag || currmenu == MSPELL)
         && (lines > 1 || lastmessage <= MessageType::Hush)
     {
         let _ = execute!(stdout, Show);
@@ -1084,12 +1100,12 @@ pub fn read_keys_from() {
         match event::poll(Duration::from_millis(100)) {
             Ok(true) => match event::read() {
                 Ok(ev) => break ev,
-                Err(_) => {
-                    // Treat unrecoverable read failure as resize
-                    break Event::Resize(80, 24);
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => crate::nano::die("Too many errors from stdin"),
             },
-            _ => continue,
+            Ok(false) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => crate::nano::die("Too many errors from stdin"),
         }
     };
 
@@ -1120,13 +1136,14 @@ pub fn read_keys_from() {
     // elsewhere in this file (see the non-blocking drains below).
     loop {
         match event::poll(Duration::ZERO) {
-            Ok(true) => {
-                match event::read() {
-                    Ok(ev) => translate_event(ev),
-                    Err(_) => break,
-                }
-            }
-            _ => break,
+            Ok(true) => match event::read() {
+                Ok(ev) => translate_event(ev),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
+                Err(_) => crate::nano::die("Too many errors from stdin"),
+            },
+            Ok(false) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
+            Err(_) => crate::nano::die("Too many errors from stdin"),
         }
     }
 }
@@ -1180,6 +1197,23 @@ fn translate_event(ev: Event) {
             }
             push_keycode(END_OF_PASTE as i32);
         }
+        Event::PasteBytes(bytes) => {
+            // Prompts and browser/help inputs are Unicode `String`s.  Refuse a
+            // malformed payload there as one atomic action; only the document
+            // buffer has byte-preserving storage.
+            if state().currmenu != MMAIN && std::str::from_utf8(&bytes).is_err() {
+                statusline(
+                    MessageType::Alert,
+                    "Cannot paste non-UTF-8 bytes into this prompt",
+                );
+                return;
+            }
+            push_keycode(START_OF_PASTE as i32);
+            for byte in bytes {
+                push_keycode(byte as i32);
+            }
+            push_keycode(END_OF_PASTE as i32);
+        }
         Event::Resize(_w, _h) => {
             crate::nano::THE_WINDOW_RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
             push_unrecorded_keycode(THE_WINDOW_RESIZED as i32);
@@ -1197,7 +1231,7 @@ fn translate_event(ev: Event) {
 /// Map a crossterm KeyEvent into nano's integer key code(s).
 fn translate_key_event(ke: KeyEvent) {
     let ctrl = ke.modifiers.contains(KeyModifiers::CONTROL);
-    let alt  = ke.modifiers.contains(KeyModifiers::ALT);
+    let alt = ke.modifiers.contains(KeyModifiers::ALT);
     let shift = ke.modifiers.contains(KeyModifiers::SHIFT);
 
     match ke.code {
@@ -1426,10 +1460,10 @@ fn translate_mouse_event(me: MouseEvent) {
         y: me.row,
         x: me.column,
         bstate: match me.kind {
-            MouseEventKind::Down(MouseButton::Left)   => BUTTON1_CLICKED,
-            MouseEventKind::Up(MouseButton::Left)     => BUTTON1_RELEASED,
-            MouseEventKind::ScrollUp                  => BUTTON4_PRESSED,
-            MouseEventKind::ScrollDown                => BUTTON5_PRESSED,
+            MouseEventKind::Down(MouseButton::Left) => BUTTON1_CLICKED,
+            MouseEventKind::Up(MouseButton::Left) => BUTTON1_RELEASED,
+            MouseEventKind::ScrollUp => BUTTON4_PRESSED,
+            MouseEventKind::ScrollDown => BUTTON5_PRESSED,
             _ => 0,
         },
     };
@@ -1441,13 +1475,13 @@ fn translate_mouse_event(me: MouseEvent) {
 #[cfg(feature = "mouse")]
 pub const BUTTON1_RELEASED: u32 = 0x0001;
 #[cfg(feature = "mouse")]
-pub const BUTTON1_CLICKED:  u32 = 0x0004;
+pub const BUTTON1_CLICKED: u32 = 0x0004;
 #[cfg(feature = "mouse")]
-pub const BUTTON4_PRESSED:  u32 = 0x0800;
+pub const BUTTON4_PRESSED: u32 = 0x0800;
 #[cfg(feature = "mouse")]
-pub const BUTTON5_PRESSED:  u32 = 0x8000;
+pub const BUTTON5_PRESSED: u32 = 0x8000;
 #[cfg(feature = "mouse")]
-pub const KEY_MOUSE_CODE:   i32 = 0x199; // ncurses KEY_MOUSE
+pub const KEY_MOUSE_CODE: i32 = 0x199; // ncurses KEY_MOUSE
 
 #[cfg(feature = "mouse")]
 #[derive(Debug, Clone, Default)]
@@ -1465,9 +1499,17 @@ pub struct NanoMouseEvent {
 /* C: int arrow_from_ABCD(int letter) */
 pub fn arrow_from_ABCD(letter: i32) -> i32 {
     if letter < 'C' as i32 {
-        if letter == 'A' as i32 { KEY_UP } else { KEY_DOWN }
+        if letter == 'A' as i32 {
+            KEY_UP
+        } else {
+            KEY_DOWN
+        }
     } else {
-        if letter == 'D' as i32 { KEY_LEFT } else { KEY_RIGHT }
+        if letter == 'D' as i32 {
+            KEY_LEFT
+        } else {
+            KEY_RIGHT
+        }
     }
 }
 
@@ -1487,15 +1529,13 @@ pub fn convert_SS3_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                             state_mut().shift_held = true;
                             return arrow_from_ABCD(seq[3]);
                         }
-                        '5' if length > 3 => {
-                            match seq[3] as u8 as char {
-                                'A' => return CONTROL_UP as i32,
-                                'B' => return CONTROL_DOWN as i32,
-                                'C' => return CONTROL_RIGHT as i32,
-                                'D' => return CONTROL_LEFT as i32,
-                                _ => {}
-                            }
-                        }
+                        '5' if length > 3 => match seq[3] as u8 as char {
+                            'A' => return CONTROL_UP as i32,
+                            'B' => return CONTROL_DOWN as i32,
+                            'C' => return CONTROL_RIGHT as i32,
+                            'D' => return CONTROL_LEFT as i32,
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -1634,11 +1674,16 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                         _ => {}
                     },
                     '6' => {
-                        let sc = with_state(|s| (
-                            s.shiftcontrolup, s.shiftcontroldown,
-                            s.shiftcontrolright, s.shiftcontrolleft,
-                            s.shiftcontrolend, s.shiftcontrolhome,
-                        ));
+                        let sc = with_state(|s| {
+                            (
+                                s.shiftcontrolup,
+                                s.shiftcontroldown,
+                                s.shiftcontrolright,
+                                s.shiftcontrolleft,
+                                s.shiftcontrolend,
+                                s.shiftcontrolhome,
+                            )
+                        });
                         match seq[3] as u8 as char {
                             'A' => return sc.0,
                             'B' => return sc.1,
@@ -1648,7 +1693,7 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
                             'H' => return sc.5,
                             _ => {}
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -1683,7 +1728,11 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
             #[cfg(not(feature = "tiny"))]
             if length > 3 && seq[1] == '0' as i32 && seq[3] == '~' as i32 {
                 *consumed = 4;
-                return if seq[2] == '0' as i32 { START_OF_PASTE as i32 } else { END_OF_PASTE as i32 };
+                return if seq[2] == '0' as i32 {
+                    START_OF_PASTE as i32
+                } else {
+                    END_OF_PASTE as i32
+                };
             }
         }
         '3' => {
@@ -1709,18 +1758,26 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
             }
             #[cfg(not(feature = "tiny"))]
             {
-                if length > 1 && seq[1] == '$' as i32 { return SHIFT_DELETE as i32; }
-                if length > 1 && seq[1] == '^' as i32 { return CONTROL_DELETE as i32; }
+                if length > 1 && seq[1] == '$' as i32 {
+                    return SHIFT_DELETE as i32;
+                }
+                if length > 1 && seq[1] == '^' as i32 {
+                    return CONTROL_DELETE as i32;
+                }
                 if length > 1 && seq[1] == '@' as i32 {
                     return state().controlshiftdelete;
                 }
             }
         }
         '4' => {
-            if length > 1 && seq[1] == '~' as i32 { return KEY_END; }
+            if length > 1 && seq[1] == '~' as i32 {
+                return KEY_END;
+            }
         }
         '5' => {
-            if length > 1 && seq[1] == '~' as i32 { return KEY_PPAGE; }
+            if length > 1 && seq[1] == '~' as i32 {
+                return KEY_PPAGE;
+            }
             #[cfg(not(feature = "tiny"))]
             if length > 3 && seq[1] == ';' as i32 && seq[3] == '~' as i32 {
                 *consumed = 4;
@@ -1732,7 +1789,9 @@ pub fn convert_CSI_sequence(seq: &[i32], length: usize, consumed: &mut i32) -> i
             }
         }
         '6' => {
-            if length > 1 && seq[1] == '~' as i32 { return KEY_NPAGE; }
+            if length > 1 && seq[1] == '~' as i32 {
+                return KEY_NPAGE;
+            }
             #[cfg(not(feature = "tiny"))]
             if length > 3 && seq[1] == ';' as i32 && seq[3] == '~' as i32 {
                 *consumed = 4;
@@ -1926,7 +1985,11 @@ pub fn assemble_unicode(symbol: i32) -> i64 {
 
     if digits == 6 && outcome == PROCEED {
         let final_uni = UNICODE_ACC.with(|u| *u.borrow());
-        let out = if final_uni < 0x110000 { final_uni as i64 } else { INVALID_DIGIT };
+        let out = if final_uni < 0x110000 {
+            final_uni as i64
+        } else {
+            INVALID_DIGIT
+        };
         UNICODE_DIGITS.with(|d| *d.borrow_mut() = 0);
         UNICODE_ACC.with(|u| *u.borrow_mut() = 0);
         return out;
@@ -1989,7 +2052,9 @@ pub fn parse_verbatim_kbinput(count: &mut usize) -> Vec<i32> {
                 // of the waiting buffer: KEY_BUFFER[NEXTCODES_IDX].
                 let peek_front = || -> Option<i32> {
                     if tl_get!(WAITING_CODES) > 0 {
-                        KEY_BUFFER.with(|kb| NEXTCODES_IDX.with(|ni| kb.borrow().get(*ni.borrow()).copied()))
+                        KEY_BUFFER.with(|kb| {
+                            NEXTCODES_IDX.with(|ni| kb.borrow().get(*ni.borrow()).copied())
+                        })
                     } else {
                         None
                     }
@@ -2147,9 +2212,8 @@ pub fn parse_kbinput() -> i32 {
                 if keycode >= 0xC0 && keycode <= 0xFF && using_utf8 {
                     // Skip continuation bytes
                     while tl_get!(WAITING_CODES) > 0 {
-                        let next = KEY_BUFFER.with(|kb| {
-                            NEXTCODES_IDX.with(|ni| kb.borrow()[*ni.borrow()])
-                        });
+                        let next = KEY_BUFFER
+                            .with(|kb| NEXTCODES_IDX.with(|ni| kb.borrow()[*ni.borrow()]));
                         if next >= 0x80 && next <= 0xBF {
                             get_input(None);
                         } else {
@@ -2166,16 +2230,12 @@ pub fn parse_kbinput() -> i32 {
             // ASCII printable range
             let waiting = tl_get!(WAITING_CODES);
             let next_is_esc = if waiting > 0 {
-                KEY_BUFFER.with(|kb| {
-                    NEXTCODES_IDX.with(|ni| kb.borrow()[*ni.borrow()] == ESC)
-                })
+                KEY_BUFFER.with(|kb| NEXTCODES_IDX.with(|ni| kb.borrow()[*ni.borrow()] == ESC))
             } else {
                 false
             };
 
-            if waiting == 0 || next_is_esc
-               || (keycode != 'O' as i32 && keycode != '[' as i32)
-            {
+            if waiting == 0 || next_is_esc || (keycode != 'O' as i32 && keycode != '[' as i32) {
                 let shifted = state().shifted_metas;
                 let kc = if keycode >= 'A' as i32 && keycode <= 'Z' as i32 && !shifted {
                     keycode | 0x20
@@ -2199,7 +2259,8 @@ pub fn parse_kbinput() -> i32 {
             -1
         };
 
-        if keycode == '[' as i32 && waiting > 0
+        if keycode == '[' as i32
+            && waiting > 0
             && ((next >= 'A' as i32 && next <= 'D' as i32)
                 || (next >= 'a' as i32 && next <= 'd' as i32))
         {
@@ -2210,21 +2271,33 @@ pub fn parse_kbinput() -> i32 {
                 'C' => CONTROL_RIGHT as i32,
                 'D' => CONTROL_LEFT as i32,
                 #[cfg(not(feature = "tiny"))]
-                'a' => { state_mut().shift_held = true; KEY_PPAGE }
+                'a' => {
+                    state_mut().shift_held = true;
+                    KEY_PPAGE
+                }
                 #[cfg(not(feature = "tiny"))]
-                'b' => { state_mut().shift_held = true; KEY_NPAGE }
+                'b' => {
+                    state_mut().shift_held = true;
+                    KEY_NPAGE
+                }
                 #[cfg(not(feature = "tiny"))]
-                'c' => { state_mut().shift_held = true; KEY_HOME }
+                'c' => {
+                    state_mut().shift_held = true;
+                    KEY_HOME
+                }
                 #[cfg(not(feature = "tiny"))]
-                'd' => { state_mut().shift_held = true; KEY_END }
+                'd' => {
+                    state_mut().shift_held = true;
+                    KEY_END
+                }
                 _ => ERR_CODE,
             };
         } else if waiting > 0 && next != ESC && (keycode == '[' as i32 || keycode == 'O' as i32) {
             let result = parse_escape_sequence(keycode);
             state_mut().meta_key = true;
             return result;
-        } else if keycode >= '0' as i32 && (keycode <= '2' as i32
-            || (keycode <= '9' as i32 && tl_get!(DIGIT_COUNT) > 0))
+        } else if keycode >= '0' as i32
+            && (keycode <= '2' as i32 || (keycode <= '9' as i32 && tl_get!(DIGIT_COUNT) > 0))
         {
             let byte = assemble_byte_code(keycode);
             if byte == PROCEED as i32 {
@@ -2278,25 +2351,25 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
     // shifted codes only when each event is consumed so `shift_held` cannot be
     // reset or leaked by a neighboring queued event.
     let shifted_navigation = match keycode {
-            SHIFT_LEFT_CODE => Some(KEY_LEFT),
-            SHIFT_RIGHT_CODE => Some(KEY_RIGHT),
-            k if k == SHIFT_UP as i32 => Some(KEY_UP),
-            k if k == SHIFT_DOWN as i32 => Some(KEY_DOWN),
-            k if k == SHIFT_HOME as i32 => Some(KEY_HOME),
-            k if k == SHIFT_END as i32 => Some(KEY_END),
-            k if k == SHIFT_PAGEUP as i32 => Some(KEY_PPAGE),
-            k if k == SHIFT_PAGEDOWN as i32 => Some(KEY_NPAGE),
-            k if k == SHIFT_CONTROL_LEFT as i32 => Some(CONTROL_LEFT as i32),
-            k if k == SHIFT_CONTROL_RIGHT as i32 => Some(CONTROL_RIGHT as i32),
-            k if k == SHIFT_CONTROL_UP as i32 => Some(CONTROL_UP as i32),
-            k if k == SHIFT_CONTROL_DOWN as i32 => Some(CONTROL_DOWN as i32),
-            k if k == SHIFT_CONTROL_HOME as i32 => Some(CONTROL_HOME as i32),
-            k if k == SHIFT_CONTROL_END as i32 => Some(CONTROL_END as i32),
-            k if k == SHIFT_ALT_LEFT as i32 => Some(KEY_HOME),
-            k if k == SHIFT_ALT_RIGHT as i32 => Some(KEY_END),
-            k if k == SHIFT_ALT_UP as i32 => Some(KEY_PPAGE),
-            k if k == SHIFT_ALT_DOWN as i32 => Some(KEY_NPAGE),
-            _ => None,
+        SHIFT_LEFT_CODE => Some(KEY_LEFT),
+        SHIFT_RIGHT_CODE => Some(KEY_RIGHT),
+        k if k == SHIFT_UP as i32 => Some(KEY_UP),
+        k if k == SHIFT_DOWN as i32 => Some(KEY_DOWN),
+        k if k == SHIFT_HOME as i32 => Some(KEY_HOME),
+        k if k == SHIFT_END as i32 => Some(KEY_END),
+        k if k == SHIFT_PAGEUP as i32 => Some(KEY_PPAGE),
+        k if k == SHIFT_PAGEDOWN as i32 => Some(KEY_NPAGE),
+        k if k == SHIFT_CONTROL_LEFT as i32 => Some(CONTROL_LEFT as i32),
+        k if k == SHIFT_CONTROL_RIGHT as i32 => Some(CONTROL_RIGHT as i32),
+        k if k == SHIFT_CONTROL_UP as i32 => Some(CONTROL_UP as i32),
+        k if k == SHIFT_CONTROL_DOWN as i32 => Some(CONTROL_DOWN as i32),
+        k if k == SHIFT_CONTROL_HOME as i32 => Some(CONTROL_HOME as i32),
+        k if k == SHIFT_CONTROL_END as i32 => Some(CONTROL_END as i32),
+        k if k == SHIFT_ALT_LEFT as i32 => Some(KEY_HOME),
+        k if k == SHIFT_ALT_RIGHT as i32 => Some(KEY_END),
+        k if k == SHIFT_ALT_UP as i32 => Some(KEY_PPAGE),
+        k if k == SHIFT_ALT_DOWN as i32 => Some(KEY_NPAGE),
+        _ => None,
     };
 
     if let Some(navigation) = shifted_navigation {
@@ -2304,58 +2377,176 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
         return navigation;
     }
 
-    let (cl, cr, cu, cd, ch, ce) = with_state(|s| (
-        s.controlleft, s.controlright, s.controlup, s.controldown,
-        s.controlhome, s.controlend,
-    ));
+    let (cl, cr, cu, cd, ch, ce) = with_state(|s| {
+        (
+            s.controlleft,
+            s.controlright,
+            s.controlup,
+            s.controldown,
+            s.controlhome,
+            s.controlend,
+        )
+    });
 
-    if keycode == cl { return CONTROL_LEFT as i32; }
-    if keycode == cr { return CONTROL_RIGHT as i32; }
-    if keycode == cu { return CONTROL_UP as i32; }
-    if keycode == cd { return CONTROL_DOWN as i32; }
-    if keycode == ch { return CONTROL_HOME as i32; }
-    if keycode == ce { return CONTROL_END as i32; }
+    if keycode == cl {
+        return CONTROL_LEFT as i32;
+    }
+    if keycode == cr {
+        return CONTROL_RIGHT as i32;
+    }
+    if keycode == cu {
+        return CONTROL_UP as i32;
+    }
+    if keycode == cd {
+        return CONTROL_DOWN as i32;
+    }
+    if keycode == ch {
+        return CONTROL_HOME as i32;
+    }
+    if keycode == ce {
+        return CONTROL_END as i32;
+    }
 
     #[cfg(not(feature = "tiny"))]
     {
-        let (cdelete, cshdelete, sup, sdown, scl, scr, scu, scd, sch, sce,
-             al, ar, au, ad, ahome, aend, apgup, apgdn, ains, adel,
-             sal, sar, sau, sad) = with_state(|s| (
-            s.controldelete, s.controlshiftdelete,
-            s.shiftup, s.shiftdown,
-            s.shiftcontrolleft, s.shiftcontrolright,
-            s.shiftcontrolup, s.shiftcontroldown,
-            s.shiftcontrolhome, s.shiftcontrolend,
-            s.altleft, s.altright, s.altup, s.altdown,
-            s.althome, s.altend, s.altpageup, s.altpagedown,
-            s.altinsert, s.altdelete,
-            s.shiftaltleft, s.shiftaltright, s.shiftaltup, s.shiftaltdown,
-        ));
+        let (
+            cdelete,
+            cshdelete,
+            sup,
+            sdown,
+            scl,
+            scr,
+            scu,
+            scd,
+            sch,
+            sce,
+            al,
+            ar,
+            au,
+            ad,
+            ahome,
+            aend,
+            apgup,
+            apgdn,
+            ains,
+            adel,
+            sal,
+            sar,
+            sau,
+            sad,
+        ) = with_state(|s| {
+            (
+                s.controldelete,
+                s.controlshiftdelete,
+                s.shiftup,
+                s.shiftdown,
+                s.shiftcontrolleft,
+                s.shiftcontrolright,
+                s.shiftcontrolup,
+                s.shiftcontroldown,
+                s.shiftcontrolhome,
+                s.shiftcontrolend,
+                s.altleft,
+                s.altright,
+                s.altup,
+                s.altdown,
+                s.althome,
+                s.altend,
+                s.altpageup,
+                s.altpagedown,
+                s.altinsert,
+                s.altdelete,
+                s.shiftaltleft,
+                s.shiftaltright,
+                s.shiftaltup,
+                s.shiftaltdown,
+            )
+        });
 
-        if keycode == cdelete { return CONTROL_DELETE as i32; }
-        if keycode == cshdelete { return CONTROL_SHIFT_DELETE as i32; }
-        if keycode == sup { state_mut().shift_held = true; return KEY_UP; }
-        if keycode == sdown { state_mut().shift_held = true; return KEY_DOWN; }
-        if keycode == scl { state_mut().shift_held = true; return CONTROL_LEFT as i32; }
-        if keycode == scr { state_mut().shift_held = true; return CONTROL_RIGHT as i32; }
-        if keycode == scu { state_mut().shift_held = true; return CONTROL_UP as i32; }
-        if keycode == scd { state_mut().shift_held = true; return CONTROL_DOWN as i32; }
-        if keycode == sch { state_mut().shift_held = true; return CONTROL_HOME as i32; }
-        if keycode == sce { state_mut().shift_held = true; return CONTROL_END as i32; }
-        if keycode == al { return ALT_LEFT as i32; }
-        if keycode == ar { return ALT_RIGHT as i32; }
-        if keycode == au { return ALT_UP as i32; }
-        if keycode == ad { return ALT_DOWN as i32; }
-        if keycode == ahome { return ALT_HOME as i32; }
-        if keycode == aend { return ALT_END as i32; }
-        if keycode == apgup { return ALT_PAGEUP as i32; }
-        if keycode == apgdn { return ALT_PAGEDOWN as i32; }
-        if keycode == ains { return ALT_INSERT as i32; }
-        if keycode == adel { return ALT_DELETE as i32; }
-        if keycode == sal { state_mut().shift_held = true; return KEY_HOME; }
-        if keycode == sar { state_mut().shift_held = true; return KEY_END; }
-        if keycode == sau { state_mut().shift_held = true; return KEY_PPAGE; }
-        if keycode == sad { state_mut().shift_held = true; return KEY_NPAGE; }
+        if keycode == cdelete {
+            return CONTROL_DELETE as i32;
+        }
+        if keycode == cshdelete {
+            return CONTROL_SHIFT_DELETE as i32;
+        }
+        if keycode == sup {
+            state_mut().shift_held = true;
+            return KEY_UP;
+        }
+        if keycode == sdown {
+            state_mut().shift_held = true;
+            return KEY_DOWN;
+        }
+        if keycode == scl {
+            state_mut().shift_held = true;
+            return CONTROL_LEFT as i32;
+        }
+        if keycode == scr {
+            state_mut().shift_held = true;
+            return CONTROL_RIGHT as i32;
+        }
+        if keycode == scu {
+            state_mut().shift_held = true;
+            return CONTROL_UP as i32;
+        }
+        if keycode == scd {
+            state_mut().shift_held = true;
+            return CONTROL_DOWN as i32;
+        }
+        if keycode == sch {
+            state_mut().shift_held = true;
+            return CONTROL_HOME as i32;
+        }
+        if keycode == sce {
+            state_mut().shift_held = true;
+            return CONTROL_END as i32;
+        }
+        if keycode == al {
+            return ALT_LEFT as i32;
+        }
+        if keycode == ar {
+            return ALT_RIGHT as i32;
+        }
+        if keycode == au {
+            return ALT_UP as i32;
+        }
+        if keycode == ad {
+            return ALT_DOWN as i32;
+        }
+        if keycode == ahome {
+            return ALT_HOME as i32;
+        }
+        if keycode == aend {
+            return ALT_END as i32;
+        }
+        if keycode == apgup {
+            return ALT_PAGEUP as i32;
+        }
+        if keycode == apgdn {
+            return ALT_PAGEDOWN as i32;
+        }
+        if keycode == ains {
+            return ALT_INSERT as i32;
+        }
+        if keycode == adel {
+            return ALT_DELETE as i32;
+        }
+        if keycode == sal {
+            state_mut().shift_held = true;
+            return KEY_HOME;
+        }
+        if keycode == sar {
+            state_mut().shift_held = true;
+            return KEY_END;
+        }
+        if keycode == sau {
+            state_mut().shift_held = true;
+            return KEY_PPAGE;
+        }
+        if keycode == sad {
+            state_mut().shift_held = true;
+            return KEY_NPAGE;
+        }
 
         // Out-of-range function keys
         if keycode > (KEY_F0 + 24) && keycode < (KEY_F0 + 64) {
@@ -2372,16 +2563,26 @@ fn apply_custom_keycode(keycode: i32) -> i32 {
     // Shift+arrow variants
     match keycode {
         k if k == KEY_DC => {
-            return if state().flag_isset(REBIND_DELETE) { KEY_BACKSPACE } else { KEY_DC };
+            return if state().flag_isset(REBIND_DELETE) {
+                KEY_BACKSPACE
+            } else {
+                KEY_DC
+            };
         }
         k if k == KEY_BACKSPACE => {
-            return if state().flag_isset(REBIND_DELETE) { KEY_DC } else { KEY_BACKSPACE };
+            return if state().flag_isset(REBIND_DELETE) {
+                KEY_DC
+            } else {
+                KEY_BACKSPACE
+            };
         }
         _ => {}
     }
 
     // KEY_BTAB (shift-tab from ncurses)
-    if keycode == 0x161 { return SHIFT_TAB as i32; } // KEY_BTAB
+    if keycode == 0x161 {
+        return SHIFT_TAB as i32;
+    } // KEY_BTAB
 
     keycode
 }
@@ -2418,21 +2619,27 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
         None => return -1,
     };
 
-    let (mid_y, mid_rows, mid_x, mid_cols) = with_state(|s| (
-        s.midwin.y, s.midwin.rows, s.midwin.x, s.midwin.cols,
-    ));
+    let (mid_y, mid_rows, mid_x, mid_cols) =
+        with_state(|s| (s.midwin.y, s.midwin.rows, s.midwin.x, s.midwin.cols));
     let (foot_y, foot_rows) = with_state(|s| (s.footwin.y, s.footwin.rows));
     let cols = with_state(|s| s.midwin.cols + s.midwin.x);
 
-    let in_middle = event.y >= mid_y && event.y < mid_y + mid_rows
-        && event.x >= mid_x && event.x < mid_x + mid_cols;
+    let in_middle = event.y >= mid_y
+        && event.y < mid_y + mid_rows
+        && event.x >= mid_x
+        && event.x < mid_x + mid_cols;
     let in_footer = event.y >= foot_y && event.y < foot_y + foot_rows;
 
     let (margin, currmenu) = with_state(|s| (s.margin, s.currmenu));
     // Only the main editor's middle window is expressed relative to the text
     // area after the line-number margin.  Browser/help layouts start at the
     // window origin and must receive the raw x coordinate.
-    *mouse_x = event.x as i32 - if in_middle && currmenu == MMAIN { margin } else { 0 };
+    *mouse_x = event.x as i32
+        - if in_middle && currmenu == MMAIN {
+            margin
+        } else {
+            0
+        };
     *mouse_y = event.y as i32;
 
     let bstate = event.bstate;
@@ -2445,12 +2652,16 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
             let (total_lines, placewewant) = with_state(|s| {
                 let f = s.openfile.as_ref();
                 (
-                    f.and_then(|f| f.filebot.as_ref()).map(|b| b.borrow().lineno).unwrap_or(1),
+                    f.and_then(|f| f.filebot.as_ref())
+                        .map(|b| b.borrow().lineno)
+                        .unwrap_or(1),
                     f.map(|f| f.placewewant).unwrap_or(0) as isize,
                 )
             });
             let mut click_row = (*mouse_y - mid_y as i32).max(0) as isize;
-            if click_row != 0 { click_row += 1; }
+            if click_row != 0 {
+                click_row += 1;
+            }
             crate::search::goto_line_and_column(
                 total_lines * click_row / editwinrows.max(1) + 1,
                 placewewant + 1,
@@ -2473,11 +2684,19 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
 
             let currmenu = state().currmenu;
             let number = shown_entries_for(currmenu);
-            if number == 0 { return 2; }
+            if number == 0 {
+                return 2;
+            }
 
             let cols_usize = cols as usize;
-            let width = if number < 5 { cols_usize / 2 } else { cols_usize / ((number + 1) / 2) };
-            if width == 0 { return 2; }
+            let width = if number < 5 {
+                cols_usize / 2
+            } else {
+                cols_usize / ((number + 1) / 2)
+            };
+            if width == 0 {
+                return 2;
+            }
 
             let mut index = (foot_rel_x / width) * 2 + foot_rel_y + 1;
 
@@ -2485,14 +2704,20 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
                 index -= 2;
             }
 
-            if index > number { return 2; }
+            if index > number {
+                return 2;
+            }
 
             // Find the index-th shortcut in current menu
             let mut count = 0usize;
             let result = with_state(|s| {
                 for sc in &s.sclist {
-                    if (sc.menus as u32 & currmenu) == 0 { continue; }
-                    if sc.keystr.is_empty() { continue; }
+                    if (sc.menus as u32 & currmenu) == 0 {
+                        continue;
+                    }
+                    if sc.keystr.is_empty() {
+                        continue;
+                    }
                     count += 1;
                     if count == index {
                         return Some((sc.keycode, sc.keystr.len() > 1));
@@ -2539,10 +2764,7 @@ pub fn blank_row(win: &NanoWindow, row: u16) {
     let mut stdout = out();
     let _cols = win.cols;
     let abs_y = win.y + row;
-    let _ = queue!(stdout,
-        MoveTo(win.x, abs_y),
-        Clear(ClearType::UntilNewLine),
-    );
+    let _ = queue!(stdout, MoveTo(win.x, abs_y), Clear(ClearType::UntilNewLine),);
 }
 
 /* C: void blank_titlebar(void) */
@@ -2556,12 +2778,12 @@ pub fn blank_titlebar() {
 
 /* C: void blank_edit(void) */
 pub fn blank_edit() {
-    let (editwinrows, midwin_y, midwin_x, _midwin_cols) = with_state(|s| {
-        (s.editwinrows, s.midwin.y, s.midwin.x, s.midwin.cols)
-    });
+    let (editwinrows, midwin_y, midwin_x, _midwin_cols) =
+        with_state(|s| (s.editwinrows, s.midwin.y, s.midwin.x, s.midwin.cols));
     let mut stdout = out();
     for row in 0..editwinrows {
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
             Clear(ClearType::UntilNewLine),
         );
@@ -2602,12 +2824,18 @@ fn completion_grid(
     reserve_bottom_row: bool,
 ) -> CompletionGrid {
     if matches.len() < 2 || cols == 0 || edit_rows == 0 {
-        return CompletionGrid { name_width: 0, cells: Vec::new() };
+        return CompletionGrid {
+            name_width: 0,
+            cells: Vec::new(),
+        };
     }
 
     let available_rows = edit_rows.saturating_sub(usize::from(reserve_bottom_row));
     if available_rows == 0 {
-        return CompletionGrid { name_width: 0, cells: Vec::new() };
+        return CompletionGrid {
+            name_width: 0,
+            cells: Vec::new(),
+        };
     }
 
     // GNU nano leaves one terminal column unused when possible.  On a truly
@@ -2628,7 +2856,11 @@ fn completion_grid(
     // Match nano's established placement: keep one blank row between a short
     // list and the prompt, while a tall list starts at the top and uses its
     // final row for an overflow marker.
-    let first_row = if nrows < last_row { last_row - nrows } else { 0 };
+    let first_row = if nrows < last_row {
+        last_row - nrows
+    } else {
+        0
+    };
 
     let mut cells = Vec::new();
     for match_index in 0..matches.len() {
@@ -2641,11 +2873,12 @@ fn completion_grid(
 
         // When another complete row would not fit, reserve the bottom-right
         // cell for the same `(more)` indicator used by GNU nano.
-        if row == last_row
-            && column_in_grid + 1 == ncols
-            && match_index + 1 < matches.len()
-        {
-            cells.push(CompletionCell { row, column, match_index: None });
+        if row == last_row && column_in_grid + 1 == ncols && match_index + 1 < matches.len() {
+            cells.push(CompletionCell {
+                row,
+                column,
+                match_index: None,
+            });
             break;
         }
 
@@ -2706,18 +2939,19 @@ pub fn show_completion_candidates(matches: &[String]) {
 pub fn blank_statusbar() {
     let (footwin_x, footwin_y) = with_state(|s| (s.footwin.x, s.footwin.y));
     let mut stdout = out();
-    let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Clear(ClearType::UntilNewLine));
+    let _ = queue!(
+        stdout,
+        MoveTo(footwin_x, footwin_y),
+        Clear(ClearType::UntilNewLine)
+    );
 }
 
 /* C: void wipe_statusbar(void) */
 pub fn wipe_statusbar() {
     state_mut().lastmessage = MessageType::Vacuum;
 
-    let (zero, minibar, currmenu) = with_state(|s| (
-        s.flag_isset(ZERO),
-        s.flag_isset(MINIBAR),
-        s.currmenu,
-    ));
+    let (zero, minibar, currmenu) =
+        with_state(|s| (s.flag_isset(ZERO), s.flag_isset(MINIBAR), s.currmenu));
     let lines = screen_rows();
 
     if (zero || minibar || lines == 1) && currmenu == MMAIN {
@@ -2730,16 +2964,14 @@ pub fn wipe_statusbar() {
 
 /* C: void blank_bottombars(void) */
 pub fn blank_bottombars() {
-    let (no_help, footwin_y, footwin_x) = with_state(|s| (
-        s.flag_isset(NO_HELP),
-        s.footwin.y,
-        s.footwin.x,
-    ));
+    let (no_help, footwin_y, footwin_x) =
+        with_state(|s| (s.flag_isset(NO_HELP), s.footwin.y, s.footwin.x));
     let lines = screen_rows();
 
     if !no_help && lines > 5 {
         let mut stdout = out();
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(footwin_x, footwin_y + 1),
             Clear(ClearType::UntilNewLine),
             MoveTo(footwin_x, footwin_y + 2),
@@ -2779,33 +3011,47 @@ pub fn set_blankdelay_to_one() {
 // ---------------------------------------------------------------------------
 
 /* C: char *display_string(const char *text, size_t column, size_t span, bool isdata, bool isprompt) */
-pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, isprompt: bool) -> String {
+pub fn display_string<T: AsRef<[u8]> + ?Sized>(
+    text: &T,
+    column: usize,
+    span: usize,
+    isdata: bool,
+    isprompt: bool,
+) -> String {
     if span == 0 {
         return String::new();
     }
 
     // Hoist all the per-call state out of the per-character loop below.
-    let (cols, tabsize, softwrap) = with_state(|s| (
-        s.midwin.cols as usize,
-        s.tabsize as usize,
-        s.flag_isset(SOFTWRAP),
-    ));
+    let (cols, tabsize, softwrap) = with_state(|s| {
+        (
+            s.midwin.cols as usize,
+            s.tabsize as usize,
+            s.flag_isset(SOFTWRAP),
+        )
+    });
     let tabsize = if tabsize == 0 { 8 } else { tabsize };
 
     #[cfg(not(feature = "tiny"))]
-    let (ws_display, whitespace, wlen0, wlen1) = with_state(|s| (
-        s.flag_isset(WHITESPACE_DISPLAY),
-        if s.flag_isset(WHITESPACE_DISPLAY) { s.whitespace.clone() } else { None },
-        s.whitelen[0] as usize,
-        s.whitelen[1] as usize,
-    ));
+    let (ws_display, whitespace, wlen0, wlen1) = with_state(|s| {
+        (
+            s.flag_isset(WHITESPACE_DISPLAY),
+            if s.flag_isset(WHITESPACE_DISPLAY) {
+                s.whitespace.clone()
+            } else {
+                None
+            },
+            s.whitelen[0] as usize,
+            s.whitelen[1] as usize,
+        )
+    });
 
     let start_x = actual_x(text, column);
     let start_col = wideness(text, start_x);
     let beyond = column + span;
 
     let mut converted = String::with_capacity((cols + 20) * MAXCHARLEN);
-    let bytes = text.as_bytes();
+    let bytes = text.as_ref();
     let mut pos = start_x;
     let mut cur_col = start_col;
 
@@ -2816,8 +3062,10 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
     // be overwritten by a "<" token (C: start_col < column ||
     // (start_col > 0 && isdata && !SOFTWRAP)) — show placeholders instead.
     if (start_col < column || (start_col > 0 && isdata && !softwrap))
-        && pos < text.len() && bytes[pos] != b'\t' {
-        let ch = &text[pos..];
+        && pos < bytes.len()
+        && bytes[pos] != b'\t'
+    {
+        let ch = &bytes[pos..];
         if is_cntrl_char(ch) {
             if start_col < column {
                 converted.push(control_mbrep(ch, isdata));
@@ -2843,8 +3091,8 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
     // C loop guard: while (*text && (column < beyond || ZEROWIDTH_CHAR)).  Keep
     // consuming trailing zero-width characters at the right edge instead of
     // dropping them, so the inner break below is the real terminator.
-    while pos < text.len() {
-        let ch = &text[pos..];
+    while pos < bytes.len() {
+        let ch = &bytes[pos..];
         let b = bytes[pos];
 
         // Zero-width check first so we don't break out of loop
@@ -2855,36 +3103,6 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
 
         if !zerowidth && cur_col >= beyond {
             break;
-        }
-
-        // Plain printable ASCII (fast path)
-        if b > 0x20 && b != DEL as u8 {
-            #[cfg(not(feature = "utf8"))]
-            {
-                converted.push(b as char);
-                cur_col += 1;
-                pos += 1;
-                continue;
-            }
-            #[cfg(feature = "utf8")]
-            {
-                // ASCII or multi-byte
-                let cl = char_length(ch);
-                converted.push_str(&text[pos..pos + cl]);
-                let width = if is_doublewidth(ch) { 2 } else if zerowidth { 0 } else { 1 };
-                cur_col += width;
-                pos += cl;
-                continue;
-            }
-        }
-
-        // ISO 8859 characters (non-UTF8 mode)
-        #[cfg(not(feature = "utf8"))]
-        if b > 0x9F {
-            converted.push(b as char);
-            cur_col += 1;
-            pos += 1;
-            continue;
         }
 
         // Space
@@ -2908,7 +3126,8 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
         if b == b'\t' {
             #[cfg(not(feature = "tiny"))]
             if ws_display {
-                let can_show_tab = converted.len() > 0 || !isdata
+                let can_show_tab = converted.len() > 0
+                    || !isdata
                     || !softwrap
                     || cur_col % tabsize == 0
                     || cur_col == start_col;
@@ -2945,27 +3164,33 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
             continue;
         }
 
+        // Plain printable ASCII (fast path).
+        if (0x21..=0x7E).contains(&b) {
+            converted.push(b as char);
+            cur_col += 1;
+            pos += 1;
+            continue;
+        }
+
+        // ISO-8859 / raw high bytes in a single-byte locale.
+        if !crate::chars::using_utf8() {
+            converted.push(char::from_u32(b as u32).unwrap_or('\u{FFFD}'));
+            cur_col += 1;
+            pos += 1;
+            continue;
+        }
+
         // Multi-byte / UTF-8
         #[cfg(feature = "utf8")]
         {
-            let cl = char_length(ch);
-            if cl == 0 {
-                // Invalid byte
-                converted.push('\u{FFFD}');
-                pos += 1;
-                cur_col += 1;
-                continue;
-            }
-
-            if let Ok((wc, _)) = mbtowide(ch) {
+            if let Ok((wc, cl)) = mbtowide(ch) {
                 let charwidth = unicode_width::UnicodeWidthChar::width(wc).unwrap_or(1);
                 if zerowidth {
-                    // Copy zero-width char without incrementing column
-                    converted.push_str(&text[pos..pos + cl]);
+                    converted.push(wc);
                     pos += cl;
                     continue;
                 }
-                converted.push_str(&text[pos..pos + cl]);
+                converted.push(wc);
                 cur_col += charwidth;
                 pos += cl;
             } else {
@@ -2986,7 +3211,7 @@ pub fn display_string(text: &str, column: usize, span: usize, isdata: bool, ispr
     tl_set!(TILL_X, pos);
 
     // Trim if we went past the right edge
-    if cur_col > beyond || (pos < text.len() && (isprompt || (isdata && !softwrap))) {
+    if cur_col > beyond || (pos < bytes.len() && (isprompt || (isdata && !softwrap))) {
         #[cfg(feature = "utf8")]
         {
             let mut trim_pos = converted.len();
@@ -3046,7 +3271,11 @@ pub fn buffer_number() -> i32 {
 #[cfg(feature = "multibuffer")]
 pub fn buffer_count() -> i32 {
     with_state(|s| {
-        if s.openfile.is_none() { 0 } else { s.buffer_ring.len() as i32 + 1 }
+        if s.openfile.is_none() {
+            0
+        } else {
+            s.buffer_ring.len() as i32 + 1
+        }
     })
 }
 
@@ -3058,22 +3287,25 @@ pub fn buffer_count() -> i32 {
 #[cfg(not(feature = "tiny"))]
 pub fn show_states_at_win(win: &NanoWindow, cur_y: u16, cur_x: u16) {
     let mut stdout = out();
-    let (autoindent, has_mark, break_long, _recording, softwrap) = with_state(|s| (
-        s.flag_isset(AUTOINDENT),
-        s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some(),
-        s.flag_isset(BREAK_LONG_LINES),
-        false, // recording is in thread_local, not AppState
-        s.flag_isset(SOFTWRAP),
-    ));
+    let (autoindent, has_mark, break_long, _recording, softwrap) = with_state(|s| {
+        (
+            s.flag_isset(AUTOINDENT),
+            s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some(),
+            s.flag_isset(BREAK_LONG_LINES),
+            false, // recording is in thread_local, not AppState
+            s.flag_isset(SOFTWRAP),
+        )
+    });
     let rec = tl_get!(RECORDING);
 
-    let _ = queue!(stdout,
+    let _ = queue!(
+        stdout,
         MoveTo(win.x + cur_x, win.y + cur_y),
         Print(if autoindent { "I" } else { " " }),
-        Print(if has_mark    { "M" } else { " " }),
-        Print(if break_long  { "L" } else { " " }),
-        Print(if rec         { "R" } else { " " }),
-        Print(if softwrap    { "S" } else { " " }),
+        Print(if has_mark { "M" } else { " " }),
+        Print(if break_long { "L" } else { " " }),
+        Print(if rec { "R" } else { " " }),
+        Print(if softwrap { "S" } else { " " }),
     );
 }
 
@@ -3091,9 +3323,8 @@ pub fn queue_interface_color<W: Write>(w: &mut W, pair: i32) {
     {
         let pair_index = (pair & 0xFF) as usize;
         if pair_index > 0 {
-            let (fg, bg) = with_state(|s| {
-                *s.interface_color_rgb.get(pair_index).unwrap_or(&(-1, -1))
-            });
+            let (fg, bg) =
+                with_state(|s| *s.interface_color_rgb.get(pair_index).unwrap_or(&(-1, -1)));
             if fg >= 0 {
                 let _ = queue!(w, SetForegroundColor(ncurses_color_to_crossterm(fg)));
             }
@@ -3188,7 +3419,7 @@ pub fn ncurses_color_to_crossterm(nc: i16) -> Color {
         14 => Color::Cyan,
         15 => Color::White,
         n if n >= 16 => Color::AnsiValue(n as u8),
-        _ => Color::Reset,  // THE_DEFAULT = -1
+        _ => Color::Reset, // THE_DEFAULT = -1
     }
 }
 
@@ -3198,10 +3429,17 @@ pub fn ncurses_color_to_crossterm(nc: i16) -> Color {
 
 /* C: void titlebar(const char *path) */
 pub fn titlebar(path: Option<&str>) {
-    let (topwin_rows, topwin_y, topwin_x, cols, title_pair, currmenu, inhelp) = with_state(|s| (
-        s.topwin.rows, s.topwin.y, s.topwin.x, s.topwin.cols,
-        s.interface_color_pair[TITLE_BAR], s.currmenu, s.inhelp,
-    ));
+    let (topwin_rows, topwin_y, topwin_x, cols, title_pair, currmenu, inhelp) = with_state(|s| {
+        (
+            s.topwin.rows,
+            s.topwin.y,
+            s.topwin.x,
+            s.topwin.cols,
+            s.interface_color_pair[TITLE_BAR],
+            s.currmenu,
+            s.inhelp,
+        )
+    });
 
     if topwin_rows == 0 {
         return;
@@ -3224,13 +3462,16 @@ pub fn titlebar(path: Option<&str>) {
     let (upperleft, prefix, state, caption) = compute_titlebar_strings(path, currmenu, inhelp);
 
     let cols = cols as usize;
-    let reserve_modified = !inhelp && path.is_none() && currmenu != MLINTER && with_state(|s| {
-        let file = s.openfile.as_ref();
-        !s.flag_isset(VIEW_MODE)
-            && !s.flag_isset(STATEFLAGS)
-            && !s.flag_isset(RESTRICTED)
-            && !file.map(|f| f.modified).unwrap_or(false)
-    });
+    let reserve_modified = !inhelp
+        && path.is_none()
+        && currmenu != MLINTER
+        && with_state(|s| {
+            let file = s.openfile.as_ref();
+            !s.flag_isset(VIEW_MODE)
+                && !s.flag_isset(STATEFLAGS)
+                && !s.flag_isset(RESTRICTED)
+                && !file.map(|f| f.modified).unwrap_or(false)
+        });
     let layout = calculate_titlebar_layout(
         &upperleft,
         &prefix,
@@ -3261,21 +3502,28 @@ pub fn titlebar(path: Option<&str>) {
         let _ = queue!(stdout, Print(&disp));
     } else if 5 + layout.statelen <= cols {
         let _ = queue!(stdout, Print("..."));
-        let disp = display_string(&caption,
-            3 + layout.pathlen.saturating_sub(cols.saturating_sub(layout.statelen)),
+        let disp = display_string(
+            &caption,
+            3 + layout
+                .pathlen
+                .saturating_sub(cols.saturating_sub(layout.statelen)),
             cols.saturating_sub(layout.statelen),
-            false, false);
+            false,
+            false,
+        );
         let _ = queue!(stdout, Print(&disp));
     }
 
     // Print state flags or state word
     #[cfg(not(feature = "tiny"))]
     {
-        let (stateflags, view_mode, modified) = with_state(|s| (
-            s.flag_isset(STATEFLAGS),
-            s.flag_isset(VIEW_MODE),
-            s.openfile.as_ref().map(|f| f.modified).unwrap_or(false),
-        ));
+        let (stateflags, view_mode, modified) = with_state(|s| {
+            (
+                s.flag_isset(STATEFLAGS),
+                s.flag_isset(VIEW_MODE),
+                s.openfile.as_ref().map(|f| f.modified).unwrap_or(false),
+            )
+        });
         if !state.is_empty() && stateflags && !view_mode {
             if modified && cols > 1 {
                 let _ = queue!(stdout, Print(" *"));
@@ -3317,7 +3565,11 @@ fn calculate_titlebar_layout(
     cols: usize,
 ) -> TitlebarLayout {
     let mut verlen = breadth(upperleft) + 3;
-    let prefixlen = if prefix.is_empty() { 0 } else { breadth(prefix) + 1 };
+    let prefixlen = if prefix.is_empty() {
+        0
+    } else {
+        breadth(prefix) + 1
+    };
     let mut pathlen = breadth(caption);
     // GNU nano always reserves the two side cells initially.  They are eaten
     // only after the version and the Modified placeholder have been
@@ -3354,9 +3606,7 @@ fn calculate_titlebar_layout(
 
     let show_prefix = fits(verlen, prefixlen, pathlen, pluglen, statelen);
     let offset = if verlen > 0 {
-        verlen + cols
-            .saturating_sub(verlen + pluglen + statelen + prefixlen + pathlen)
-            / 2
+        verlen + cols.saturating_sub(verlen + pluglen + statelen + prefixlen + pathlen) / 2
     } else {
         0
     };
@@ -3398,7 +3648,12 @@ fn compute_titlebar_strings(
     #[cfg(feature = "color")]
     if currmenu == MLINTER {
         prefix = "Linting --".to_string();
-        let fname = with_state(|s| s.openfile.as_ref().map(|f| f.filename.clone()).unwrap_or_default());
+        let fname = with_state(|s| {
+            s.openfile
+                .as_ref()
+                .map(|f| f.filename.clone())
+                .unwrap_or_default()
+        });
         caption = fname;
         upperleft = String::new();
         state = String::new();
@@ -3469,7 +3724,9 @@ fn compute_titlebar_strings(
         // In help viewer
         upperleft = "GNU nano".to_string();
         prefix = String::new();
-        caption = path.map(|p| p.to_string()).unwrap_or_else(|| "Help".to_string());
+        caption = path
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "Help".to_string());
         state = String::new();
     }
 
@@ -3483,26 +3740,48 @@ fn compute_titlebar_strings(
 /* C: void minibar(void) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn minibar() {
-    let (footwin_x, footwin_y, cols, mini_pair,
-         filename, modified, current_lineno, filebot_lineno, _totsize,
-         constant_show, stateflags, has_anchor, using_utf8) = with_state(|s| {
+    let (
+        footwin_x,
+        footwin_y,
+        cols,
+        mini_pair,
+        filename,
+        modified,
+        current_lineno,
+        filebot_lineno,
+        _totsize,
+        constant_show,
+        stateflags,
+        has_anchor,
+        using_utf8,
+    ) = with_state(|s| {
         let f = s.openfile.as_ref();
         (
-            s.footwin.x, s.footwin.y, s.footwin.cols as usize,
+            s.footwin.x,
+            s.footwin.y,
+            s.footwin.cols as usize,
             s.interface_color_pair[MINI_INFOBAR],
             f.map(|f| f.filename.clone()).unwrap_or_default(),
             f.map(|f| f.modified).unwrap_or(false),
-            f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1),
-            f.and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1),
+            f.and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1),
+            f.and_then(|f| f.filebot.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1),
             f.map(|f| f.totsize).unwrap_or(0),
             s.flag_isset(CONSTANT_SHOW),
             s.flag_isset(STATEFLAGS),
-            f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().has_anchor).unwrap_or(false),
+            f.and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().has_anchor)
+                .unwrap_or(false),
             s.using_utf8,
         )
     });
 
-    if cols == 0 { return; }
+    if cols == 0 {
+        return;
+    }
 
     let mut stdout = out();
 
@@ -3529,10 +3808,25 @@ pub fn minibar() {
     // Display filename (possibly truncated)
     if cols > 4 {
         if namewidth > cols - 2 {
-            let shortname = display_string(&thename, namewidth.saturating_sub(cols - 5), cols - 5, false, false);
-            let _ = queue!(stdout, MoveTo(footwin_x, footwin_y), Print("..."), Print(&shortname));
+            let shortname = display_string(
+                &thename,
+                namewidth.saturating_sub(cols - 5),
+                cols - 5,
+                false,
+                false,
+            );
+            let _ = queue!(
+                stdout,
+                MoveTo(footwin_x, footwin_y),
+                Print("..."),
+                Print(&shortname)
+            );
         } else {
-            let _ = queue!(stdout, MoveTo(footwin_x + padding as u16, footwin_y), Print(&thename));
+            let _ = queue!(
+                stdout,
+                MoveTo(footwin_x + padding as u16, footwin_y),
+                Print(&thename)
+            );
         }
         let _ = queue!(stdout, Print(if modified { " *" } else { "  " }));
     }
@@ -3556,7 +3850,11 @@ pub fn minibar() {
     // (and panicking) on a narrow terminal.
     if constant_show && namewidth + placewidth + 32 < cols {
         let loc_col = (cols - 27 - placewidth) as u16;
-        let _ = queue!(stdout, MoveTo(footwin_x + loc_col, footwin_y), Print(&location));
+        let _ = queue!(
+            stdout,
+            MoveTo(footwin_x + loc_col, footwin_y),
+            Print(&location)
+        );
     }
 
     // Display the hex code of the character under the cursor, plus the codes of
@@ -3568,7 +3866,11 @@ pub fn minibar() {
         hex_str.push_str(&succ);
         had_successor = has_succ;
         let hex_col = (cols - 23) as u16;
-        let _ = queue!(stdout, MoveTo(footwin_x + hex_col, footwin_y), Print(&hex_str));
+        let _ = queue!(
+            stdout,
+            MoveTo(footwin_x + hex_col, footwin_y),
+            Print(&hex_str)
+        );
     }
 
     // Display the state flags — but not when a succeeding zero-width code was
@@ -3582,7 +3884,11 @@ pub fn minibar() {
     if has_anchor && namewidth + 7 < cols {
         let anchor_col = (cols - 5 - padding) as u16;
         let dagger = if using_utf8 { "\u{2020}" } else { "+" };
-        let _ = queue!(stdout, MoveTo(footwin_x + anchor_col, footwin_y), Print(dagger));
+        let _ = queue!(
+            stdout,
+            MoveTo(footwin_x + anchor_col, footwin_y),
+            Print(dagger)
+        );
     }
 
     // Display percentage
@@ -3590,7 +3896,11 @@ pub fn minibar() {
         let pct = 100 * current_lineno / filebot_lineno.max(1);
         let pct_str = format!("{:3}%", pct);
         let pct_col = (cols - 4 - padding) as u16;
-        let _ = queue!(stdout, MoveTo(footwin_x + pct_col, footwin_y), Print(&pct_str));
+        let _ = queue!(
+            stdout,
+            MoveTo(footwin_x + pct_col, footwin_y),
+            Print(&pct_str)
+        );
     }
 
     reset_color();
@@ -3602,12 +3912,14 @@ pub fn minibar() {
 fn compute_cursor_hex() -> String {
     let (data, current_x, using_utf8, has_next) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let data = f.and_then(|f| f.current.as_ref())
+        let data = f
+            .and_then(|f| f.current.as_ref())
             .map(|l| l.borrow().data.clone())
             .unwrap_or_default();
         let cx = f.map(|f| f.current_x).unwrap_or(0);
         let utf8 = s.using_utf8;
-        let next = f.and_then(|f| f.current.as_ref())
+        let next = f
+            .and_then(|f| f.current.as_ref())
             .and_then(|l| l.borrow().next.clone())
             .is_some();
         (data, cx, utf8, next)
@@ -3615,14 +3927,18 @@ fn compute_cursor_hex() -> String {
 
     if current_x >= data.len() {
         if has_next {
-            return if using_utf8 { "U+000A".to_string() } else { "  0x0A".to_string() };
+            return if using_utf8 {
+                "U+000A".to_string()
+            } else {
+                "  0x0A".to_string()
+            };
         } else {
             return "  ----".to_string();
         }
     }
 
     let ch = &data[current_x..];
-    let b = ch.as_bytes()[0];
+    let b = ch[0];
 
     if b == b'\n' {
         return "  0x00".to_string();
@@ -3654,7 +3970,8 @@ fn compute_cursor_hex_successors() -> (String, bool) {
     {
         let (data, current_x, using_utf8) = with_state(|s| {
             let f = s.openfile.as_ref();
-            let data = f.and_then(|f| f.current.as_ref())
+            let data = f
+                .and_then(|f| f.current.as_ref())
                 .map(|l| l.borrow().data.clone())
                 .unwrap_or_default();
             let cx = f.map(|f| f.current_x).unwrap_or(0);
@@ -3711,14 +4028,16 @@ pub fn statusline(importance: MessageType, msg: &str) {
         return;
     }
 
-    let (cols, footwin_x, footwin_y, _zero, _minibar_on, _currmenu) = with_state(|s| (
-        s.footwin.cols as usize,
-        s.footwin.x,
-        s.footwin.y,
-        s.flag_isset(ZERO),
-        s.flag_isset(MINIBAR),
-        s.currmenu,
-    ));
+    let (cols, footwin_x, footwin_y, _zero, _minibar_on, _currmenu) = with_state(|s| {
+        (
+            s.footwin.cols as usize,
+            s.footwin.x,
+            s.footwin.y,
+            s.flag_isset(ZERO),
+            s.flag_isset(MINIBAR),
+            s.currmenu,
+        )
+    });
 
     let mut stdout = out();
 
@@ -3772,18 +4091,30 @@ pub fn statusline(importance: MessageType, msg: &str) {
     }
 
     let msg_width = breadth(&message);
-    let start_col = if msg_width < cols { (cols - msg_width) / 2 } else { 0 };
+    let start_col = if msg_width < cols {
+        (cols - msg_width) / 2
+    } else {
+        0
+    };
     let bracketed = start_col > 1;
 
     STATUSLINE_START_COL.with(|sc| *sc.borrow_mut() = start_col);
 
     apply_interface_color(colorpair);
 
-    let col = if bracketed { start_col.saturating_sub(2) } else { start_col };
+    let col = if bracketed {
+        start_col.saturating_sub(2)
+    } else {
+        start_col
+    };
     let _ = queue!(stdout, MoveTo(footwin_x + col as u16, footwin_y));
-    if bracketed { let _ = queue!(stdout, Print("[ ")); }
+    if bracketed {
+        let _ = queue!(stdout, Print("[ "));
+    }
     let _ = queue!(stdout, Print(&message));
-    if bracketed { let _ = queue!(stdout, Print(" ]")); }
+    if bracketed {
+        let _ = queue!(stdout, Print(" ]"));
+    }
 
     reset_color();
     let _ = stdout.flush();
@@ -3828,7 +4159,9 @@ pub fn post_one_key(keystroke: &str, tag: &str, width: i32) {
 
     let ks_width = breadth(keystroke);
     let remaining = width.saturating_sub(ks_width);
-    if remaining < 2 { return; }
+    if remaining < 2 {
+        return;
+    }
 
     let _ = queue!(stdout, Print(" "));
 
@@ -3853,22 +4186,40 @@ fn post_one_key_at(keystroke: &str, tag: &str, width: usize, row: u16, col: u16)
 pub fn bottombars(menu: u32) {
     state_mut().currmenu = menu;
 
-    let (no_help, zero, minibar_on) = with_state(|s| (
-        s.flag_isset(NO_HELP),
-        s.flag_isset(ZERO),
-        s.flag_isset(MINIBAR),
-    ));
+    let (no_help, zero, minibar_on) = with_state(|s| {
+        (
+            s.flag_isset(NO_HELP),
+            s.flag_isset(ZERO),
+            s.flag_isset(MINIBAR),
+        )
+    });
     let lines = screen_rows();
 
-    let min_lines = if zero { 3 } else if minibar_on { 4 } else { 5 };
-    if no_help || (lines as i32) < min_lines { return; }
+    let min_lines = if zero {
+        3
+    } else if minibar_on {
+        4
+    } else {
+        5
+    };
+    if no_help || (lines as i32) < min_lines {
+        return;
+    }
 
     let number = shown_entries_for(menu);
-    if number == 0 { return; }
+    if number == 0 {
+        return;
+    }
 
     let cols = state().footwin.cols as usize;
-    let itemwidth = if number == 0 { return } else { cols / ((number + 1) / 2) };
-    if itemwidth == 0 { return; }
+    let itemwidth = if number == 0 {
+        return;
+    } else {
+        cols / ((number + 1) / 2)
+    };
+    if itemwidth == 0 {
+        return;
+    }
 
     blank_bottombars();
 
@@ -3876,18 +4227,27 @@ pub fn bottombars(menu: u32) {
         let mut v = Vec::new();
         let mut count = 0usize;
         for f in &s.allfuncs {
-            if count >= number { break; }
-            if (f.menus as u32 & menu) == 0 { continue; }
+            if count >= number {
+                break;
+            }
+            if (f.menus as u32 & menu) == 0 {
+                continue;
+            }
             // Find first shortcut for this function
             if let Some(func) = f.func {
                 for sc in &s.sclist {
-                    if (sc.menus as u32 & menu) != 0 && sc.func == Some(func) && !sc.keystr.is_empty() {
+                    if (sc.menus as u32 & menu) != 0
+                        && sc.func == Some(func)
+                        && !sc.keystr.is_empty()
+                    {
                         v.push((sc.keycode, sc.keystr, f.tag));
                         break;
                     }
                 }
             }
-            if v.len() > count { count += 1; }
+            if v.len() > count {
+                count += 1;
+            }
         }
         v
     });
@@ -3914,9 +4274,8 @@ pub fn bottombars(menu: u32) {
 
 /* C: void place_the_cursor(void) */
 pub fn place_the_cursor() {
-    let (editwinrows, midwin_x, midwin_y, margin) = with_state(|s| {
-        (s.editwinrows, s.midwin.x, s.midwin.y, s.margin)
-    });
+    let (editwinrows, midwin_x, midwin_y, margin) =
+        with_state(|s| (s.editwinrows, s.midwin.x, s.midwin.y, s.margin));
 
     let column = xplustabs();
     let mut row: isize;
@@ -3931,29 +4290,47 @@ pub fn place_the_cursor() {
                 f.and_then(|f| f.current.clone()),
             )
         });
-        let (Some(edittop), Some(current)) = (edittop, current) else { return };
+        let (Some(edittop), Some(current)) = (edittop, current) else {
+            return;
+        };
 
-        row = -({ let b = edittop.borrow(); chunk_for(firstcolumn, &b.data) } as isize);
+        row = -({
+            let b = edittop.borrow();
+            chunk_for(firstcolumn, &b.data)
+        } as isize);
 
         // Calculate how many rows the lines from edittop to current use.
         let mut line = Some(edittop);
         while let Some(l) = line {
-            if LinePtr::ptr_eq(&l, &current) { break; }
-            row += 1 + { let b = l.borrow(); extra_chunks_in(&b.data) as isize };
+            if LinePtr::ptr_eq(&l, &current) {
+                break;
+            }
+            row += 1 + {
+                let b = l.borrow();
+                extra_chunks_in(&b.data) as isize
+            };
             line = l.borrow().next.clone();
         }
 
         // Add the number of wraps in the current line before the cursor.
-        let (chunk_row, leftedge) = { let b = current.borrow(); get_chunk_and_edge_for(&b.data, column) };
+        let (chunk_row, leftedge) = {
+            let b = current.borrow();
+            get_chunk_and_edge_for(&b.data, column)
+        };
         row += chunk_row as isize;
         let col = column - leftedge;
 
         if row >= 0 && row < editwinrows as isize {
-            let _ = queue!(out(), MoveTo(midwin_x + margin as u16 + col as u16,
-                midwin_y + row as u16));
+            let _ = queue!(
+                out(),
+                MoveTo(midwin_x + margin as u16 + col as u16, midwin_y + row as u16)
+            );
             with_state_mut(|s| s.openfile.as_mut().map(|f| f.cursor_row = row));
         } else {
-            statusline(MessageType::Alert, "Misplaced cursor -- please report a bug");
+            statusline(
+                MessageType::Alert,
+                "Misplaced cursor -- please report a bug",
+            );
         }
         let _ = out().flush();
         return;
@@ -3965,8 +4342,14 @@ pub fn place_the_cursor() {
     // Non-softwrap path
     let (edittop_lineno, current_lineno, _current_x) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-        let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
+        let et = f
+            .and_then(|f| f.edittop.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
+        let cl = f
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
         let cx = f.map(|f| f.current_x).unwrap_or(0);
         (et, cl, cx)
     });
@@ -3978,11 +4361,16 @@ pub fn place_the_cursor() {
     // Clamp row to the visible edit window — cursor may temporarily appear out
     // of range if the viewport hasn't caught up with a buffer modification.
     let clamped_row = row.min(editwinrows as isize - 1).max(0);
-    let _ = queue!(out(), MoveTo(
-        midwin_x + margin as u16 + display_col as u16,
-        midwin_y + clamped_row as u16
-    ));
-    with_state_mut(|s| { s.openfile.as_mut().map(|f| f.cursor_row = clamped_row); });
+    let _ = queue!(
+        out(),
+        MoveTo(
+            midwin_x + margin as u16 + display_col as u16,
+            midwin_y + clamped_row as u16
+        )
+    );
+    with_state_mut(|s| {
+        s.openfile.as_mut().map(|f| f.cursor_row = clamped_row);
+    });
     let _ = out().flush();
 }
 
@@ -3991,9 +4379,9 @@ pub fn place_the_cursor() {
 // ---------------------------------------------------------------------------
 
 /* C: size_t get_softwrap_breakpoint(const char *linedata, size_t leftedge,
-                                      bool *kickoff, bool *end_of_line) */
-pub fn get_softwrap_breakpoint(
-    linedata: &str,
+bool *kickoff, bool *end_of_line) */
+pub fn get_softwrap_breakpoint<T: AsRef<[u8]> + ?Sized>(
+    linedata: &T,
     leftedge: usize,
     kickoff: &mut bool,
     end_of_line: &mut bool,
@@ -4018,12 +4406,12 @@ pub fn get_softwrap_breakpoint(
         )
     };
 
-    let _bytes = linedata.as_bytes();
-    let len = linedata.len();
+    let bytes = linedata.as_ref();
+    let len = bytes.len();
 
     // Find where the current chunk starts
     while text_offset < len && column < leftedge {
-        let consumed = advance_over(&linedata[text_offset..], &mut column);
+        let consumed = advance_over(&bytes[text_offset..], &mut column);
         text_offset += consumed;
     }
 
@@ -4033,12 +4421,16 @@ pub fn get_softwrap_breakpoint(
 
     // Find where this chunk ends
     while text_offset < len && column <= rightside {
-        let ch = &linedata[text_offset..];
+        let ch = &bytes[text_offset..];
         if at_blanks && is_blank_char(ch) && column < rightside {
             last_blank_offset = Some(text_offset);
             last_blank_col = column;
         }
-        breaking_col = if ch.starts_with('\t') { rightside } else { column };
+        breaking_col = if ch.starts_with(b"\t") {
+            rightside
+        } else {
+            column
+        };
         let consumed = advance_over(ch, &mut column);
         text_offset += consumed;
     }
@@ -4054,7 +4446,7 @@ pub fn get_softwrap_breakpoint(
 
     // Softwrap-at-blanks
     if let Some(blank_off) = last_blank_offset {
-        let blank_ch = &linedata[blank_off..];
+        let blank_ch = &bytes[blank_off..];
         let mut after = last_blank_col;
         let step = advance_over(blank_ch, &mut after);
         if after <= rightside {
@@ -4062,16 +4454,23 @@ pub fn get_softwrap_breakpoint(
             SWB_COLUMN.with(|c| *c.borrow_mut() = after);
             return after;
         }
-        if blank_ch.starts_with('\t') {
+        if blank_ch.starts_with(b"\t") {
             breaking_col = rightside;
         }
     }
 
-    if editwincols > 1 { breaking_col } else { column.saturating_sub(1) }
+    if editwincols > 1 {
+        breaking_col
+    } else {
+        column.saturating_sub(1)
+    }
 }
 
 /* C: size_t get_chunk_and_edge(size_t column, linestruct *line, size_t *leftedge) */
-pub fn get_chunk_and_edge_for(linedata: &str, column: usize) -> (usize, usize) {
+pub fn get_chunk_and_edge_for<T: AsRef<[u8]> + ?Sized>(
+    linedata: &T,
+    column: usize,
+) -> (usize, usize) {
     let mut current_chunk = 0usize;
     let mut end_of_line = false;
     let mut kickoff = true;
@@ -4088,17 +4487,17 @@ pub fn get_chunk_and_edge_for(linedata: &str, column: usize) -> (usize, usize) {
 }
 
 /* C: size_t extra_chunks_in(linestruct *line) */
-pub fn extra_chunks_in(linedata: &str) -> usize {
+pub fn extra_chunks_in<T: AsRef<[u8]> + ?Sized>(linedata: &T) -> usize {
     get_chunk_and_edge_for(linedata, usize::MAX).0
 }
 
 /* C: size_t chunk_for(size_t column, linestruct *line) */
-pub fn chunk_for(column: usize, linedata: &str) -> usize {
+pub fn chunk_for<T: AsRef<[u8]> + ?Sized>(column: usize, linedata: &T) -> usize {
     get_chunk_and_edge_for(linedata, column).0
 }
 
 /* C: size_t leftedge_for(size_t column, linestruct *line) */
-pub fn leftedge_for(column: usize, linedata: &str) -> usize {
+pub fn leftedge_for<T: AsRef<[u8]> + ?Sized>(column: usize, linedata: &T) -> usize {
     get_chunk_and_edge_for(linedata, column).1
 }
 
@@ -4106,15 +4505,24 @@ pub fn leftedge_for(column: usize, linedata: &str) -> usize {
 pub fn ensure_firstcolumn_is_aligned() {
     let softwrap = state().flag_isset(SOFTWRAP);
     if softwrap {
-        let (firstcolumn, edittop_data) = with_state(|s| (
-            s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
-            s.openfile.as_ref().and_then(|f| f.edittop.as_ref())
-                .map(|l| l.borrow().data.clone()).unwrap_or_default(),
-        ));
+        let (firstcolumn, edittop_data) = with_state(|s| {
+            (
+                s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
+                s.openfile
+                    .as_ref()
+                    .and_then(|f| f.edittop.as_ref())
+                    .map(|l| l.borrow().data.clone())
+                    .unwrap_or_default(),
+            )
+        });
         let new_fc = leftedge_for(firstcolumn, &edittop_data);
-        with_state_mut(|s| { s.openfile.as_mut().map(|f| f.firstcolumn = new_fc); });
+        with_state_mut(|s| {
+            s.openfile.as_mut().map(|f| f.firstcolumn = new_fc);
+        });
     } else {
-        with_state_mut(|s| { s.openfile.as_mut().map(|f| f.firstcolumn = 0); });
+        with_state_mut(|s| {
+            s.openfile.as_mut().map(|f| f.firstcolumn = 0);
+        });
     }
     state_mut().focusing = false;
 }
@@ -4124,7 +4532,8 @@ pub fn actual_last_column(leftedge: usize, column: usize) -> usize {
     #[cfg(not(feature = "tiny"))]
     if state().flag_isset(SOFTWRAP) {
         let linedata = with_state(|s| {
-            s.openfile.as_ref()
+            s.openfile
+                .as_ref()
                 .and_then(|f| f.current.as_ref())
                 .map(|l| l.borrow().data.clone())
                 .unwrap_or_default()
@@ -4133,7 +4542,11 @@ pub fn actual_last_column(leftedge: usize, column: usize) -> usize {
         let mut last_chunk = false;
         let end_col = get_softwrap_breakpoint(&linedata, leftedge, &mut kickoff, &mut last_chunk);
         let end_col = end_col - leftedge;
-        let end_col = if !last_chunk { end_col.saturating_sub(1) } else { end_col };
+        let end_col = if !last_chunk {
+            end_col.saturating_sub(1)
+        } else {
+            end_col
+        };
         return leftedge + column.min(end_col);
     }
     leftedge + column
@@ -4149,20 +4562,31 @@ pub fn current_is_above_screen() -> bool {
     if state().flag_isset(SOFTWRAP) {
         let (cur_lineno, et_lineno, _cur_col, firstcol) = with_state(|s| {
             let f = s.openfile.as_ref();
-            let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-            let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
+            let cl = f
+                .and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(0);
+            let et = f
+                .and_then(|f| f.edittop.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(0);
             let cc = xplustabs();
             let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
             (cl, et, cc, fc)
         });
-        return cur_lineno < et_lineno
-            || (cur_lineno == et_lineno && xplustabs() < firstcol);
+        return cur_lineno < et_lineno || (cur_lineno == et_lineno && xplustabs() < firstcol);
     }
 
     let (cur_lineno, et_lineno) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-        let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
+        let cl = f
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
+        let et = f
+            .and_then(|f| f.edittop.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
         (cl, et)
     });
     cur_lineno < et_lineno
@@ -4171,7 +4595,11 @@ pub fn current_is_above_screen() -> bool {
 /* C: bool current_is_below_screen(void) */
 pub fn current_is_below_screen() -> bool {
     let (editwinrows, shim) = with_state(|s| {
-        let shim = if s.flag_isset(ZERO) && (s.currmenu == MREPLACEWITH || s.currmenu == MYESNO) { 1 } else { 0 };
+        let shim = if s.flag_isset(ZERO) && (s.currmenu == MREPLACEWITH || s.currmenu == MYESNO) {
+            1
+        } else {
+            0
+        };
         (s.editwinrows, shim)
     });
 
@@ -4185,7 +4613,9 @@ pub fn current_is_below_screen() -> bool {
                 f.and_then(|f| f.current.clone()),
             )
         });
-        let (Some(mut line), Some(current)) = (edittop, current) else { return false };
+        let (Some(mut line), Some(current)) = (edittop, current) else {
+            return false;
+        };
         let mut leftedge = firstcol;
 
         // If current[current_x] is more than a screen's worth of lines after
@@ -4196,13 +4626,22 @@ pub fn current_is_below_screen() -> bool {
         return exhausted
             && (line_lineno < cur_lineno
                 || (line_lineno == cur_lineno
-                    && leftedge < { let b = current.borrow(); leftedge_for(xplustabs(), &b.data) }));
+                    && leftedge < {
+                        let b = current.borrow();
+                        leftedge_for(xplustabs(), &b.data)
+                    }));
     }
 
     let (cur_lineno, et_lineno) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
-        let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0);
+        let cl = f
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
+        let et = f
+            .and_then(|f| f.edittop.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(0);
         (cl, et)
     });
     cur_lineno >= et_lineno + editwinrows as isize - shim as isize
@@ -4225,7 +4664,10 @@ pub fn go_back_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -> i
     if state().flag_isset(SOFTWRAP) {
         // Recede through the requested number of chunks.
         while i > 0 {
-            let chunk = { let b = line.borrow(); chunk_for(*leftedge, &b.data) };
+            let chunk = {
+                let b = line.borrow();
+                chunk_for(*leftedge, &b.data)
+            };
             *leftedge = 0;
 
             if chunk >= i as usize {
@@ -4282,7 +4724,10 @@ pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -
                 get_softwrap_breakpoint(&b.data, current_leftedge, &mut kickoff, &mut end_of_line)
             };
 
-            if !end_of_line { i -= 1; continue; }
+            if !end_of_line {
+                i -= 1;
+                continue;
+            }
 
             let next = line.borrow().next.clone();
             match next {
@@ -4297,7 +4742,9 @@ pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -
         }
 
         // Only change leftedge when we actually could move.
-        if i < nrows { *leftedge = current_leftedge; }
+        if i < nrows {
+            *leftedge = current_leftedge;
+        }
         return i;
     }
 
@@ -4319,23 +4766,35 @@ pub fn go_forward_chunks(nrows: i32, line: &mut LinePtr, leftedge: &mut usize) -
 pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
     #[cfg(not(feature = "tiny"))]
     if state().flag_isset(SOFTWRAP) {
-        let (editwinrows, current) = with_state(|s| (
-            s.editwinrows,
-            s.openfile.as_ref().and_then(|f| f.current.clone()),
-        ));
+        let (editwinrows, current) = with_state(|s| {
+            (
+                s.editwinrows,
+                s.openfile.as_ref().and_then(|f| f.current.clone()),
+            )
+        });
         let Some(mut line) = current else { return true };
         let col = xplustabs();
-        let mut leftedge = { let b = line.borrow(); leftedge_for(col, &b.data) };
+        let mut leftedge = {
+            let b = line.borrow();
+            leftedge_for(col, &b.data)
+        };
         let rows_left = go_back_chunks(editwinrows - 1, &mut line, &mut leftedge);
         let back_lineno = line.borrow().lineno;
-        return rows_left > 0 || back_lineno < was_lineno as isize
+        return rows_left > 0
+            || back_lineno < was_lineno as isize
             || (back_lineno == was_lineno as isize && leftedge <= was_leftedge);
     }
 
-    let (cur_lineno, editwinrows) = with_state(|s| (
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
-        s.editwinrows,
-    ));
+    let (cur_lineno, editwinrows) = with_state(|s| {
+        (
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(0),
+            s.editwinrows,
+        )
+    });
     (cur_lineno - was_lineno as isize) < editwinrows as isize
 }
 
@@ -4344,8 +4803,7 @@ pub fn less_than_a_screenful(was_lineno: usize, was_leftedge: usize) -> bool {
 // ---------------------------------------------------------------------------
 
 /* C: void draw_row(int row, const char *converted, linestruct *line, size_t from_col) */
-pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
-{
+pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize) {
     // Keep node borrows scoped: apply_syntax_highlighting below needs to
     // borrow_mut the node to update its multidata.
     let (line_lineno, has_anchor) = {
@@ -4354,7 +4812,14 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     };
 
     let (midwin_x, midwin_y, margin, cols, _sidebar, editwincols) = with_state(|s| {
-        (s.midwin.x, s.midwin.y, s.margin, s.midwin.cols as usize, s.sidebar, s.editwincols as usize)
+        (
+            s.midwin.x,
+            s.midwin.y,
+            s.margin,
+            s.midwin.cols as usize,
+            s.sidebar,
+            s.editwincols as usize,
+        )
     });
     let mut stdout = out();
 
@@ -4394,15 +4859,23 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     }
 
     // Write the converted line text
-    let _ = queue!(stdout, MoveTo(midwin_x + margin as u16, abs_y), Print(converted));
+    let _ = queue!(
+        stdout,
+        MoveTo(midwin_x + margin as u16, abs_y),
+        Print(converted)
+    );
 
     // Clear to end of line if needed
     let is_shorter = tl_get!(IS_SHORTER);
     let softwrap_on = {
         #[cfg(not(feature = "tiny"))]
-        { state().flag_isset(SOFTWRAP) }
+        {
+            state().flag_isset(SOFTWRAP)
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     };
 
     if is_shorter || softwrap_on {
@@ -4414,13 +4887,21 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     {
         let sidebar_val = state().sidebar;
         if sidebar_val != 0 {
-            let bardata = state().bardata.get(row as usize).copied().unwrap_or(b' ' as i32);
+            let bardata = state()
+                .bardata
+                .get(row as usize)
+                .copied()
+                .unwrap_or(b' ' as i32);
             let bar_char = (bardata & 0xFF) as u8 as char;
             let bar_reverse = (bardata & A_REVERSE) != 0;
             if bar_reverse {
                 let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
             }
-            let _ = queue!(stdout, MoveTo(midwin_x + cols as u16 - 1, abs_y), Print(bar_char));
+            let _ = queue!(
+                stdout,
+                MoveTo(midwin_x + cols as u16 - 1, abs_y),
+                Print(bar_char)
+            );
             if bar_reverse {
                 let _ = queue!(stdout, SetAttribute(Attribute::NormalIntensity));
                 reset_color();
@@ -4439,7 +4920,8 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
         let sequel = tl_get!(SEQUEL_COLUMN);
         let inhelp = state().inhelp;
         let from_col_usize = from_col;
-        if stripe_col > from_col_usize as isize && !inhelp
+        if stripe_col > from_col_usize as isize
+            && !inhelp
             && (sequel == 0 || stripe_col as usize <= sequel)
             && stripe_col as usize <= from_col_usize + editwincols
         {
@@ -4454,8 +4936,11 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
 
             let guide_pair = state().interface_color_pair[GUIDE_STRIPE];
             apply_interface_color(guide_pair);
-            let _ = queue!(stdout, MoveTo(midwin_x + margin as u16 + target_column as u16, abs_y),
-                Print(&striped_char));
+            let _ = queue!(
+                stdout,
+                MoveTo(midwin_x + margin as u16 + target_column as u16, abs_y),
+                Print(&striped_char)
+            );
             reset_color();
         }
     }
@@ -4464,7 +4949,16 @@ pub fn draw_row(row: i32, converted: &str, line: &LinePtr, from_col: usize)
     #[cfg(not(feature = "tiny"))]
     {
         let node = line.borrow();
-        apply_mark_highlighting(row, converted, line_lineno, &node.data, from_col, abs_y, midwin_x, margin);
+        apply_mark_highlighting(
+            row,
+            converted,
+            line_lineno,
+            &node.data,
+            from_col,
+            abs_y,
+            midwin_x,
+            margin,
+        );
     }
 }
 
@@ -4481,13 +4975,16 @@ fn apply_syntax_highlighting(
     margin: i32,
 ) {
     let syntax = with_state(|s| {
-        s.openfile.as_ref()
+        s.openfile
+            .as_ref()
             .and_then(|f| f.syntax)
             .map(|p| unsafe { &*p })
     });
 
     let no_syntax = state().flag_isset(NO_SYNTAX);
-    if no_syntax { return; }
+    if no_syntax {
+        return;
+    }
     let Some(syntax) = syntax else { return };
 
     let from_x = tl_get!(FROM_X);
@@ -4502,7 +4999,8 @@ fn apply_syntax_highlighting(
         }
         set_color(v);
         let mut stdout = out();
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y),
             Print(piece),
         );
@@ -4517,19 +5015,25 @@ fn apply_syntax_highlighting(
         if v.end.is_none() {
             if let Some(regex) = &v.start {
                 let node = line.borrow();
-                let line_data: &str = &node.data;
+                let line_data: &[u8] = node.data.as_bytes();
                 let mut search_from = from_x;
 
                 while search_from < PAINT_LIMIT && search_from < till_x {
                     // find_at gives REG_NOTBOL semantics: ^ only matches
                     // at the real start of the line.
-                    let Some(m) = regex.find_at(line_data, search_from) else { break };
+                    let Some(m) = regex.find_at(line_data, search_from) else {
+                        break;
+                    };
                     let match_so = m.start();
                     let match_eo = m.end();
 
-                    if match_so >= till_x { break; }
+                    if match_so >= till_x {
+                        break;
+                    }
                     if match_so == match_eo {
-                        if match_eo >= line_data.len() { break; }
+                        if match_eo >= line_data.len() {
+                            break;
+                        }
                         search_from = step_right(line_data, match_eo);
                         continue;
                     }
@@ -4540,11 +5044,14 @@ fn apply_syntax_highlighting(
 
                     let start_col = if match_so > from_x {
                         wideness(line_data, match_so).saturating_sub(from_col)
-                    } else { 0 };
+                    } else {
+                        0
+                    };
 
                     let thetext_x = actual_x(converted, start_col);
                     let end_col = wideness(line_data, match_eo).saturating_sub(from_col);
-                    let paintlen = actual_x(&converted[thetext_x..], end_col.saturating_sub(start_col));
+                    let paintlen =
+                        actual_x(&converted[thetext_x..], end_col.saturating_sub(start_col));
 
                     paint(v, start_col, &converted[thetext_x..thetext_x + paintlen]);
 
@@ -4567,7 +5074,7 @@ fn apply_syntax_highlighting(
         // (the node must not be borrowed when we borrow_mut it).
         let new_state: i16 = {
             let node = line.borrow();
-            let line_data: &str = &node.data;
+            let line_data: &[u8] = node.data.as_bytes();
             let mut state: i16 = NOTHING;
             let mut index: usize = 0;
             let mut painted_whole = false;
@@ -4576,8 +5083,10 @@ fn apply_syntax_highlighting(
                 Some(ref p) => {
                     let pb = p.borrow();
                     if pb.multidata.is_empty() {
-                        statusline(MessageType::Alert,
-                            "Missing multidata -- please report a bug");
+                        statusline(
+                            MessageType::Alert,
+                            "Missing multidata -- please report a bug",
+                        );
                         NOTHING
                     } else if id < pb.multidata.len() {
                         pb.multidata[id]
@@ -4601,8 +5110,10 @@ fn apply_syntax_highlighting(
                     Some(em) => {
                         // Only if it is visible, paint the part to be coloured.
                         if em.end() > from_x {
-                            let paintlen = actual_x(converted,
-                                wideness(line_data, em.end()).saturating_sub(from_col));
+                            let paintlen = actual_x(
+                                converted,
+                                wideness(line_data, em.end()).saturating_sub(from_col),
+                            );
                             paint(v, 0, &converted[..paintlen]);
                         }
                         state = ENDSHERE;
@@ -4613,12 +5124,16 @@ fn apply_syntax_highlighting(
 
             // Now look for start matches on this line.
             while !painted_whole && index < PAINT_LIMIT {
-                let Some(sm) = start_re.find_at(line_data, index) else { break };
+                let Some(sm) = start_re.find_at(line_data, index) else {
+                    break;
+                };
                 let (start_so, start_eo) = (sm.start(), sm.end());
 
                 let start_col = if start_so > from_x {
                     wideness(line_data, start_so).saturating_sub(from_col)
-                } else { 0 };
+                } else {
+                    0
+                };
                 let thetext_x = actual_x(converted, start_col);
 
                 match end_re.find_at(line_data, start_eo) {
@@ -4627,17 +5142,21 @@ fn apply_syntax_highlighting(
                         // Only paint the match when it is visible on screen
                         // and more than zero characters long.
                         if end_eo > from_x && end_eo > start_so {
-                            let paintlen = actual_x(&converted[thetext_x..],
+                            let paintlen = actual_x(
+                                &converted[thetext_x..],
                                 wideness(line_data, end_eo)
                                     .saturating_sub(from_col)
-                                    .saturating_sub(start_col));
+                                    .saturating_sub(start_col),
+                            );
                             paint(v, start_col, &converted[thetext_x..thetext_x + paintlen]);
                             state = JUSTONTHIS;
                         }
                         index = end_eo;
                         // If both start and end match are anchors, advance.
                         if start_so == start_eo && end_so == end_eo {
-                            if index >= line_data.len() { break; }
+                            if index >= line_data.len() {
+                                break;
+                            }
                             index = step_right(line_data, index);
                         }
                     }
@@ -4670,7 +5189,7 @@ fn apply_mark_highlighting(
     _row: i32,
     converted: &str,
     line_lineno: isize,
-    line_data: &str,
+    line_data: &[u8],
     from_col: usize,
     abs_y: u16,
     midwin_x: u16,
@@ -4678,17 +5197,27 @@ fn apply_mark_highlighting(
 ) {
     let (has_mark, mark_lineno, current_lineno) = with_state(|s| {
         let f = s.openfile.as_ref();
-        let mark_ln = f.and_then(|f| f.mark.as_ref()).map(|l| l.borrow().lineno).unwrap_or(-1);
-        let cur_ln = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(-1);
+        let mark_ln = f
+            .and_then(|f| f.mark.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(-1);
+        let cur_ln = f
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().lineno)
+            .unwrap_or(-1);
         (mark_ln != -1, mark_ln, cur_ln)
     });
 
-    if !has_mark { return; }
+    if !has_mark {
+        return;
+    }
 
     let in_region = (line_lineno >= mark_lineno && line_lineno <= current_lineno)
         || (line_lineno <= mark_lineno && line_lineno >= current_lineno);
 
-    if !in_region { return; }
+    if !in_region {
+        return;
+    }
 
     let (top_x, bot_x, top_lineno, bot_lineno) = with_state(|s| {
         if let Some(_f) = s.openfile.as_ref() {
@@ -4702,8 +5231,16 @@ fn apply_mark_highlighting(
     let from_x = tl_get!(FROM_X);
     let till_x = tl_get!(TILL_X);
 
-    let effective_top_x = if top_lineno < line_lineno || top_x < from_x { from_x } else { top_x };
-    let effective_bot_x = if bot_lineno > line_lineno || bot_x > till_x { till_x } else { bot_x };
+    let effective_top_x = if top_lineno < line_lineno || top_x < from_x {
+        from_x
+    } else {
+        top_x
+    };
+    let effective_bot_x = if bot_lineno > line_lineno || bot_x > till_x {
+        till_x
+    } else {
+        bot_x
+    };
 
     if effective_top_x < till_x && effective_bot_x > from_x {
         let start_col = wideness(line_data, effective_top_x).saturating_sub(from_col);
@@ -4713,7 +5250,10 @@ fn apply_mark_highlighting(
 
         let paintlen: Option<usize> = if effective_bot_x < till_x {
             let end_col = wideness(line_data, effective_bot_x).saturating_sub(from_col);
-            Some(actual_x(&converted[thetext_x..], end_col.saturating_sub(start_col)))
+            Some(actual_x(
+                &converted[thetext_x..],
+                end_col.saturating_sub(start_col),
+            ))
         } else {
             None // paint all
         };
@@ -4722,10 +5262,17 @@ fn apply_mark_highlighting(
         apply_interface_color(selected_pair);
 
         let mut stdout = out();
-        let _ = queue!(stdout, MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y));
+        let _ = queue!(
+            stdout,
+            MoveTo(midwin_x + margin as u16 + start_col as u16, abs_y)
+        );
         match paintlen {
-            Some(n) => { let _ = queue!(stdout, Print(&converted[thetext_x..thetext_x + n])); }
-            None    => { let _ = queue!(stdout, Print(&converted[thetext_x..])); }
+            Some(n) => {
+                let _ = queue!(stdout, Print(&converted[thetext_x..thetext_x + n]));
+            }
+            None => {
+                let _ = queue!(stdout, Print(&converted[thetext_x..]));
+            }
         }
         reset_color();
     }
@@ -4743,7 +5290,9 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     }
 
     #[cfg(not(feature = "tiny"))]
-    { tl_set!(SEQUEL_COLUMN, 0); }
+    {
+        tl_set!(SEQUEL_COLUMN, 0);
+    }
 
     let line_lineno = line.borrow().lineno;
 
@@ -4762,10 +5311,16 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
         }
     };
 
-    let (edittop_lineno, editwincols) = with_state(|s| (
-        s.openfile.as_ref().and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(0),
-        s.editwincols as usize,
-    ));
+    let (edittop_lineno, editwincols) = with_state(|s| {
+        (
+            s.openfile
+                .as_ref()
+                .and_then(|f| f.edittop.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(0),
+            s.editwincols as usize,
+        )
+    });
     let row = (line_lineno - edittop_lineno) as i32;
 
     // Expand the piece to be drawn to its representable form, and draw it.
@@ -4775,15 +5330,25 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     };
     draw_row(row, &converted, line, from_col);
 
-    let (midwin_x, midwin_y, margin, _sidebar, _hilite) = with_state(|s| (
-        s.midwin.x, s.midwin.y, s.margin, s.sidebar, s.hilite_attribute,
-    ));
+    let (midwin_x, midwin_y, margin, _sidebar, _hilite) = with_state(|s| {
+        (
+            s.midwin.x,
+            s.midwin.y,
+            s.margin,
+            s.sidebar,
+            s.hilite_attribute,
+        )
+    });
     let mut stdout = out();
 
     // Left-scroll indicator
     if from_col > 0 && !converted.is_empty() {
         let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
-        let _ = queue!(stdout, MoveTo(midwin_x + margin as u16, midwin_y + row as u16), Print("<"));
+        let _ = queue!(
+            stdout,
+            MoveTo(midwin_x + margin as u16, midwin_y + row as u16),
+            Print("<")
+        );
         reset_color();
     }
 
@@ -4792,17 +5357,23 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
     if has_more {
         let (cols, sidebar) = with_state(|s| (s.midwin.cols, s.sidebar));
         let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
-        let _ = queue!(stdout, MoveTo(midwin_x + cols - 1 - sidebar as u16, midwin_y + row as u16), Print(">"));
+        let _ = queue!(
+            stdout,
+            MoveTo(midwin_x + cols - 1 - sidebar as u16, midwin_y + row as u16),
+            Print(">")
+        );
         reset_color();
     }
 
     // Spotlight (search match highlight)
-    let (spotlighted, light_from, light_to, current) = with_state(|s| (
-        s.spotlighted,
-        s.light_from_col,
-        s.light_to_col,
-        s.openfile.as_ref().and_then(|f| f.current.clone()),
-    ));
+    let (spotlighted, light_from, light_to, current) = with_state(|s| {
+        (
+            s.spotlighted,
+            s.light_from_col,
+            s.light_to_col,
+            s.openfile.as_ref().and_then(|f| f.current.clone()),
+        )
+    });
     if spotlighted && current.as_ref().is_some_and(|c| LinePtr::ptr_eq(line, c)) {
         spotlight(light_from, light_to);
     }
@@ -4813,11 +5384,13 @@ pub fn update_line(line: &LinePtr, index: usize) -> i32 {
 /* C: int update_softwrapped_line(linestruct *line) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
-    let (edittop, edittop_firstcol, editwinrows) = with_state(|s| (
-        s.openfile.as_ref().and_then(|f| f.edittop.clone()),
-        s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
-        s.editwinrows,
-    ));
+    let (edittop, edittop_firstcol, editwinrows) = with_state(|s| {
+        (
+            s.openfile.as_ref().and_then(|f| f.edittop.clone()),
+            s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0),
+            s.editwinrows,
+        )
+    });
     let Some(edittop) = edittop else { return 0 };
 
     let mut row = 0i32;
@@ -4832,13 +5405,20 @@ pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
     // Find out on which screen row the target line should be shown.
     let mut someline = Some(edittop);
     while let Some(sl) = someline {
-        if LinePtr::ptr_eq(&sl, line) { break; }
-        row += 1 + { let b = sl.borrow(); extra_chunks_in(&b.data) as i32 };
+        if LinePtr::ptr_eq(&sl, line) {
+            break;
+        }
+        row += 1 + {
+            let b = sl.borrow();
+            extra_chunks_in(&b.data) as i32
+        };
         someline = sl.borrow().next.clone();
     }
 
     // If the first chunk is offscreen, don't even try to display it.
-    if row < 0 || row >= editwinrows { return 0; }
+    if row < 0 || row >= editwinrows {
+        return 0;
+    }
 
     let starting_row = row;
     let mut kickoff = true;
@@ -4858,10 +5438,14 @@ pub fn update_softwrapped_line(line: &LinePtr) -> i32 {
     }
 
     // Spotlight
-    let (spotlighted, light_from, light_to, current) = with_state(|s| (
-        s.spotlighted, s.light_from_col, s.light_to_col,
-        s.openfile.as_ref().and_then(|f| f.current.clone()),
-    ));
+    let (spotlighted, light_from, light_to, current) = with_state(|s| {
+        (
+            s.spotlighted,
+            s.light_from_col,
+            s.light_to_col,
+            s.openfile.as_ref().and_then(|f| f.current.clone()),
+        )
+    });
     if spotlighted && current.as_ref().is_some_and(|c| LinePtr::ptr_eq(line, c)) {
         spotlight_softwrapped(light_from, light_to);
     }
@@ -4902,16 +5486,23 @@ pub fn line_needs_update(old_column: usize, new_column: usize) -> bool {
 /* C: void draw_scrollbar(void) — #ifndef NANO_TINY */
 #[cfg(not(feature = "tiny"))]
 pub fn draw_scrollbar() {
-    let (edittop_lineno, filebot_lineno, editwinrows, softwrap, _firstcol, _sidebar_w) = with_state(|s| {
-        let f = s.openfile.as_ref();
-        let et = f.and_then(|f| f.edittop.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
-        let fb = f.and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
-        let ewr = s.editwinrows;
-        let sw = s.flag_isset(SOFTWRAP);
-        let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
-        let sd = s.sidebar;
-        (et, fb, ewr, sw, fc, sd)
-    });
+    let (edittop_lineno, filebot_lineno, editwinrows, softwrap, _firstcol, _sidebar_w) =
+        with_state(|s| {
+            let f = s.openfile.as_ref();
+            let et = f
+                .and_then(|f| f.edittop.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1);
+            let fb = f
+                .and_then(|f| f.filebot.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1);
+            let ewr = s.editwinrows;
+            let sw = s.flag_isset(SOFTWRAP);
+            let fc = f.map(|f| f.firstcolumn).unwrap_or(0);
+            let sd = s.sidebar;
+            (et, fb, ewr, sw, fc, sd)
+        });
 
     let from_line = edittop_lineno - 1;
     let total_lines = filebot_lineno;
@@ -4921,7 +5512,10 @@ pub fn draw_scrollbar() {
     let covered_lines = if softwrap {
         let (edittop, firstcolumn) = with_state(|s| {
             let f = s.openfile.as_ref();
-            (f.and_then(|f| f.edittop.clone()), f.map(|f| f.firstcolumn).unwrap_or(0))
+            (
+                f.and_then(|f| f.edittop.clone()),
+                f.map(|f| f.firstcolumn).unwrap_or(0),
+            )
         });
         if let Some(top) = edittop {
             let mut line = top;
@@ -4952,7 +5546,11 @@ pub fn draw_scrollbar() {
 
     let lowest = (from_line * editwinrows as isize) / total_lines;
     let highest = lowest + (editwinrows as isize * covered_lines) / total_lines;
-    let highest = if editwinrows as isize > total_lines && !softwrap { editwinrows as isize } else { highest };
+    let highest = if editwinrows as isize > total_lines && !softwrap {
+        editwinrows as isize
+    } else {
+        highest
+    };
 
     let (midwin_x, midwin_y, cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
     let bar_pair = state().interface_color_pair[SCROLL_BAR];
@@ -4972,7 +5570,8 @@ pub fn draw_scrollbar() {
         } else {
             ' '
         };
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x + cols - 1, midwin_y + row as u16),
             Print(bar_char),
         );
@@ -5047,16 +5646,24 @@ pub fn edit_scroll(direction: bool) {
     #[cfg(not(feature = "tiny"))]
     {
         let sidebar = state().sidebar;
-        if sidebar != 0 { draw_scrollbar(); }
+        if sidebar != 0 {
+            draw_scrollbar();
+        }
 
         let softwrap = state().flag_isset(SOFTWRAP);
         if softwrap {
             // Compensate for the earlier chunks of a softwrapped line.
-            nrows += { let b = draw_line.borrow(); chunk_for(draw_leftedge, &b.data) as i32 };
+            nrows += {
+                let b = draw_line.borrow();
+                chunk_for(draw_leftedge, &b.data) as i32
+            };
 
             // Don't compensate for the chunks that are offscreen.
             if LinePtr::ptr_eq(&draw_line, &edittop) {
-                nrows -= { let b = draw_line.borrow(); chunk_for(leftedge, &b.data) as i32 };
+                nrows -= {
+                    let b = draw_line.borrow();
+                    chunk_for(leftedge, &b.data) as i32
+                };
             }
         }
     }
@@ -5066,7 +5673,11 @@ pub fn edit_scroll(direction: bool) {
     let mut walker = Some(draw_line);
     while nrows > 0 {
         let Some(l) = walker else { break };
-        let ix = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) { current_x } else { 0 };
+        let ix = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) {
+            current_x
+        } else {
+            0
+        };
         nrows -= update_line(&l, ix);
         walker = l.borrow().next.clone();
     }
@@ -5080,7 +5691,9 @@ pub fn edit_scroll(direction: bool) {
 pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
     let was_pww = with_state(|s| s.openfile.as_ref().map(|f| f.placewewant).unwrap_or(0));
     let new_pww = xplustabs();
-    with_state_mut(|s| { s.openfile.as_mut().map(|f| f.placewewant = new_pww); });
+    with_state_mut(|s| {
+        s.openfile.as_mut().map(|f| f.placewewant = new_pww);
+    });
 
     // If the current line is offscreen, scroll until it's onscreen.
     if current_is_offscreen() {
@@ -5101,13 +5714,19 @@ pub fn edit_redraw(old_current: &LinePtr, manner: UpdateType) {
         }
     }
 
-    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else { return };
+    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else {
+        return;
+    };
 
     let mark_is_on = {
         #[cfg(not(feature = "tiny"))]
-        { with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some()) }
+        {
+            with_state(|s| s.openfile.as_ref().and_then(|f| f.mark.as_ref()).is_some())
+        }
         #[cfg(feature = "tiny")]
-        { false }
+        {
+            false
+        }
     };
 
     if mark_is_on {
@@ -5150,7 +5769,11 @@ pub fn edit_refresh() {
     if current_is_offscreen() {
         let focusing = state().focusing;
         let jumpy = state().flag_isset(JUMPY_SCROLLING);
-        let manner = if focusing || jumpy { UpdateType::Centering } else { UpdateType::Flowing };
+        let manner = if focusing || jumpy {
+            UpdateType::Centering
+        } else {
+            UpdateType::Flowing
+        };
         adjust_viewport(manner);
     }
 
@@ -5160,7 +5783,9 @@ pub fn edit_refresh() {
         if united {
             let col = xplustabs();
             let page = get_page_start(col);
-            with_state_mut(|s| { s.openfile.as_mut().map(|f| f.brink = page); });
+            with_state_mut(|s| {
+                s.openfile.as_mut().map(|f| f.brink = page);
+            });
         }
     }
 
@@ -5181,7 +5806,8 @@ pub fn edit_refresh() {
         // the multiline-regex cache needs recalculating.
         let recook = with_state(|s| {
             let above_lacks_multidata = s.flag_isset(SOFTWRAP)
-                && s.openfile.as_ref()
+                && s.openfile
+                    .as_ref()
                     .and_then(|f| f.edittop.as_ref())
                     .and_then(|et| et.borrow().prev.as_ref().and_then(|w| w.upgrade()))
                     .map(|prev| prev.borrow().multidata.is_empty())
@@ -5200,22 +5826,30 @@ pub fn edit_refresh() {
     #[cfg(not(feature = "tiny"))]
     {
         let sidebar = state().sidebar;
-        if sidebar != 0 { draw_scrollbar(); }
+        if sidebar != 0 {
+            draw_scrollbar();
+        }
     }
 
-    let (editwinrows, edittop, current, current_x) = with_state(|s| (
-        s.editwinrows,
-        s.openfile.as_ref().and_then(|f| f.edittop.clone()),
-        s.openfile.as_ref().and_then(|f| f.current.clone()),
-        s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0),
-    ));
+    let (editwinrows, edittop, current, current_x) = with_state(|s| {
+        (
+            s.editwinrows,
+            s.openfile.as_ref().and_then(|f| f.edittop.clone()),
+            s.openfile.as_ref().and_then(|f| f.current.clone()),
+            s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0),
+        )
+    });
 
     let mut row = 0i32;
     let mut line = edittop;
 
     while row < editwinrows {
         let Some(l) = line else { break };
-        let index = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) { current_x } else { 0 };
+        let index = if current.as_ref().is_some_and(|c| LinePtr::ptr_eq(&l, c)) {
+            current_x
+        } else {
+            0
+        };
         row += update_line(&l, index);
         line = l.borrow().next.clone();
     }
@@ -5224,7 +5858,8 @@ pub fn edit_refresh() {
     let (midwin_x, midwin_y, midwin_cols) = with_state(|s| (s.midwin.x, s.midwin.y, s.midwin.cols));
     let mut stdout = out();
     while row < editwinrows {
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x, midwin_y + row as u16),
             Clear(ClearType::UntilNewLine),
         );
@@ -5233,11 +5868,23 @@ pub fn edit_refresh() {
         {
             let sidebar = state().sidebar;
             if sidebar != 0 {
-                let bardata = state().bardata.get(row as usize).copied().unwrap_or(b' ' as i32);
+                let bardata = state()
+                    .bardata
+                    .get(row as usize)
+                    .copied()
+                    .unwrap_or(b' ' as i32);
                 let in_bar = (bardata & A_REVERSE) != 0;
-                if in_bar { let _ = queue!(stdout, SetAttribute(Attribute::Reverse)); }
-                let _ = queue!(stdout, MoveTo(midwin_x + midwin_cols - 1, midwin_y + row as u16), Print(" "));
-                if in_bar { reset_color(); }
+                if in_bar {
+                    let _ = queue!(stdout, SetAttribute(Attribute::Reverse));
+                }
+                let _ = queue!(
+                    stdout,
+                    MoveTo(midwin_x + midwin_cols - 1, midwin_y + row as u16),
+                    Print(" ")
+                );
+                if in_bar {
+                    reset_color();
+                }
             }
         }
         row += 1;
@@ -5250,20 +5897,25 @@ pub fn edit_refresh() {
 
 /* C: void adjust_viewport(update_type manner) */
 pub fn adjust_viewport(manner: UpdateType) {
-    let (editwinrows, cursor_row) = with_state(|s| (
-        s.editwinrows,
-        s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0),
-    ));
+    let (editwinrows, cursor_row) = with_state(|s| {
+        (
+            s.editwinrows,
+            s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0),
+        )
+    });
 
     let goal = match manner {
         UpdateType::Stationary => cursor_row as i32,
-        UpdateType::Centering  => editwinrows / 2,
-        UpdateType::Flowing    => {
+        UpdateType::Centering => editwinrows / 2,
+        UpdateType::Flowing => {
             if !current_is_above_screen() {
                 let shim = if state().flag_isset(ZERO)
-                    && (state().currmenu == MREPLACEWITH
-                        || state().currmenu == MYESNO)
-                { 1 } else { 0 };
+                    && (state().currmenu == MREPLACEWITH || state().currmenu == MYESNO)
+                {
+                    1
+                } else {
+                    0
+                };
                 editwinrows - 1 - shim
             } else {
                 0
@@ -5271,7 +5923,9 @@ pub fn adjust_viewport(manner: UpdateType) {
         }
     };
 
-    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else { return };
+    let Some(current) = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone())) else {
+        return;
+    };
 
     // C: openfile->edittop = openfile->current;
     let mut edittop = current.clone();
@@ -5289,7 +5943,9 @@ pub fn adjust_viewport(manner: UpdateType) {
             leftedge_for(col, &b.data)
         }
         #[cfg(feature = "tiny")]
-        { 0 }
+        {
+            0
+        }
     } else {
         with_state(|s| s.openfile.as_ref().map(|f| f.firstcolumn).unwrap_or(0))
     };
@@ -5317,11 +5973,7 @@ pub fn full_refresh() {
 
 /* C: void draw_all_subwindows(void) */
 pub fn draw_all_subwindows() {
-    let (currmenu, inhelp, title) = with_state(|s| (
-        s.currmenu,
-        s.inhelp,
-        s.title.clone(),
-    ));
+    let (currmenu, inhelp, title) = with_state(|s| (s.currmenu, s.inhelp, s.title.clone()));
 
     let is_browser = (currmenu & (MBROWSER | MGOTODIR | MWHEREISFILE)) != 0;
 
@@ -5354,12 +6006,24 @@ pub fn report_cursor_position() {
     let (current_data, current_x, current_lineno, filebot_lineno, totsize, _filetop_data) =
         with_state(|s| {
             let f = s.openfile.as_ref();
-            let data = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().data.clone()).unwrap_or_default();
+            let data = f
+                .and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().data.clone())
+                .unwrap_or_default();
             let cx = f.map(|f| f.current_x).unwrap_or(0);
-            let cl = f.and_then(|f| f.current.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
-            let fb = f.and_then(|f| f.filebot.as_ref()).map(|l| l.borrow().lineno).unwrap_or(1);
+            let cl = f
+                .and_then(|f| f.current.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1);
+            let fb = f
+                .and_then(|f| f.filebot.as_ref())
+                .map(|l| l.borrow().lineno)
+                .unwrap_or(1);
             let ts = f.map(|f| f.totsize).unwrap_or(0);
-            let ft = f.and_then(|f| f.filetop.as_ref()).map(|l| l.borrow().data.clone()).unwrap_or_default();
+            let ft = f
+                .and_then(|f| f.filetop.as_ref())
+                .map(|l| l.borrow().data.clone())
+                .unwrap_or_default();
             (data, cx, cl, fb, ts, ft)
         });
 
@@ -5372,7 +6036,10 @@ pub fn report_cursor_position() {
     let sum = {
         let (filetop, current) = with_state(|s| {
             let f = s.openfile.as_ref();
-            (f.and_then(|f| f.filetop.clone()), f.and_then(|f| f.current.clone()))
+            (
+                f.and_then(|f| f.filetop.clone()),
+                f.and_then(|f| f.current.clone()),
+            )
         });
         let mut count = 0usize;
         if let (Some(top), Some(cur)) = (filetop, current) {
@@ -5393,16 +6060,26 @@ pub fn report_cursor_position() {
 
     let linepct = (100 * current_lineno / filebot_lineno.max(1)) as i32;
     let colpct = (100 * column / fullwidth.max(1)) as i32;
-    let charpct = if totsize == 0 { 0i32 } else { (100 * sum / totsize) as i32 };
+    let charpct = if totsize == 0 {
+        0i32
+    } else {
+        (100 * sum / totsize) as i32
+    };
 
     let digs = digits(filebot_lineno as isize);
     let digs_ts = digits(totsize as isize);
 
     let msg = format!(
         "line {:>width$}/{} ({:2}%), col {:2}/{:2} ({:3}%), char {:>wts$}/{} ({:2}%)",
-        current_lineno, filebot_lineno, linepct,
-        column, fullwidth, colpct,
-        sum, totsize, charpct,
+        current_lineno,
+        filebot_lineno,
+        linepct,
+        column,
+        fullwidth,
+        colpct,
+        sum,
+        totsize,
+        charpct,
         width = digs as usize,
         wts = digs_ts as usize,
     );
@@ -5416,23 +6093,38 @@ pub fn report_cursor_position() {
 
 /* C: void spotlight(size_t from_col, size_t to_col) */
 pub fn spotlight(from_col: usize, to_col: usize) {
-    let (editwincols, sidebar, _margin, midwin_x, midwin_y) = with_state(|s| (
-        s.editwincols as usize, s.sidebar as u16, s.margin as u16,
-        s.midwin.x, s.midwin.y,
-    ));
+    let (editwincols, sidebar, _margin, midwin_x, midwin_y) = with_state(|s| {
+        (
+            s.editwincols as usize,
+            s.sidebar as u16,
+            s.margin as u16,
+            s.midwin.x,
+            s.midwin.y,
+        )
+    });
 
     let right_edge = get_page_start(from_col) + editwincols;
     let overshoots = to_col > right_edge;
     let to_col_eff = if overshoots { right_edge } else { to_col };
 
     let current_data = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().data.clone()).unwrap_or_default()
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().data.clone())
+            .unwrap_or_default()
     });
 
     let word = if to_col_eff == from_col {
         " ".to_string()
     } else {
-        display_string(&current_data, from_col, to_col_eff - from_col, false, overshoots)
+        display_string(
+            &current_data,
+            from_col,
+            to_col_eff - from_col,
+            false,
+            overshoots,
+        )
     };
 
     let cursor_row = with_state(|s| s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0));
@@ -5447,7 +6139,8 @@ pub fn spotlight(from_col: usize, to_col: usize) {
 
     if overshoots {
         let cols = state().midwin.cols;
-        let _ = queue!(stdout,
+        let _ = queue!(
+            stdout,
             MoveTo(midwin_x + cols - 1 - sidebar, midwin_y + cursor_row as u16),
             Print('>'),
         );
@@ -5460,12 +6153,15 @@ pub fn spotlight(from_col: usize, to_col: usize) {
 #[cfg(not(feature = "tiny"))]
 pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
     let current_data = with_state(|s| {
-        s.openfile.as_ref().and_then(|f| f.current.as_ref()).map(|l| l.borrow().data.clone()).unwrap_or_default()
+        s.openfile
+            .as_ref()
+            .and_then(|f| f.current.as_ref())
+            .map(|l| l.borrow().data.clone())
+            .unwrap_or_default()
     });
 
-    let (margin, midwin_x, midwin_y, editwinrows) = with_state(|s| (
-        s.margin as u16, s.midwin.x, s.midwin.y, s.editwinrows,
-    ));
+    let (margin, midwin_x, midwin_y, editwinrows) =
+        with_state(|s| (s.margin as u16, s.midwin.x, s.midwin.y, s.editwinrows));
 
     let leftedge = leftedge_for(from_col, &current_data);
     place_the_cursor();
@@ -5478,7 +6174,8 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
 
     while row < editwinrows {
         let break_col = {
-            let mut bc = get_softwrap_breakpoint(&current_data, leftedge, &mut kickoff, &mut end_of_line);
+            let mut bc =
+                get_softwrap_breakpoint(&current_data, leftedge, &mut kickoff, &mut end_of_line);
             if bc >= to_col {
                 end_of_line = true;
                 bc = to_col;
@@ -5497,7 +6194,9 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
         let _ = queue!(stdout, Print(&word[..actual_x(&word, break_col)]));
         reset_color();
 
-        if end_of_line { break; }
+        if end_of_line {
+            break;
+        }
 
         row += 1;
         let _ = queue!(stdout, MoveTo(midwin_x + margin, midwin_y + row as u16));
@@ -5523,11 +6222,11 @@ pub fn do_credits() {
     }
 
     let credits: &[Option<&str>] = &[
-        None,  // "The nano text editor"
-        None,  // "version"
+        None, // "The nano text editor"
+        None, // "version"
         Some(GNU_NANO_VERSION),
         Some(""),
-        None,  // "Brought to you by:"
+        None, // "Brought to you by:"
         Some("Chris Allegretta"),
         Some("Benno Schulenberg"),
         Some("David Lawrence Ramsey"),
@@ -5548,7 +6247,7 @@ pub fn do_credits() {
         Some("Ryan Krebs"),
         Some("Albert Chin"),
         Some(""),
-        None,  // "Special thanks to:"
+        None, // "Special thanks to:"
         Some("Monique, Brielle & Joseph"),
         Some("Plattsburgh State University"),
         Some("Benet Laboratories"),
@@ -5556,18 +6255,18 @@ pub fn do_credits() {
         Some("Linda Young"),
         Some("Jeremy Robichaud"),
         Some("Richard Kolb II"),
-        None,  // "The Free Software Foundation"
+        None, // "The Free Software Foundation"
         Some("Linus Torvalds"),
-        None,  // "the many translators and the TP"
-        None,  // "For ncurses:"
+        None, // "the many translators and the TP"
+        None, // "For ncurses:"
         Some("Thomas Dickey"),
         Some("Pavel Curtis"),
         Some("Zeyd Ben-Halim"),
         Some("Eric S. Raymond"),
-        None,  // "and anyone else we forgot..."
+        None, // "and anyone else we forgot..."
         Some(""),
         Some(""),
-        None,  // "Thank you for using nano!"
+        None, // "Thank you for using nano!"
         Some(""),
         Some(""),
         Some("(C) 2026"),
@@ -5609,11 +6308,19 @@ pub fn do_credits() {
                 }
             };
             let text_width = breadth(text);
-            let col = if text_width < cols { (cols - text_width) / 2 } else { 0 };
+            let col = if text_width < cols {
+                (cols - text_width) / 2
+            } else {
+                0
+            };
             let row = editwinrows - 1;
             let (midwin_x, midwin_y) = with_state(|s| (s.midwin.x, s.midwin.y));
             let mut stdout = out();
-            let _ = queue!(stdout, MoveTo(midwin_x + col as u16, midwin_y + row as u16), Print(text));
+            let _ = queue!(
+                stdout,
+                MoveTo(midwin_x + col as u16, midwin_y + row as u16),
+                Print(text)
+            );
             let _ = stdout.flush();
         }
 
@@ -5721,9 +6428,7 @@ pub fn get_cols() -> usize {
 /// Move the cursor within the footwin to (row, col).
 pub fn footwin_wmove(row: i32, col: i32) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(out(),
-        MoveTo(fx + col as u16, fy + row as u16),
-    );
+    let _ = queue!(out(), MoveTo(fx + col as u16, fy + row as u16),);
 }
 
 /// Apply an interface color pair to the footwin (wattron equivalent).
@@ -5749,17 +6454,15 @@ pub fn footwin_waddch(c: char) {
 /// Move to (row, col) in footwin and print a string.
 pub fn footwin_mvwaddstr(row: i32, col: i32, s: &str) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(out(),
-        MoveTo(fx + col as u16, fy + row as u16),
-        Print(s),
-    );
+    let _ = queue!(out(), MoveTo(fx + col as u16, fy + row as u16), Print(s),);
 }
 
 /// Move to (row, col) in footwin and print at most n bytes of a string.
 pub fn footwin_mvwaddnstr(row: i32, col: i32, s: &str, n: usize) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
     let truncated = &s[..actual_x(s, n).min(s.len())];
-    let _ = queue!(out(),
+    let _ = queue!(
+        out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(truncated),
     );
@@ -5768,17 +6471,15 @@ pub fn footwin_mvwaddnstr(row: i32, col: i32, s: &str, n: usize) {
 /// Move to (row, col) in footwin and print a single character.
 pub fn footwin_mvwaddch(row: i32, col: i32, c: char) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
-    let _ = queue!(out(),
-        MoveTo(fx + col as u16, fy + row as u16),
-        Print(c),
-    );
+    let _ = queue!(out(), MoveTo(fx + col as u16, fy + row as u16), Print(c),);
 }
 
 /// Print `cols` spaces starting at (row, col) in footwin (fills a line).
 pub fn footwin_mvwprintw_spaces(row: i32, col: i32, cols: usize) {
     let (fx, fy) = with_state(|s| (s.footwin.x, s.footwin.y));
     let spaces = " ".repeat(cols);
-    let _ = queue!(out(),
+    let _ = queue!(
+        out(),
         MoveTo(fx + col as u16, fy + row as u16),
         Print(&spaces),
     );
@@ -5829,9 +6530,9 @@ mod tests {
         assert!(panic_should_restore_terminal(false));
 
         let previous = IS_TERMINAL_UI_THREAD.with(|is_ui_thread| is_ui_thread.replace(true));
-        let worker_owns_terminal = std::thread::spawn(|| {
-            IS_TERMINAL_UI_THREAD.with(Cell::get)
-        }).join().unwrap();
+        let worker_owns_terminal = std::thread::spawn(|| IS_TERMINAL_UI_THREAD.with(Cell::get))
+            .join()
+            .unwrap();
         IS_TERMINAL_UI_THREAD.with(|is_ui_thread| is_ui_thread.set(previous));
 
         assert!(!worker_owns_terminal);
@@ -5906,23 +6607,53 @@ mod tests {
     fn window_layout_matches_flag_combinations() {
         assert_eq!(
             calculate_window_layout(80, 24, false, false, false, false),
-            WindowLayout { top_rows: 1, mid_rows: 20, mid_y: 1, foot_rows: 3, foot_y: 21 },
+            WindowLayout {
+                top_rows: 1,
+                mid_rows: 20,
+                mid_y: 1,
+                foot_rows: 3,
+                foot_y: 21
+            },
         );
         assert_eq!(
             calculate_window_layout(80, 24, false, false, false, true),
-            WindowLayout { top_rows: 2, mid_rows: 19, mid_y: 2, foot_rows: 3, foot_y: 21 },
+            WindowLayout {
+                top_rows: 2,
+                mid_rows: 19,
+                mid_y: 2,
+                foot_rows: 3,
+                foot_y: 21
+            },
         );
         assert_eq!(
             calculate_window_layout(80, 24, false, false, true, false),
-            WindowLayout { top_rows: 0, mid_rows: 21, mid_y: 0, foot_rows: 3, foot_y: 21 },
+            WindowLayout {
+                top_rows: 0,
+                mid_rows: 21,
+                mid_y: 0,
+                foot_rows: 3,
+                foot_y: 21
+            },
         );
         assert_eq!(
             calculate_window_layout(80, 24, false, true, false, false),
-            WindowLayout { top_rows: 0, mid_rows: 22, mid_y: 0, foot_rows: 3, foot_y: 21 },
+            WindowLayout {
+                top_rows: 0,
+                mid_rows: 22,
+                mid_y: 0,
+                foot_rows: 3,
+                foot_y: 21
+            },
         );
         assert_eq!(
             calculate_window_layout(80, 24, true, false, false, false),
-            WindowLayout { top_rows: 1, mid_rows: 22, mid_y: 1, foot_rows: 1, foot_y: 23 },
+            WindowLayout {
+                top_rows: 1,
+                mid_rows: 22,
+                mid_y: 1,
+                foot_rows: 1,
+                foot_y: 23
+            },
         );
     }
 
@@ -5930,20 +6661,29 @@ mod tests {
     fn window_layout_handles_flat_and_one_column_terminals() {
         assert_eq!(
             calculate_window_layout(1, 1, false, false, false, false),
-            WindowLayout { top_rows: 0, mid_rows: 1, mid_y: 0, foot_rows: 1, foot_y: 0 },
+            WindowLayout {
+                top_rows: 0,
+                mid_rows: 1,
+                mid_y: 0,
+                foot_rows: 1,
+                foot_y: 0
+            },
         );
         assert_eq!(
             calculate_window_layout(1, 2, false, true, false, false),
-            WindowLayout { top_rows: 0, mid_rows: 2, mid_y: 0, foot_rows: 1, foot_y: 1 },
+            WindowLayout {
+                top_rows: 0,
+                mid_rows: 2,
+                mid_y: 0,
+                foot_rows: 1,
+                foot_y: 1
+            },
         );
     }
 
     #[test]
     fn resize_safe_points_distinguish_events_from_real_input() {
-        assert!(resize_was_requested(
-            Some(THE_WINDOW_RESIZED as i32),
-            false,
-        ));
+        assert!(resize_was_requested(Some(THE_WINDOW_RESIZED as i32), false,));
         assert!(resize_was_requested(None, true));
         assert!(!resize_was_requested(None, false));
 
@@ -6023,7 +6763,10 @@ mod tests {
             ('A', 1),
         ] {
             reset_input_buffer();
-            translate_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL));
+            translate_key_event(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::CONTROL,
+            ));
             assert_eq!(get_input(None), expected, "Ctrl+{character}");
         }
     }
@@ -6032,9 +6775,21 @@ mod tests {
     #[test]
     fn completion_grid_ignores_zero_and_single_candidate_sets() {
         assert!(completion_grid(&[], 80, 20, false).cells.is_empty());
-        assert!(completion_grid(&["only".to_string()], 80, 20, false).cells.is_empty());
-        assert!(completion_grid(&["a".into(), "b".into()], 0, 20, false).cells.is_empty());
-        assert!(completion_grid(&["a".into(), "b".into()], 80, 0, false).cells.is_empty());
+        assert!(
+            completion_grid(&["only".to_string()], 80, 20, false)
+                .cells
+                .is_empty()
+        );
+        assert!(
+            completion_grid(&["a".into(), "b".into()], 0, 20, false)
+                .cells
+                .is_empty()
+        );
+        assert!(
+            completion_grid(&["a".into(), "b".into()], 80, 0, false)
+                .cells
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "tabcomp")]
@@ -6047,10 +6802,26 @@ mod tests {
         assert_eq!(
             grid.cells,
             vec![
-                CompletionCell { row: 3, column: 0, match_index: Some(0) },
-                CompletionCell { row: 3, column: 7, match_index: Some(1) },
-                CompletionCell { row: 3, column: 14, match_index: Some(2) },
-                CompletionCell { row: 4, column: 0, match_index: Some(3) },
+                CompletionCell {
+                    row: 3,
+                    column: 0,
+                    match_index: Some(0)
+                },
+                CompletionCell {
+                    row: 3,
+                    column: 7,
+                    match_index: Some(1)
+                },
+                CompletionCell {
+                    row: 3,
+                    column: 14,
+                    match_index: Some(2)
+                },
+                CompletionCell {
+                    row: 4,
+                    column: 0,
+                    match_index: Some(3)
+                },
             ],
         );
     }
@@ -6065,7 +6836,14 @@ mod tests {
         assert_eq!(grid.cells.len(), 3);
         assert_eq!(grid.cells[0].match_index, Some(0));
         assert_eq!(grid.cells[1].match_index, Some(1));
-        assert_eq!(grid.cells[2], CompletionCell { row: 2, column: 0, match_index: None });
+        assert_eq!(
+            grid.cells[2],
+            CompletionCell {
+                row: 2,
+                column: 0,
+                match_index: None
+            }
+        );
 
         // ZERO mode shares its bottom row with the status bar.  The grid must
         // stay out of that row instead of relying on unsigned subtraction.
@@ -6096,13 +6874,55 @@ mod tests {
         assert!(MACRO_BUFFER.with(|buffer| buffer.borrow().is_empty()));
         push_keycode(99);
         assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Cancelled);
-        assert_eq!(MACRO_BUFFER.with(|buffer| buffer.borrow().clone()), vec![10, 20]);
+        assert_eq!(
+            MACRO_BUFFER.with(|buffer| buffer.borrow().clone()),
+            vec![10, 20]
+        );
 
         assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Started);
         push_keycode(65);
         tl_set!(MILESTONE, 1);
         push_keycode(99);
         assert_eq!(toggle_macro_recording(), MacroRecordingOutcome::Stopped);
-        assert_eq!(MACRO_BUFFER.with(|buffer| buffer.borrow().clone()), vec![65]);
+        assert_eq!(
+            MACRO_BUFFER.with(|buffer| buffer.borrow().clone()),
+            vec![65]
+        );
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn raw_paste_event_queues_every_document_byte_exactly() {
+        reset_input_buffer();
+        let old_menu = state().currmenu;
+        state_mut().currmenu = MMAIN;
+        translate_event(Event::PasteBytes(vec![0x20, 0x80, 0xC0, 0xFF, b'\t']));
+        let queued = KEY_BUFFER.with(|buffer| buffer.borrow().clone());
+        assert_eq!(
+            queued,
+            vec![
+                START_OF_PASTE as i32,
+                0x20,
+                0x80,
+                0xC0,
+                0xFF,
+                b'\t' as i32,
+                END_OF_PASTE as i32,
+            ],
+        );
+        state_mut().currmenu = old_menu;
+        reset_input_buffer();
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn malformed_raw_paste_is_rejected_outside_document_buffer() {
+        reset_input_buffer();
+        let old_menu = state().currmenu;
+        state_mut().currmenu = MWHEREIS;
+        translate_event(Event::PasteBytes(vec![0xFF]));
+        assert_eq!(waiting_keycodes(), 0);
+        state_mut().currmenu = old_menu;
+        reset_input_buffer();
     }
 }
