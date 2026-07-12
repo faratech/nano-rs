@@ -64,6 +64,22 @@ impl FileDesc<'_> {
         }
     }
 
+    #[cfg(feature = "events")]
+    pub fn bytes_available(&self) -> io::Result<usize> {
+        let mut available: libc::c_int = 0;
+        let result = unsafe { libc::ioctl(self.fd, libc::FIONREAD, &mut available) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else if available < 0 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FIONREAD returned a negative byte count",
+            ))
+        } else {
+            Ok(available as usize)
+        }
+    }
+
     /// Returns the underlying file descriptor.
     pub fn raw_fd(&self) -> RawFd {
         self.fd
@@ -80,6 +96,23 @@ impl FileDesc<'_> {
         };
         let result = rustix::io::read(fd, buffer)?;
         Ok(result)
+    }
+
+    #[cfg(feature = "events")]
+    pub fn bytes_available(&self) -> io::Result<usize> {
+        let fd = match self {
+            FileDesc::Owned(fd) => fd.as_fd(),
+            FileDesc::Borrowed(fd) => fd.as_fd(),
+        };
+        let available = rustix::io::ioctl_fionread(fd)?;
+        if available > i32::MAX as u64 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FIONREAD returned an invalid byte count",
+            ))
+        } else {
+            Ok(available as usize)
+        }
     }
 
     pub fn raw_fd(&self) -> RawFd {

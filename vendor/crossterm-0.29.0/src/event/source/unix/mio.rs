@@ -7,6 +7,8 @@ use std::{
 use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 use signal_hook_mio::v1_0::Signals;
 
+#[cfg(feature = "bracketed-paste")]
+use crate::event::sys::unix::parse::{incomplete_paste_bytes, BRACKETED_PASTE_START};
 #[cfg(feature = "event-stream")]
 use crate::event::sys::Waker;
 use crate::event::{
@@ -26,6 +28,7 @@ const WAKE_TOKEN: Token = Token(2);
 // is enough.
 const TTY_BUFFER_SIZE: usize = 1_024;
 const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(100);
+const PASTE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct UnixInternalEventSource {
     poll: Poll,
@@ -34,6 +37,7 @@ pub(crate) struct UnixInternalEventSource {
     tty_buffer: [u8; TTY_BUFFER_SIZE],
     tty_fd: FileDesc<'static>,
     signals: Signals,
+    eof_pending: bool,
     #[cfg(feature = "event-stream")]
     waker: Waker,
 }
@@ -64,10 +68,28 @@ impl UnixInternalEventSource {
             tty_buffer: [0u8; TTY_BUFFER_SIZE],
             tty_fd: input_fd,
             signals,
+            eof_pending: false,
             #[cfg(feature = "event-stream")]
             waker,
         })
     }
+
+    fn finish_at_eof(&mut self) -> io::Result<Option<InternalEvent>> {
+        let event = self
+            .parser
+            .finish_incomplete_paste()
+            .or_else(|| self.parser.next());
+        if let Some(event) = event {
+            self.eof_pending = true;
+            Ok(Some(event))
+        } else {
+            Err(terminal_eof())
+        }
+    }
+}
+
+fn terminal_eof() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input reached EOF")
 }
 
 impl EventSource for UnixInternalEventSource {
@@ -75,8 +97,11 @@ impl EventSource for UnixInternalEventSource {
         if let Some(event) = self.parser.next() {
             return Ok(Some(event));
         }
-        if let Some(event) = self.parser.flush_expired_escape() {
+        if let Some(event) = self.parser.flush_expired_event() {
             return Ok(Some(event));
+        }
+        if self.eof_pending {
+            return Err(terminal_eof());
         }
 
         let timeout = PollTimeout::new(timeout);
@@ -95,7 +120,7 @@ impl EventSource for UnixInternalEventSource {
             };
 
             if self.events.is_empty() {
-                if let Some(event) = self.parser.flush_expired_escape() {
+                if let Some(event) = self.parser.flush_expired_event() {
                     return Ok(Some(event));
                 }
                 if timeout.elapsed() {
@@ -104,21 +129,27 @@ impl EventSource for UnixInternalEventSource {
                 continue;
             }
 
-            for token in self.events.iter().map(|x| x.token()) {
+            let mut readiness = [None; 3];
+            for (slot, event) in readiness.iter_mut().zip(self.events.iter()) {
+                *slot = Some((event.token(), event.is_read_closed(), event.is_error()));
+            }
+            for (token, read_closed, read_error) in readiness.into_iter().flatten() {
                 match token {
                     TTY_TOKEN => {
                         loop {
-                            match self.tty_fd.read(&mut self.tty_buffer) {
+                            let available = self.tty_fd.bytes_available()?;
+                            if available == 0 {
+                                break;
+                            }
+                            let read_len = available.min(TTY_BUFFER_SIZE);
+                            match self.tty_fd.read(&mut self.tty_buffer[..read_len]) {
                                 Ok(0) => {
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::UnexpectedEof,
-                                        "terminal input reached EOF",
-                                    ));
+                                    return self.finish_at_eof();
                                 }
                                 Ok(read_count) => {
                                     self.parser.advance(
                                         &self.tty_buffer[..read_count],
-                                        read_count == TTY_BUFFER_SIZE,
+                                        available > read_count,
                                     );
                                 }
                                 Err(e) => {
@@ -134,10 +165,18 @@ impl EventSource for UnixInternalEventSource {
                                     }
                                 }
                             };
-
-                            if let Some(event) = self.parser.next() {
-                                return Ok(Some(event));
-                            }
+                        }
+                        if read_closed {
+                            return self.finish_at_eof();
+                        }
+                        if read_error {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                "terminal input reported a poll error",
+                            ));
+                        }
+                        if let Some(event) = self.parser.next() {
+                            return Ok(Some(event));
                         }
                     }
                     SIGNAL_TOKEN => {
@@ -167,7 +206,7 @@ impl EventSource for UnixInternalEventSource {
             }
 
             // Processing above can take some time, check if timeout expired
-            if let Some(event) = self.parser.flush_expired_escape() {
+            if let Some(event) = self.parser.flush_expired_event() {
                 return Ok(Some(event));
             }
             if timeout.elapsed() {
@@ -193,6 +232,7 @@ struct Parser {
     buffer: Vec<u8>,
     internal_events: VecDeque<InternalEvent>,
     ambiguous_escape_since: Option<Instant>,
+    paste_idle_since: Option<Instant>,
 }
 
 impl Default for Parser {
@@ -216,12 +256,14 @@ impl Default for Parser {
             // is processed -> events pushed.
             internal_events: VecDeque::with_capacity(128),
             ambiguous_escape_since: None,
+            paste_idle_since: None,
         }
     }
 }
 
 impl Parser {
     fn advance(&mut self, buffer: &[u8], more: bool) {
+        let received_at = Instant::now();
         for (idx, byte) in buffer.iter().enumerate() {
             let more = idx + 1 < buffer.len() || more;
 
@@ -238,14 +280,20 @@ impl Parser {
                     self.internal_events.push_back(ie);
                     self.buffer.clear();
                     self.ambiguous_escape_since = None;
+                    self.paste_idle_since = None;
                 }
                 Ok(None) => {
                     // Event can't be parsed, because we don't have enough bytes for
                     // the current sequence. Keep the buffer and process next bytes.
-                    if starts_with_escape && !self.paste_is_in_progress() {
+                    if self.paste_is_in_progress() {
+                        self.ambiguous_escape_since = None;
+                        self.paste_idle_since = Some(received_at);
+                    } else if starts_with_escape {
                         self.ambiguous_escape_since = Some(Instant::now());
+                        self.paste_idle_since = None;
                     } else {
                         self.ambiguous_escape_since = None;
+                        self.paste_idle_since = None;
                     }
                 }
                 Err(_) => {
@@ -253,6 +301,7 @@ impl Parser {
                     // Clear the buffer and continue with another sequence.
                     self.buffer.clear();
                     self.ambiguous_escape_since = None;
+                    self.paste_idle_since = None;
                 }
             }
         }
@@ -261,7 +310,7 @@ impl Parser {
     fn paste_is_in_progress(&self) -> bool {
         #[cfg(feature = "bracketed-paste")]
         {
-            self.buffer.starts_with(b"\x1B[200~")
+            self.buffer.starts_with(BRACKETED_PASTE_START)
         }
         #[cfg(not(feature = "bracketed-paste"))]
         {
@@ -270,14 +319,26 @@ impl Parser {
     }
 
     fn limit_timeout(&self, requested: Option<Duration>) -> Option<Duration> {
-        let Some(since) = self.ambiguous_escape_since else {
-            return requested;
-        };
-        let ambiguity_left = ESCAPE_SEQUENCE_TIMEOUT.saturating_sub(since.elapsed());
-        Some(requested.map_or(ambiguity_left, |duration| duration.min(ambiguity_left)))
+        let mut limited = requested;
+        if let Some(since) = self.ambiguous_escape_since {
+            let left = ESCAPE_SEQUENCE_TIMEOUT.saturating_sub(since.elapsed());
+            limited = Some(limited.map_or(left, |duration| duration.min(left)));
+        }
+        if let Some(since) = self.paste_idle_since {
+            let left = PASTE_IDLE_TIMEOUT.saturating_sub(since.elapsed());
+            limited = Some(limited.map_or(left, |duration| duration.min(left)));
+        }
+        limited
     }
 
-    fn flush_expired_escape(&mut self) -> Option<InternalEvent> {
+    fn flush_expired_event(&mut self) -> Option<InternalEvent> {
+        if matches!(
+            self.paste_idle_since,
+            Some(since) if since.elapsed() >= PASTE_IDLE_TIMEOUT
+        ) {
+            return self.finish_incomplete_paste();
+        }
+
         let since = self.ambiguous_escape_since?;
         if since.elapsed() < ESCAPE_SEQUENCE_TIMEOUT {
             return None;
@@ -293,6 +354,23 @@ impl Parser {
         }
         self.next()
     }
+
+    fn finish_incomplete_paste(&mut self) -> Option<InternalEvent> {
+        #[cfg(feature = "bracketed-paste")]
+        let paste = incomplete_paste_bytes(&self.buffer)?;
+        #[cfg(not(feature = "bracketed-paste"))]
+        return None;
+
+        #[cfg(feature = "bracketed-paste")]
+        {
+            self.buffer.clear();
+            self.ambiguous_escape_since = None;
+            self.paste_idle_since = None;
+            self.internal_events
+                .push_back(InternalEvent::Event(Event::PasteBytesIncomplete(paste)));
+            self.next()
+        }
+    }
 }
 
 impl Iterator for Parser {
@@ -306,6 +384,7 @@ impl Iterator for Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bracketed-paste")]
     use std::io::Write;
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -370,8 +449,77 @@ mod tests {
 
         parser.ambiguous_escape_since = Some(Instant::now() - ESCAPE_SEQUENCE_TIMEOUT);
         assert_eq!(
-            parser.flush_expired_escape(),
+            parser.flush_expired_event(),
             Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())))
+        );
+    }
+
+    #[cfg(feature = "bracketed-paste")]
+    #[test]
+    fn paste_idle_timeout_emits_incomplete_bytes() {
+        let mut parser = Parser::default();
+        parser.advance(b"\x1B[200~payload", false);
+        parser.paste_idle_since = Some(Instant::now() - PASTE_IDLE_TIMEOUT);
+
+        assert_eq!(
+            parser.flush_expired_event(),
+            Some(InternalEvent::Event(Event::PasteBytesIncomplete(
+                b"payload".to_vec()
+            )))
+        );
+        assert!(parser.buffer.is_empty());
+    }
+
+    #[cfg(feature = "bracketed-paste")]
+    #[test]
+    fn incomplete_paste_strips_longest_partial_closing_suffix() {
+        let mut parser = Parser::default();
+        parser.advance(b"\x1B[200~payload\x1B[20", false);
+
+        assert_eq!(
+            parser.finish_incomplete_paste(),
+            Some(InternalEvent::Event(Event::PasteBytesIncomplete(
+                b"payload".to_vec()
+            )))
+        );
+        assert!(parser.buffer.is_empty());
+    }
+
+    #[cfg(feature = "bracketed-paste")]
+    #[test]
+    fn blocking_stream_does_not_read_after_available_bytes_are_drained() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut source = UnixInternalEventSource::from_file_descriptor(file_desc(reader)).unwrap();
+        writer.write_all(b"\x1B[200~still arriving").unwrap();
+
+        let started = Instant::now();
+        assert_eq!(
+            source.try_read(Some(Duration::from_millis(30))).unwrap(),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "bracketed-paste")]
+    #[test]
+    fn eof_emits_incomplete_paste_before_eof_error() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut source = UnixInternalEventSource::from_file_descriptor(file_desc(reader)).unwrap();
+        writer.write_all(b"\x1B[200~payload\x1B[201").unwrap();
+        drop(writer);
+
+        assert_eq!(
+            source.try_read(Some(Duration::from_secs(1))).unwrap(),
+            Some(InternalEvent::Event(Event::PasteBytesIncomplete(
+                b"payload".to_vec()
+            )))
+        );
+        assert_eq!(
+            source
+                .try_read(Some(Duration::from_millis(30)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
         );
     }
 

@@ -851,9 +851,7 @@ pub fn run_macro() {
         return;
     }
     let codes: Vec<i32> = MACRO_BUFFER.with(|mb| mb.borrow().clone());
-    for &code in codes.iter().rev() {
-        put_back(code);
-    }
+    put_back_many(&codes);
     state_mut().mute_modifiers = true;
 }
 
@@ -898,6 +896,33 @@ pub fn put_back(keycode: i32) {
                     buf[*idx] = keycode;
                 }
                 *waiting += 1;
+            });
+        });
+    });
+}
+
+/// Prepend several keycodes to the live input queue in their existing order.
+///
+/// Replaying a pasted macro can involve hundreds of thousands of codes.  Calling
+/// `put_back()` for each one repeatedly shifts the whole vector when there is no
+/// spare room at its head, making replay quadratic.  A single splice shifts the
+/// live suffix only once.
+#[cfg(not(feature = "tiny"))]
+fn put_back_many(keycodes: &[i32]) {
+    if keycodes.is_empty() {
+        return;
+    }
+
+    KEY_BUFFER.with(|kb| {
+        NEXTCODES_IDX.with(|ni| {
+            WAITING_CODES.with(|wc| {
+                let mut buf = kb.borrow_mut();
+                let idx = *ni.borrow();
+                let mut waiting = wc.borrow_mut();
+
+                debug_assert!(idx + *waiting <= buf.len());
+                buf.splice(idx..idx, keycodes.iter().copied());
+                *waiting += keycodes.len();
             });
         });
     });
@@ -1213,6 +1238,27 @@ fn translate_event(ev: Event) {
                 push_keycode(byte as i32);
             }
             push_keycode(END_OF_PASTE as i32);
+        }
+        Event::PasteBytesIncomplete(bytes) => {
+            // An unterminated paste is usable only in the document buffer.
+            // Prompt, browser, help, and yes/no code drains from START until
+            // END; feeding a truncated event there would wedge that inner loop.
+            if state().currmenu != MMAIN {
+                statusline(
+                    MessageType::Alert,
+                    "Interrupted paste ignored outside the document buffer",
+                );
+                return;
+            }
+
+            // Deliberately do not synthesize END_OF_PASTE.  FOREIGN_SEQUENCE
+            // stops suck_up_input_and_paste_it(), which keeps the delivered
+            // prefix and reports that the paste may be incomplete.
+            push_keycode(START_OF_PASTE as i32);
+            for byte in bytes {
+                push_keycode(byte as i32);
+            }
+            push_keycode(FOREIGN_SEQUENCE as i32);
         }
         Event::Resize(_w, _h) => {
             crate::nano::THE_WINDOW_RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -6923,6 +6969,68 @@ mod tests {
         translate_event(Event::PasteBytes(vec![0xFF]));
         assert_eq!(waiting_keycodes(), 0);
         state_mut().currmenu = old_menu;
+        reset_input_buffer();
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn incomplete_raw_paste_queues_prefix_and_non_end_sentinel_in_document() {
+        reset_input_buffer();
+        let old_menu = state().currmenu;
+        state_mut().currmenu = MMAIN;
+        translate_event(Event::PasteBytesIncomplete(vec![0x20, 0x80, 0xFF, b'\n']));
+        let queued = KEY_BUFFER.with(|buffer| buffer.borrow().clone());
+        assert_eq!(
+            queued,
+            vec![
+                START_OF_PASTE as i32,
+                0x20,
+                0x80,
+                0xFF,
+                b'\n' as i32,
+                FOREIGN_SEQUENCE as i32,
+            ],
+        );
+        assert_eq!(waiting_keycodes(), queued.len());
+        state_mut().currmenu = old_menu;
+        reset_input_buffer();
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn incomplete_raw_paste_is_rejected_atomically_outside_document_buffer() {
+        reset_input_buffer();
+        let old_menu = state().currmenu;
+        state_mut().currmenu = MWHEREIS;
+        translate_event(Event::PasteBytesIncomplete(b"valid UTF-8 prefix".to_vec()));
+        assert_eq!(waiting_keycodes(), 0);
+        assert!(KEY_BUFFER.with(|buffer| buffer.borrow().is_empty()));
+        state_mut().currmenu = old_menu;
+        reset_input_buffer();
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn large_macro_replay_prepends_once_and_preserves_order() {
+        reset_input_buffer();
+        const MACRO_LEN: i32 = 100_000;
+        const CODE_BASE: i32 = 10_000;
+        MACRO_BUFFER
+            .with(|buffer| *buffer.borrow_mut() = (CODE_BASE..CODE_BASE + MACRO_LEN).collect());
+
+        // Exercise the normal partially-consumed queue shape, and preserve an
+        // already queued suffix: macro replay must run before that suffix.
+        push_keycode(-1);
+        push_keycode(CODE_BASE + MACRO_LEN + 7);
+        assert_eq!(get_input(None), -1);
+        run_macro();
+
+        assert_eq!(waiting_keycodes(), MACRO_LEN as usize + 1);
+        for expected in CODE_BASE..CODE_BASE + MACRO_LEN {
+            assert_eq!(get_input(None), expected);
+        }
+        assert_eq!(get_input(None), CODE_BASE + MACRO_LEN + 7);
+        assert_eq!(waiting_keycodes(), 0);
         reset_input_buffer();
     }
 }

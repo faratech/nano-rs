@@ -1807,7 +1807,10 @@ pub fn suck_up_input_and_paste_it() {
     }
 
     if input != END_OF_PASTE as i32 {
-        winio::statusline(MessageType::Alert, "Flawed paste");
+        winio::statusline(
+            MessageType::Alert,
+            "Paste interrupted; received data may be incomplete",
+        );
     }
 
     // Free the temporary cutbuffer and restore the original.

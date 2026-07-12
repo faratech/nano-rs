@@ -7,6 +7,24 @@ use crate::event::{
 
 use super::super::super::InternalEvent;
 
+#[cfg(feature = "bracketed-paste")]
+pub(crate) const BRACKETED_PASTE_START: &[u8] = b"\x1B[200~";
+#[cfg(feature = "bracketed-paste")]
+pub(crate) const BRACKETED_PASTE_END: &[u8] = b"\x1B[201~";
+
+#[cfg(feature = "bracketed-paste")]
+pub(crate) fn incomplete_paste_bytes(buffer: &[u8]) -> Option<Vec<u8>> {
+    let mut payload = buffer.strip_prefix(BRACKETED_PASTE_START)?;
+    let longest_possible = payload.len().min(BRACKETED_PASTE_END.len());
+    for suffix_len in (1..=longest_possible).rev() {
+        if payload.ends_with(&BRACKETED_PASTE_END[..suffix_len]) {
+            payload = &payload[..payload.len() - suffix_len];
+            break;
+        }
+    }
+    Some(payload.to_vec())
+}
+
 // Event parsing
 //
 // This code (& previous one) are kind of ugly. We have to think about this,
@@ -812,12 +830,13 @@ fn parse_cb(cb: u8) -> io::Result<(MouseEventKind, KeyModifiers)> {
 #[cfg(feature = "bracketed-paste")]
 pub(crate) fn parse_csi_bracketed_paste(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     // ESC [ 2 0 0 ~ pasted text ESC 2 0 1 ~
-    assert!(buffer.starts_with(b"\x1B[200~"));
+    assert!(buffer.starts_with(BRACKETED_PASTE_START));
 
-    if !buffer.ends_with(b"\x1b[201~") {
+    if !buffer.ends_with(BRACKETED_PASTE_END) {
         Ok(None)
     } else {
-        let paste = buffer[6..buffer.len() - 6].to_vec();
+        let paste =
+            buffer[BRACKETED_PASTE_START.len()..buffer.len() - BRACKETED_PASTE_END.len()].to_vec();
         Ok(Some(InternalEvent::Event(Event::PasteBytes(paste))))
     }
 }

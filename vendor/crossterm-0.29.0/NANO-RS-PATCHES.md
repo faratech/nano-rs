@@ -6,7 +6,7 @@ crates.io. The source archive used for vendoring has SHA-256
 records upstream Git commit `36d95b26a26e64b0f8c12edfe11f410a6d56a812`.
 The upstream MIT license remains in `LICENSE`.
 
-nano-rs carries three local fixes:
+nano-rs carries four local fixes:
 
 1. Unix bracketed-paste parsing emits `Event::PasteBytes(Vec<u8>)`, preserving
    the terminal payload exactly instead of passing it through
@@ -19,7 +19,12 @@ nano-rs carries three local fixes:
    loop.
 3. Unix event parsers keep incomplete ESC/CSI sequences across arbitrary short
    PTY reads. Ambiguous sequences use a 100 ms idle timeout so a standalone
-   Escape key remains responsive, while a bracketed paste in progress has no
-   ambiguity timeout and can safely span large or delayed input streams.
+   Escape key remains responsive, while bracketed-paste fragments use the
+   separate recovery timeout described below.
+4. Unix terminal sources use `FIONREAD` to drain only bytes that are currently
+   available, avoiding a blocking read after a paste burst. If a bracketed
+   paste is idle for two seconds or reaches EOF before its closing marker,
+   `Event::PasteBytesIncomplete` recovers the received payload without marker
+   bytes so applications can preserve it and warn the user.
 
 The parser and event-source regression tests live beside the patched code.

@@ -86,6 +86,27 @@ content:
 Avoid clipboard-to-file tools that silently change encoding or line endings
 when byte identity matters.
 
+## Recovery when WSL drops the paste terminator
+
+A positive short write can also discard the final `ESC [ 2 0 1 ~` bracketed-
+paste marker.  Without that marker, an atomic terminal parser cannot know that
+the paste ended; older nano-rs builds waited indefinitely and treated later
+keys such as `Ctrl+X` as more paste data.
+
+nano-rs now drains only the bytes reported as available by `FIONREAD` and
+applies a two-second inactivity deadline to an open bracketed paste.  If the
+deadline expires, it inserts the prefix that actually arrived, strips any
+partial closing marker, and warns:
+
+```text
+Paste interrupted; received data may be incomplete
+```
+
+This is a hang-recovery measure, not a data-repair mechanism.  The delivered
+prefix can be inspected or saved under a different name, but WSL-discarded
+bytes remain unrecoverable and the result must not overwrite the source without
+an independent checksum or byte-for-byte comparison.
+
 ## Upstream fix
 
 The immediate path should preserve the unwritten suffix exactly as the delayed

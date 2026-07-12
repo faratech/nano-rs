@@ -55,6 +55,8 @@
 //!             Event::Paste(data) => println!("{:?}", data),
 //!             #[cfg(feature = "bracketed-paste")]
 //!             Event::PasteBytes(data) => println!("{:?}", data),
+//!             #[cfg(feature = "bracketed-paste")]
+//!             Event::PasteBytesIncomplete(data) => println!("Incomplete paste: {:?}", data),
 //!             Event::Resize(width, height) => println!("New size {}x{}", width, height),
 //!         }
 //!     }
@@ -103,6 +105,8 @@
 //!                 Event::Paste(data) => println!("Pasted {:?}", data),
 //!                 #[cfg(feature = "bracketed-paste")]
 //!                 Event::PasteBytes(data) => println!("Pasted {:?}", data),
+//!                 #[cfg(feature = "bracketed-paste")]
+//!                 Event::PasteBytesIncomplete(data) => println!("Incomplete paste: {:?}", data),
 //!                 Event::Resize(width, height) => println!("New size {}x{}", width, height),
 //!             }
 //!         } else {
@@ -568,6 +572,12 @@ pub enum Event {
     /// enabled. Unlike [`Event::Paste`], this variant preserves malformed UTF-8 byte-for-byte.
     #[cfg(feature = "bracketed-paste")]
     PasteBytes(Vec<u8>),
+    /// Raw bytes recovered from a bracketed paste whose closing marker did not arrive before the
+    /// input stream went idle or reached EOF. The opening marker and any partial closing marker
+    /// are not included. Applications should preserve these bytes but may warn that the paste was
+    /// incomplete.
+    #[cfg(feature = "bracketed-paste")]
+    PasteBytesIncomplete(Vec<u8>),
     /// An resize event with new dimensions after resize (columns, rows).
     /// **Note** that resize events can occur in batches.
     Resize(u16, u16),
@@ -750,6 +760,16 @@ impl Event {
     pub fn as_paste_bytes_event(&self) -> Option<&[u8]> {
         match self {
             Event::PasteBytes(paste) => Some(paste),
+            _ => None,
+        }
+    }
+
+    /// Returns the recovered bytes if this is an incomplete raw paste event, otherwise `None`.
+    #[cfg(feature = "bracketed-paste")]
+    #[inline]
+    pub fn as_paste_bytes_incomplete_event(&self) -> Option<&[u8]> {
+        match self {
+            Event::PasteBytesIncomplete(paste) => Some(paste),
             _ => None,
         }
     }
@@ -1724,6 +1744,10 @@ mod tests {
             let event = Event::PasteBytes(vec![0xff]);
             assert!(event.is_paste_bytes());
             assert!(!event.is_key());
+
+            let event = Event::PasteBytesIncomplete(vec![0xff]);
+            assert!(event.is_paste_bytes_incomplete());
+            assert!(!event.is_key());
         }
     }
 
@@ -1771,6 +1795,13 @@ mod tests {
             let event = Event::PasteBytes(vec![0xff]);
             assert_eq!(event.as_paste_event(), None);
             assert_eq!(event.as_paste_bytes_event(), Some(&[0xff][..]));
+            assert_eq!(event.as_paste_bytes_incomplete_event(), None);
+            assert_eq!(event.as_key_event(), None);
+
+            let event = Event::PasteBytesIncomplete(vec![0xfe]);
+            assert_eq!(event.as_paste_event(), None);
+            assert_eq!(event.as_paste_bytes_event(), None);
+            assert_eq!(event.as_paste_bytes_incomplete_event(), Some(&[0xfe][..]));
             assert_eq!(event.as_key_event(), None);
         }
     }

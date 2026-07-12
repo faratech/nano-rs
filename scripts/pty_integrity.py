@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise nano's byte-integrity and terminal-EOF behavior through a real PTY.
+"""Exercise nano's byte integrity, paste recovery, and terminal EOF through a PTY.
 
 The fast profile is intended for pull requests.  The broad profile adds large
 and seeded payloads for scheduled/manual runs.  The harness has no third-party
@@ -39,6 +39,7 @@ CTRL_X = b"\x18"
 DEFAULT_SEED = 0x4E414E4F  # ASCII "NANO"
 ROWS = 30
 COLS = 100
+INCOMPLETE_PASTE_RECOVERY_TIMEOUT = 4.0
 
 
 def parse_seed(value: str) -> int:
@@ -157,6 +158,21 @@ class PasteCase:
     chunks: tuple[int, ...]
     marker_chunks: tuple[int, ...] = ()
     marker_delay: float = 0.0
+
+    @property
+    def expected(self) -> bytes:
+        return normalized_paste(self.payload)
+
+
+@dataclass(frozen=True)
+class IncompletePasteCase:
+    name: str
+    payload: bytes
+    partial_end: bytes = b""
+
+    @property
+    def wire_input(self) -> bytes:
+        return PASTE_BEGIN + self.payload + self.partial_end
 
     @property
     def expected(self) -> bytes:
@@ -449,6 +465,111 @@ def run_paste_case(executable: str, case: PasteCase) -> RunResult:
         )
 
 
+def run_incomplete_paste_case(
+    executable: str, case: IncompletePasteCase
+) -> tuple[RunResult, float | None]:
+    """Verify bounded recovery when a terminal drops the paste end marker."""
+
+    started = time.monotonic()
+    recovered_after: float | None = None
+    with tempfile.TemporaryDirectory(prefix="nano-pty-incomplete-paste-") as temp:
+        root = Path(temp)
+        home = root / "home"
+        home.mkdir()
+        target = root / "incomplete-paste.bin"
+        target.write_bytes(b"")
+        session = PtySession(
+            executable,
+            ["-I", "-L", "-t", str(target)],
+            root,
+            hermetic_env(home),
+        )
+        error = ""
+        actual: bytes | None = None
+        try:
+            if not session.wait_for(PASTE_ENABLED, 5.0):
+                error = "editor did not enable bracketed paste"
+            else:
+                transcript_start = len(session.transcript)
+                recovery_started = time.monotonic()
+                session.write_fragmented(PASTE_BEGIN, (1,), 0.002)
+                session.write_chunked(case.payload, (1, 2, 7, 31))
+                if case.partial_end:
+                    session.write_fragmented(case.partial_end, (1,), 0.002)
+
+                # The first line is printable and fits in the 100-column PTY.
+                # Seeing it after the incomplete stream proves that the parser
+                # emitted a paste event and nano repainted, rather than merely
+                # producing unrelated startup output.
+                witness = case.payload.splitlines()[0]
+                deadline = recovery_started + INCOMPLETE_PASTE_RECOVERY_TIMEOUT
+                while time.monotonic() < deadline:
+                    session._read_available()
+                    recovered_output = session.transcript[transcript_start:]
+                    if (
+                        witness in recovered_output
+                        and b"Paste interrupted" in recovered_output
+                    ):
+                        recovered_after = time.monotonic() - recovery_started
+                        break
+                    if session.process.poll() is not None:
+                        break
+                    wait = min(0.03, max(0.0, deadline - time.monotonic()))
+                    select.select([session.master], [], [], wait)
+
+                if recovered_after is None:
+                    error = (
+                        "editor did not recover, warn, and redraw after incomplete paste "
+                        f"within {INCOMPLETE_PASTE_RECOVERY_TIMEOUT:.1f}s"
+                    )
+                else:
+                    # Exiting and saving is the responsiveness assertion: Ctrl-X
+                    # must be interpreted as a command, not retained as paste data.
+                    session.write_all(CTRL_X)
+                    rc = session.wait(2.0)
+                    if rc is None:
+                        error = "editor recovered paste but did not respond to Ctrl-X"
+                    elif rc != 0:
+                        error = f"editor exited with status {rc} after paste recovery"
+                    actual = target.read_bytes() if target.exists() else None
+                    if not error and actual != case.expected:
+                        error = (
+                            "recovered paste bytes differ: "
+                            f"expected {len(case.expected)} bytes/{sha256(case.expected)}, "
+                            f"got {len(actual or b'')} bytes/{sha256(actual or b'')}"
+                        )
+                    return (
+                        RunResult(
+                            ok=not error,
+                            returncode=rc,
+                            actual=actual,
+                            transcript=bytes(session.transcript),
+                            elapsed=time.monotonic() - started,
+                            error=error,
+                            command=session.command,
+                        ),
+                        recovered_after,
+                    )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        finally:
+            session.terminate()
+
+        actual = target.read_bytes() if target.exists() else None
+        return (
+            RunResult(
+                ok=False,
+                returncode=session.process.poll(),
+                actual=actual,
+                transcript=bytes(session.transcript),
+                elapsed=time.monotonic() - started,
+                error=error,
+                command=session.command,
+            ),
+            recovered_after,
+        )
+
+
 def process_ticks(pid: int) -> int | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
@@ -731,6 +852,40 @@ def run_suite(args: argparse.Namespace) -> int:
                     },
                 )
                 print(f"       artifacts: {where}", flush=True)
+
+    # These recovery semantics are a nano-rs guard against a relay losing the
+    # final bracketed-paste marker.  GNU nano intentionally remains blocked in
+    # this situation, so do not run these cases against the reference binary.
+    incomplete_cases = (
+        IncompletePasteCase(
+            "incomplete-paste-no-end",
+            b"incomplete-paste-no-end\nsecond line survives",
+        ),
+        IncompletePasteCase(
+            "incomplete-paste-partial-end",
+            b"incomplete-paste-partial-end\npartial marker is stripped",
+            partial_end=PASTE_END[:-1],
+        ),
+    )
+    for case in incomplete_cases:
+        result, recovered_after = run_incomplete_paste_case(candidate, case)
+        print_result("candidate", case.name, result)
+        if not result.ok:
+            failures += 1
+            where = artifacts.write(
+                "candidate",
+                case.name,
+                result,
+                case.wire_input,
+                case.expected,
+                {
+                    "partial_end_hex": case.partial_end.hex(),
+                    "recovery_timeout_seconds": INCOMPLETE_PASTE_RECOVERY_TIMEOUT,
+                    "recovered_after_seconds": recovered_after,
+                    "reference_skipped": True,
+                },
+            )
+            print(f"       artifacts: {where}", flush=True)
 
     # The EOF regression is a candidate guard, not a platform-version parity
     # assertion.  Reference nano behavior can vary in status text while the
