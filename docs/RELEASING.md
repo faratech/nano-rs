@@ -48,17 +48,22 @@ nano-rs ships with a cross-platform self-update capability:
   exists, download the matching asset and install it.
 - `nano --force` — with `--install`/`--update`, act even if already up to date.
 - **Background check on launch**:
-  - **Windows**: on by default. ~3 s after startup nano-rs checks for a newer
-    release and, if one is found, downloads it and shows a status-bar notice
-    (`Update vX downloaded — restart nano to apply.`). The newer binary is
-    swapped in via an atomic rename on the next launch.
-  - **Linux/Unix**: **opt-in** — set `NANO_UPDATE_CHECK=1` to enable it. It is
-    off by default because nano is commonly the system `$EDITOR` and should not
-    phone home on every `git commit`/`crontab -e`.
-  - The check is throttled to **once per 24 h**, runs only when the installed
-    binary is in a **user-writable** location (so a system `/usr/bin/nano`
-    never nags), never blocks on the network, and is silent on failure.
-  - `NANO_NO_UPDATE_CHECK` disables the background check on every platform.
+  - **On by default on every platform.** ~3 s after startup nano-rs checks for
+    a newer release and, if one is found, downloads it and shows a status-bar
+    notice (`Update vX downloaded — restart nano to apply.`). The newer binary
+    is swapped in via an atomic rename on the next launch (and, since 0.0.16,
+    also refreshed in `~/.local/bin` when the running copy lives elsewhere).
+  - **Disabling**: set `NANO_UPDATE_CHECK=0` (also accepts `false`, `no`,
+    `off`, or an empty value) — this was previously opt-in on Linux and is now
+    the supported kill switch there. `NANO_NO_UPDATE_CHECK=1` also disables
+    and takes precedence over `NANO_UPDATE_CHECK`.
+  - The check is throttled to **once per 24 h** of *completed* checks — a
+    failed/offline attempt never blocks the next launch from retrying — runs
+    only when at least one applicable location is user-writable (so a system
+    `/usr/bin/nano` alone never triggers a download), never blocks on the
+    network, and is silent on failure.
+  - The manual `nano --check` probe ignores these environment variables: it
+    always asks GitHub when you explicitly run it.
 
 ### Security & portability notes
 

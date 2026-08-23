@@ -381,6 +381,9 @@ def hermetic_env(home: Path) -> dict[str, str]:
             "XDG_CONFIG_HOME": str(home / "xdg-config"),
             "XDG_CACHE_HOME": str(home / "xdg-cache"),
             "XDG_DATA_HOME": str(home / "xdg-data"),
+            # Byte-integrity cases must never depend on the updater's
+            # background check (network, throttle stamps).
+            "NANO_NO_UPDATE_CHECK": "1",
         }
     )
     for key in ("NANORC", "NO_COLOR", "COLORTERM"):

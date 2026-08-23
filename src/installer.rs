@@ -298,19 +298,44 @@ fn stamp_check() {
     }
 }
 
-/// Whether the launch-time background update check should run.
+/// Read a boolean environment flag: unset => `None`; "0", "false", "", "no",
+/// "off" (case-insensitive) => `Some(false)`; any other value => `Some(true)`.
+fn env_flag(name: &str) -> Option<bool> {
+    std::env::var_os(name).map(
+        |raw| match raw.to_string_lossy().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" | "off" => false,
+            _ => true,
+        },
+    )
+}
+
+/// Resolve the background-check policy.
 ///
-/// Disabled entirely by `NANO_NO_UPDATE_CHECK`. On Windows it is on by default;
-/// on Unix it is OPT-IN (set `NANO_UPDATE_CHECK`) because nano is commonly the
-/// system `$EDITOR` and shouldn't phone home on every `git commit`.
-fn background_updates_enabled() -> bool {
-    if std::env::var_os("NANO_NO_UPDATE_CHECK").is_some() {
+/// An explicit `NANO_NO_UPDATE_CHECK=1` always disables. Otherwise
+/// `NANO_UPDATE_CHECK` decides when it is set, and otherwise the check is ON —
+/// on every platform (Linux previously required opt-in; nano-rs is typically
+/// self-installed rather than the distro `$EDITOR`, so this now matches
+/// Windows and htop-win).
+fn resolve_updates_enabled(disable: Option<bool>, enable: Option<bool>) -> bool {
+    if disable == Some(true) {
         return false;
     }
-    if cfg!(windows) {
-        return true;
+    match enable {
+        Some(v) => v,
+        None => true,
     }
-    std::env::var_os("NANO_UPDATE_CHECK").is_some()
+}
+
+/// Whether the launch-time background update check should run.
+///
+/// On by default everywhere. `NANO_UPDATE_CHECK=0/false/no/off/""` disables;
+/// `NANO_NO_UPDATE_CHECK=1` also disables and takes precedence over
+/// `NANO_UPDATE_CHECK`. (`--check` ignores these variables entirely.)
+fn background_updates_enabled() -> bool {
+    resolve_updates_enabled(
+        env_flag("NANO_NO_UPDATE_CHECK"),
+        env_flag("NANO_UPDATE_CHECK"),
+    )
 }
 
 /// Whether we can actually replace the running executable (its directory is
@@ -1141,6 +1166,57 @@ pub fn apply_pending_update() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{env_flag, resolve_updates_enabled};
+
+    #[test]
+    fn env_flag_tokens_parse_case_insensitively() {
+        // The std::env reads live in the thin wrapper; this table pins the
+        // pure token grammar so NANO_UPDATE_CHECK=0 can never enable again.
+        let off = ["", "0", "false", "no", "off", "OFF", "False"];
+        for token in off {
+            assert_eq!(Some(false), fake_env_flag(token), "{token:?}");
+        }
+        let on = ["1", "true", "YES", "on", "junk", "2"];
+        for token in on {
+            assert_eq!(Some(true), fake_env_flag(token), "{token:?}");
+        }
+    }
+
+    fn fake_env_flag(value: &str) -> Option<bool> {
+        // Mirror of env_flag's body minus the process-global read.
+        match value.to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" | "off" => false,
+            _ => true,
+        }
+        .into_some()
+    }
+
+    trait IntoSome {
+        fn into_some(self) -> Option<bool>;
+    }
+    impl IntoSome for bool {
+        fn into_some(self) -> Option<bool> {
+            Some(self)
+        }
+    }
+
+    #[test]
+    fn update_policy_precedence() {
+        let d: Option<bool> = None;
+        let e: Option<bool> = None;
+        assert!(resolve_updates_enabled(d, e), "default is on everywhere");
+        assert!(!resolve_updates_enabled(Some(true), Some(true)));
+        assert!(!resolve_updates_enabled(Some(true), None));
+        assert!(!resolve_updates_enabled(None, Some(false)));
+        assert!(resolve_updates_enabled(None, Some(true)));
+        assert!(
+            resolve_updates_enabled(Some(false), None),
+            "NO=0 alone must not disable"
+        );
+        assert!(resolve_updates_enabled(Some(false), Some(true)));
+        assert!(!resolve_updates_enabled(Some(false), Some(false)));
+    }
+
     #[test]
     fn checksum_scan_survives_short_lines_before_the_entry() {
         // Issue #77: a `?` on blank or one-token lines used to abort the

@@ -56,6 +56,7 @@ jobs:
       - name: Run broad PTY byte-integrity suite
         env:
           REQUESTED_SEED: ${{ inputs.seed }}
+          NANO_NO_UPDATE_CHECK: "1"
         run: |
           seed="${REQUESTED_SEED:-0x4E414E4F}"
           python3 scripts/pty_integrity.py \

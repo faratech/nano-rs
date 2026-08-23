@@ -62,6 +62,8 @@ jobs:
       # other gate).  Boot the release binary under a pty, with and without
       # line numbers, and require a rendered buffer and no panic.
       - name: Interactive startup smoke test under a pty
+        env:
+          NANO_NO_UPDATE_CHECK: "1"
         run: |
           printf 'smoke line one\nsmoke line two\n' > /tmp/smoke.txt
           for flags in "" "-l"; do
