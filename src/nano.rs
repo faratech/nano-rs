@@ -4172,13 +4172,15 @@ pub fn nano_main() {
 
         // Surface a completed background update, if any.
         if let Ok(status) = update_rx.try_recv() {
-            if let crate::installer::UpdateStatus::Downloaded { version, .. } = status {
+            if let crate::installer::UpdateStatus::Downloaded { version, in_place } = status {
+                let tail = if in_place {
+                    "restart nano to apply."
+                } else {
+                    "the installed copy was refreshed."
+                };
                 winio::statusline(
                     MessageType::Notice,
-                    &format!(
-                        "Update v{} downloaded \u{2014} restart nano to apply.",
-                        version
-                    ),
+                    &format!("Update v{} downloaded \u{2014} {}", version, tail),
                 );
             }
         }

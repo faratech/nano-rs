@@ -363,17 +363,63 @@ fn background_updates_enabled() -> bool {
     )
 }
 
-/// Whether we can actually replace the running executable (its directory is
-/// writable). Used to avoid downloading updates we could never apply — which
-/// would otherwise re-notify "update downloaded" on every launch.
-fn running_exe_replaceable() -> bool {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    match exe.parent() {
-        Some(dir) => tempfile::tempfile_in(dir).is_ok(),
+fn dir_writable(dir: Option<&Path>) -> bool {
+    match dir {
+        Some(dir) => dir.is_dir() && tempfile::tempfile_in(dir).is_ok(),
         None => false,
+    }
+}
+
+/// Whether two paths name the same file.  Falls back to comparing the
+/// canonical parent plus the file name because `get_install_path()` often
+/// does not exist yet (first install), which defeats plain canonicalize.
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
+        return ca == cb;
+    }
+    match (a.parent(), b.parent(), a.file_name(), b.file_name()) {
+        (Some(pa), Some(pb), Some(fa), Some(fb)) if fa == fb => {
+            matches!(
+                (fs::canonicalize(pa), fs::canonicalize(pb)),
+                (Ok(x), Ok(y)) if x == y
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Every location an update may be written to: (1) the running executable
+/// itself, when its directory is writable, and (2) the managed install path,
+/// unless it names the same file as (1).  Background downloads happen only
+/// when at least one location applies -- otherwise the update could never be
+/// installed and would re-notify forever.
+fn apply_targets() -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if dir_writable(exe.parent()) {
+            targets.push(exe);
+        }
+    }
+    if let Ok(install_path) = get_install_path() {
+        if !targets.iter().any(|t| paths_equivalent(t, &install_path)) {
+            targets.push(install_path);
+        }
+    }
+    targets
+}
+
+/// Whether one of the apply targets is the running executable itself, i.e.
+/// whether applying a pending update takes effect on this installation's
+/// next launch as opposed to only refreshing the managed copy.
+fn applies_in_place() -> bool {
+    match std::env::current_exe() {
+        Ok(exe) => apply_targets()
+            .iter()
+            .any(|target| paths_equivalent(target, &exe)),
+        Err(_) => false,
     }
 }
 
@@ -1158,13 +1204,11 @@ pub fn do_install_update(update_file: &std::path::Path) -> Result<(), Box<dyn st
 /// Update status for background updates
 #[derive(Clone)]
 pub enum UpdateStatus {
-    /// A newer version is available and has been downloaded
-    Downloaded {
-        version: String,
-        // Kept for API completeness; consumers currently only show the version.
-        #[allow(dead_code)]
-        path: PathBuf,
-    },
+    /// A newer version is available and has been downloaded.  `in_place` is
+    /// true when one of the written locations is the running executable, so
+    /// restarting nano is enough to pick it up; when false only the managed
+    /// install path was refreshed.
+    Downloaded { version: String, in_place: bool },
     /// No update available or error occurred
     None,
 }
@@ -1176,9 +1220,9 @@ pub fn check_and_download_update() -> UpdateStatus {
     if !background_updates_enabled() {
         return UpdateStatus::None;
     }
-    // Don't download what we can't install (and avoid re-notifying forever when
-    // the binary lives in a non-writable location like /usr/bin).
-    if !running_exe_replaceable() {
+    // Don't download what we can't install anywhere (and avoid re-notifying
+    // forever when no applicable location is user-writable).
+    if apply_targets().is_empty() {
         return UpdateStatus::None;
     }
 
@@ -1198,10 +1242,10 @@ pub fn check_and_download_update() -> UpdateStatus {
     // target match, newer version, executable header, owner, and digest.
     if pending {
         match load_valid_pending_update() {
-            Ok((path, manifest)) => {
+            Ok((_path, manifest)) => {
                 return UpdateStatus::Downloaded {
                     version: manifest.version,
-                    path,
+                    in_place: applies_in_place(),
                 };
             }
             Err(_) => remove_pending_update(),
@@ -1237,7 +1281,7 @@ pub fn check_and_download_update() -> UpdateStatus {
             if store_pending_update(&body, &latest_version, &expected_sha256).is_ok() {
                 UpdateStatus::Downloaded {
                     version: latest_version,
-                    path: temp_file,
+                    in_place: applies_in_place(),
                 }
             } else {
                 UpdateStatus::None
@@ -1291,12 +1335,6 @@ pub fn spawn_update_check() -> std::sync::mpsc::Receiver<UpdateStatus> {
 /// process keeps executing its already-open image; the new binary takes effect
 /// on the next launch. Returns true if an update was applied or remains pending.
 pub fn apply_pending_update() -> bool {
-    // Get the currently running executable - this is what we need to update
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
     let any_pending = update_temp_path().is_some_and(|path| path.exists())
         || update_manifest_path().is_some_and(|path| path.exists());
     if !any_pending {
@@ -1312,23 +1350,78 @@ pub fn apply_pending_update() -> bool {
         }
     };
 
-    let install_path = current_exe;
-    restore_backup_if_missing(&install_path);
-
-    if let Err(e) = replace_file_with_backup(&update_file, &install_path) {
-        eprintln!("Update pending (cannot replace running executable: {})", e);
-        return true; // Return true to skip re-download
+    // Crash-window insurance: a vanished target with an orphaned .old means
+    // we died between move-aside and copy; put the old binary back first.
+    for target in apply_targets() {
+        restore_backup_if_missing(&target);
     }
 
-    // Clean up the executable and its binding manifest only after replacement.
-    remove_pending_update();
+    // Write every applicable location (running executable and/or managed
+    // install path).  A partially applied round self-heals: the applied copy
+    // reports the new version, so the leftover pending pair -- no longer
+    // "newer than current" -- is discarded on the next launch anyway.
+    let targets = apply_targets();
+    if targets.is_empty() {
+        eprintln!("Update pending (no user-writable location to install it)");
+        return true; // Keep pending; skip re-download this launch.
+    }
 
-    eprintln!("Update applied successfully!");
+    let mut applied = 0;
+    for target in &targets {
+        match replace_file_with_backup(&update_file, target) {
+            Ok(()) => applied += 1,
+            Err(error) => {
+                eprintln!("Could not update {}: {error}", target.display());
+            }
+        }
+    }
+
+    if applied == 0 {
+        eprintln!("Update pending (cannot replace running executable)");
+        return true; // Keep pending; retried on the next launch.
+    }
+
+    // Clean up the executable and its binding manifest only after at least
+    // one location was replaced.
+    remove_pending_update();
+    eprintln!("Update applied ({applied} location(s)) -- restart nano to use it");
     true
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paths_equivalent_covers_identity_canonical_and_missing_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("nano");
+        let b = dir.path().join("nano");
+        std::fs::write(&a, b"x").unwrap();
+        assert!(super::paths_equivalent(&a, &b), "identical paths");
+
+        // A symlinked launch path collapses to the same target (this is how
+        // /usr/local/bin/nano -> ~/.local/bin/nano stays one location).
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert!(super::paths_equivalent(&a, &link), "same file via symlink");
+        // A hard link is a distinct directory entry: an atomic rename over
+        // one must not be assumed to publish through the other.
+        let hard = dir.path().join("hard");
+        fs::hard_link(&a, &hard).unwrap();
+        assert!(!super::paths_equivalent(&a, &hard), "hard links diverge");
+
+        let other = dir.path().join("other");
+        std::fs::write(&other, b"y").unwrap();
+        assert!(!super::paths_equivalent(&a, &other), "distinct files");
+
+        // Install path often does not exist yet: compare parent + name.
+        let nested = dir.path().join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let ghost_a = nested.join("nano");
+        let ghost_b = dir.path().join("sub").join("nano");
+        assert!(super::paths_equivalent(&ghost_a, &ghost_b));
+        assert!(!super::paths_equivalent(&ghost_a, &a));
+    }
+
     #[test]
     fn update_check_message_is_actionable() {
         let newer = super::format_update_report("0.0.15", "0.0.16");
