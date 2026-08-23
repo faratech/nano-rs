@@ -3860,6 +3860,15 @@ fn compute_titlebar_strings(
         }
 
         prefix = String::new();
+
+        // Persistent hint that a validated update is staged and waiting for
+        // a restart; rides in the version slot so the layout sacrifice
+        // ladder sheds it gracefully on narrow terminals.
+        let mut upperleft = upperleft;
+        if let Some(version) = with_state(|s| s.pending_update.clone()) {
+            upperleft.push_str(&format!(" [v{version} ready]"));
+        }
+        return (upperleft, prefix, state, caption);
     } else {
         // In help viewer
         upperleft = TITLEBAR_PRODUCT.to_string();
@@ -6112,6 +6121,23 @@ pub fn full_refresh() {
 }
 
 /* C: void draw_all_subwindows(void) */
+/// Redraw just the titlebar, honoring the same menu guards as
+/// draw_all_subwindows.  Used when state that feeds the titlebar (such as a
+/// freshly staged update) changes mid-session.
+pub fn refresh_titlebar() {
+    let (currmenu, inhelp) = with_state(|s| (s.currmenu, s.inhelp));
+    let is_browser = (currmenu & (MBROWSER | MGOTODIR | MWHEREISFILE)) != 0;
+    if is_browser {
+        return;
+    }
+    #[cfg(feature = "help")]
+    if inhelp {
+        return;
+    }
+    let title = with_state(|s| s.title.clone());
+    titlebar(title.as_deref());
+}
+
 pub fn draw_all_subwindows() {
     let (currmenu, inhelp, title) = with_state(|s| (s.currmenu, s.inhelp, s.title.clone()));
 

@@ -234,6 +234,8 @@ pub struct AppState {
     // --- Marking ---
     /// Whether indenting/commenting should include the last line of the marked region.
     pub also_the_last: bool,
+    /// Version of a downloaded update staged in cache awaiting restart.
+    pub pending_update: Option<String>,
 
     // --- Prompt/search state ---
     /// The answer string used by the status-bar prompt.
@@ -597,6 +599,7 @@ impl AppState {
             pletion_line: None,
 
             also_the_last: false,
+            pending_update: None,
 
             answer: String::new(), // C: char *answer = NULL (empty)
             last_search: String::new(),

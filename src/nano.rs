@@ -4162,6 +4162,11 @@ pub fn nano_main() {
 
     // Kick off a background check for a newer release (set NANO_NO_UPDATE_CHECK
     // to disable). Best-effort and silent on failure; never blocks startup.
+    // Surface an already-staged update on the titlebar immediately.
+    if let Some(version) = crate::installer::pending_update_version() {
+        with_state_mut(|s| s.pending_update = Some(version));
+    }
+
     let update_rx = crate::installer::spawn_update_check();
 
     // ----------------------------------------------------------------
@@ -4182,6 +4187,8 @@ pub fn nano_main() {
                     MessageType::Notice,
                     &format!("Update v{} downloaded \u{2014} {}", version, tail),
                 );
+                with_state_mut(|s| s.pending_update = Some(version.clone()));
+                winio::refresh_titlebar();
             }
         }
 

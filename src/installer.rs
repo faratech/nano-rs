@@ -1313,6 +1313,15 @@ pub fn report_available_update() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Version of a staged update that validates fully (target, asset, newer
+/// version, ownership, executable header, SHA-256). `None` when nothing is
+/// staged or the pair does not check out.
+pub fn pending_update_version() -> Option<String> {
+    load_valid_pending_update()
+        .ok()
+        .map(|(_path, manifest)| manifest.version)
+}
+
 /// Spawn a background thread to check and download updates
 /// Returns a receiver that will receive the update status
 pub fn spawn_update_check() -> std::sync::mpsc::Receiver<UpdateStatus> {
