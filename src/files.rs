@@ -2147,10 +2147,12 @@ pub fn encode_data(buf: &[u8]) -> LineData {
     LineData::from_external(buf)
 }
 
-/// Detect the file's format from its first line separator, as historical GNU
-/// nano did while supporting classic-Mac files.  A CR followed by LF is DOS;
-/// a standalone CR is Mac; and a bare LF is Unix.  With conversion disabled,
-/// only LF is structural and CR remains document data.
+/// Detect the file's format from its first line separator, as GNU nano does:
+/// a CR directly before the first LF is DOS, and a bare LF is Unix.  A stray
+/// CR anywhere else is ordinary line data and never selects Mac format on
+/// load (Mac line endings are only produced by the explicit M-M write-out
+/// toggle).  With conversion disabled, only LF is structural and CR remains
+/// document data.
 fn detect_format(content: &[u8], convert: bool) -> FormatType {
     if !convert {
         return FormatType::NixFile;
@@ -2159,13 +2161,8 @@ fn detect_format(content: &[u8], convert: bool) -> FormatType {
     let mut index = 0;
     while index < content.len() {
         match content[index] {
-            b'\r' => {
-                if content.get(index + 1) == Some(&b'\n') {
-                    return FormatType::DosFile;
-                }
-                return FormatType::MacFile;
-            }
             b'\n' => return FormatType::NixFile,
+            b'\r' if content.get(index + 1) == Some(&b'\n') => return FormatType::DosFile,
             _ => index += 1,
         }
     }
@@ -2185,43 +2182,26 @@ fn decode_file_data(content: &[u8], convert: bool) -> (Vec<LineData>, FormatType
     let mut count = 0usize;
 
     while index < content.len() {
-        let separator_len = if format == FormatType::MacFile && convert {
-            match content[index] {
-                b'\r' if content.get(index + 1) == Some(&b'\n') => 2,
-                b'\r' | b'\n' => 1,
-                _ => 0,
-            }
-        } else if content[index] == b'\n' {
-            1
-        } else {
-            0
-        };
-
-        if separator_len == 0 {
+        if content[index] != b'\n' {
             index += 1;
             continue;
         }
 
         let mut end = index;
-        if convert && format != FormatType::MacFile && end > start && content[end - 1] == b'\r' {
-            // GNU nano strips CR before every LF once conversion is enabled;
-            // only the first separator determines the format retained on save.
+        if convert && end > start && content[end - 1] == b'\r' {
+            // GNU nano strips a CR directly before every LF once conversion
+            // is enabled; only the first separator determines the format
+            // retained on save.
             end -= 1;
         }
         lines.push(encode_data(&content[start..end]));
         count += 1;
-        index += separator_len;
+        index += 1;
         start = index;
     }
 
     if start == content.len() {
         lines.push(LineData::empty());
-    } else if convert && format != FormatType::MacFile && content.last() == Some(&b'\r') {
-        // Historical GNU nano treats a final standalone CR as a line ending,
-        // even when an earlier separator selected Unix or DOS output format.
-        lines.push(encode_data(&content[start..content.len() - 1]));
-        lines.push(LineData::empty());
-        count += 1;
     } else {
         lines.push(encode_data(&content[start..]));
         count += 1;
@@ -5633,12 +5613,14 @@ mod tests {
                 ),
                 2..if cfg!(miri) { 8 } else { 32 },
             ),
-            format_index in 0u8..3,
+            format_index in 0u8..2,
         ) {
+            // Loading never auto-selects Mac format any more (a stray CR is
+            // data), so the decode round-trip covers Unix and DOS endings;
+            // Mac separators stay covered by separators_match_each_retained_format.
             let format = match format_index {
                 0 => FormatType::NixFile,
-                1 => FormatType::DosFile,
-                _ => FormatType::MacFile,
+                _ => FormatType::DosFile,
             };
             let separator = separator_for_format(format);
             let mut input = Vec::new();
@@ -5666,7 +5648,9 @@ mod tests {
     #[test]
     fn first_separator_normalizes_mixed_line_endings_like_gnu() {
         let cases: &[(&[u8], &[u8], FormatType)] = &[
-            (b"a\rb\nc", b"a\rb\rc", FormatType::MacFile),
+            // A stray CR before the first LF is data, not a Mac marker; the file loads
+            // unchanged instead of being rewritten with CR endings.
+            (b"a\rb\nc", b"a\rb\nc", FormatType::NixFile),
             (b"a\nb\rc", b"a\nb\rc", FormatType::NixFile),
             (b"a\r\nb\nc", b"a\r\nb\r\nc", FormatType::DosFile),
             (b"a\nb\r\nc", b"a\nb\nc", FormatType::NixFile),
@@ -5704,17 +5688,31 @@ mod tests {
     }
 
     #[test]
-    fn decode_file_data_supports_mac_and_no_convert() {
+    fn stray_cr_stays_data_and_file_round_trips_byte_identically() {
         use crate::definitions::FormatType;
 
-        let (lines, format, count) = decode_file_data(b"one\rtwo\r", true);
-        assert_eq!(format, FormatType::MacFile);
+        // Issue #56: a lone CR must not flip the whole file to Mac format
+        // (which split at every CR/LF and rewrote all endings on save).
+        let input: &[u8] = b"one\rtwo\nthree\n";
+        let (lines, format, count) = decode_file_data(input, true);
+        assert_eq!(format, FormatType::NixFile);
         assert_eq!(count, 2);
         assert_eq!(
             lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
-            [b"one".as_slice(), b"two", b""]
+            [b"one\rtwo".as_slice(), b"three", b""]
+        );
+        assert_eq!(serialize_decoded(&lines, format), input);
+
+        // A trailing standalone CR at EOF is data too, not a line ending.
+        let (lines, format, count) = decode_file_data(b"one\rtwo\r", true);
+        assert_eq!(format, FormatType::NixFile);
+        assert_eq!(count, 1);
+        assert_eq!(
+            lines.iter().map(|line| line.as_bytes()).collect::<Vec<_>>(),
+            [b"one\rtwo\r".as_slice()]
         );
 
+        // With conversion disabled every byte survives untouched.
         let (lines, format, count) = decode_file_data(b"one\rtwo\r\n", false);
         assert_eq!(format, FormatType::NixFile);
         assert_eq!(count, 1);
