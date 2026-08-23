@@ -413,6 +413,62 @@ fn copy_file_atomic(source: &Path, target: &Path) -> Result<(), Box<dyn std::err
     sync_parent(target)
 }
 
+/// Sibling path used for rollback: `nano` keeps its previous bytes in
+/// `nano.old` next to it (htop-win parity).
+fn backup_target_path(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(|f| f.to_os_string())
+        .unwrap_or_default();
+    name.push(".old");
+    target.with_file_name(name)
+}
+
+/// Best-effort: move an existing target aside so the replacement both frees
+/// the path and keeps the previous binary for manual rollback.  A failure is
+/// warned about and never aborts the caller (a locked `.old` on Windows must
+/// not wedge an update).
+fn move_aside_existing(target: &Path) -> bool {
+    if !target.exists() {
+        return false;
+    }
+    match fs::rename(target, backup_target_path(target)) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "nano: could not save previous binary as {}: {error}",
+                backup_target_path(target).display()
+            );
+            false
+        }
+    }
+}
+
+/// Replace `target` with `source`, keeping the previous bytes in
+/// `<target>.old` for rollback.  If the replacement fails after a successful
+/// backup, the backup is moved back so the target is never left missing.
+pub(crate) fn replace_file_with_backup(
+    source: &Path,
+    target: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backed_up = move_aside_existing(target);
+    if let Err(error) = copy_file_atomic(source, target) {
+        if backed_up {
+            let _ = fs::rename(backup_target_path(target), target);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Crash-window insurance: if the target vanished (crash between the
+/// move-aside and the copy) but its `.old` backup exists, put it back.
+fn restore_backup_if_missing(target: &Path) {
+    if !target.exists() && backup_target_path(target).exists() {
+        let _ = fs::rename(backup_target_path(target), target);
+    }
+}
+
 /// Mark a file executable on Unix (no-op on Windows).
 fn set_executable(file: &fs::File) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -594,7 +650,7 @@ pub fn install_to_path(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("Installing nano {} to PATH...", current_version);
     }
 
-    copy_file_atomic(&current_exe, &target_path)?;
+    replace_file_with_backup(&current_exe, &target_path)?;
 
     println!("Successfully installed nano {}!", current_version);
     println!("Location: {}", target_path.display());
@@ -1085,7 +1141,7 @@ pub fn do_install_update(update_file: &std::path::Path) -> Result<(), Box<dyn st
         fs::create_dir_all(parent)?;
     }
 
-    copy_file_atomic(update_file, &target_path)?;
+    replace_file_with_backup(update_file, &target_path)?;
 
     // Clean up temp file
     let _ = fs::remove_file(update_file);
@@ -1257,8 +1313,9 @@ pub fn apply_pending_update() -> bool {
     };
 
     let install_path = current_exe;
+    restore_backup_if_missing(&install_path);
 
-    if let Err(e) = copy_file_atomic(&update_file, &install_path) {
+    if let Err(e) = replace_file_with_backup(&update_file, &install_path) {
         eprintln!("Update pending (cannot replace running executable: {})", e);
         return true; // Return true to skip re-download
     }
@@ -1386,6 +1443,66 @@ mod tests {
         );
         assert!(resolve_updates_enabled(Some(false), Some(true)));
         assert!(!resolve_updates_enabled(Some(false), Some(false)));
+    }
+
+    #[test]
+    fn replace_with_backup_moves_previous_binary_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nano");
+        let source = dir.path().join("source");
+        std::fs::write(&target, b"old executable").unwrap();
+        std::fs::write(&source, b"new executable").unwrap();
+
+        super::replace_file_with_backup(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new executable");
+        let backup = dir.path().join("nano.old");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old executable");
+    }
+
+    #[test]
+    fn replace_with_backup_overwrites_stale_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nano");
+        let source = dir.path().join("source");
+        std::fs::write(&target, b"previous").unwrap();
+        std::fs::write(dir.path().join("nano.old"), b"ancient").unwrap();
+        std::fs::write(&source, b"current").unwrap();
+
+        super::replace_file_with_backup(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("nano.old")).unwrap(),
+            b"previous"
+        );
+    }
+
+    #[test]
+    fn replace_with_backup_creates_missing_target_without_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nano");
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"fresh install").unwrap();
+
+        super::replace_file_with_backup(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"fresh install");
+        assert!(!dir.path().join("nano.old").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_copy_restores_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nano");
+        // A directory as the "source" makes every read fail (EISDIR) no
+        // matter what privileges the test runs under.
+        let source = dir.path().join("not-a-file");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(&target, b"precious").unwrap();
+
+        assert!(super::replace_file_with_backup(&source, &target).is_err());
+        // Restore semantics: the target is never left missing -- the `.old`
+        // backup is moved back onto it, so no `.old` remains afterwards.
+        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        assert!(!dir.path().join("nano.old").exists());
     }
 
     #[test]
