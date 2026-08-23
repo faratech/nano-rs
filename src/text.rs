@@ -3634,17 +3634,8 @@ pub fn justify_text(whole_buffer: bool) {
                 }
             }
 
-            // Wipe inherited anchor.
-            {
-                let ft = with_state(|s| s.openfile.as_ref().and_then(|f| f.current.clone()));
-                if let Some(ref ft) = ft {
-                    #[cfg(not(feature = "tiny"))]
-                    {
-                        ft.borrow_mut().has_anchor = false;
-                    }
-                }
-            }
-
+            // C never touches line anchors while a mark is set; the port
+            // used to wipe current's anchor here unconditionally (#64).
             add_undo(UndoType::Paste, None);
             let cb_final = get_cutbuffer();
             if let Some(cb_line) = cb_final {
@@ -3931,31 +3922,29 @@ fn do_justify_buffer(
 
     #[cfg(not(feature = "tiny"))]
     {
-        // Wipe inherited anchor on first paragraph.
+        // C: wipe an anchor on the first paragraph if it was only inherited
+        // (text.c:1969-1971): for a whole-buffer justify with no mark, when
+        // the justified text carries no anchor of its own, the receiving
+        // line must not lend it one.  The port had the condition and the
+        // action inverted: it read current's anchor and wiped cutbuffer's.
         if whole_buffer {
-            let has_anchor = with_state(|s| {
+            let mark_set = with_state(|s| {
                 s.openfile
                     .as_ref()
-                    .and_then(|f| f.current.as_ref())
-                    .map(|c| {
-                        #[cfg(not(feature = "tiny"))]
-                        {
-                            c.borrow().has_anchor
-                        }
-                        #[cfg(feature = "tiny")]
-                        {
-                            false
-                        }
-                    })
+                    .map(|f| f.mark.is_some())
                     .unwrap_or(false)
             });
-            if !has_anchor {
-                if let Some(cb) = get_cutbuffer() {
-                    #[cfg(not(feature = "tiny"))]
-                    {
-                        cb.borrow_mut().has_anchor = false;
+            let cutbuffer_has_anchor = get_cutbuffer()
+                .map(|cb| cb.borrow().has_anchor)
+                .unwrap_or(false);
+            if !mark_set && !cutbuffer_has_anchor {
+                with_state_mut(|s| {
+                    if let Some(of) = s.openfile.as_mut() {
+                        if let Some(current) = of.current.as_ref() {
+                            current.borrow_mut().has_anchor = false;
+                        }
                     }
-                }
+                });
             }
         }
         add_undo(UndoType::Paste, None);
