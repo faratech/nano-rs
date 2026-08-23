@@ -953,7 +953,6 @@ fn open_lockfile_for_create(lockfilename: &Path) -> io::Result<File> {
     )
 }
 
-#[cfg(not(feature = "tiny"))]
 fn open_and_check_lockfile(lockfilename: &Path, write_access: bool) -> io::Result<File> {
     let file = open_path_with(
         lockfilename,
@@ -989,6 +988,7 @@ fn open_and_check_lockfile(lockfilename: &Path, write_access: bool) -> io::Resul
 /// writable by us (say, foreign-owned in a shared directory).  A write-capable
 /// descriptor is still preferred so a takeover can reuse it; the flag reports
 /// which one we got.
+#[cfg(not(feature = "tiny"))]
 fn open_existing_lockfile(lockfilename: &Path) -> io::Result<(File, bool)> {
     match open_and_check_lockfile(lockfilename, true) {
         Ok(file) => Ok((file, true)),
@@ -3987,6 +3987,44 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
 // C: bool write_file(const char *name, FILE *thefile, bool normal,
 //                    kind_of_writing_type method, bool annotate)
 // ---------------------------------------------------------------------------
+
+/// Whether this error is the disk being full (C compares errno == ENOSPC).
+#[cfg(not(feature = "tiny"))]
+fn is_enospc_error(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::StorageFull {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if error.raw_os_error() == Some(libc::ENOSPC) {
+            return true;
+        }
+    }
+    false
+}
+
+/// After an ENOSPC failure on a normal write, warn loudly that the file on
+/// disk may now hold only part of the buffer, and refresh the stat info so a
+/// later save notices the changed size (C files.c, after the write loop).
+#[cfg(not(feature = "tiny"))]
+fn warn_disk_full_and_refresh_statinfo(realname: &Path) {
+    napms(3200);
+    state_mut().lastmessage = MessageType::Vacuum;
+    statusline(MessageType::Alert, "File on disk has been truncated!");
+    napms(3200);
+    state_mut().lastmessage = MessageType::Vacuum;
+    statusline(
+        MessageType::Alert,
+        "Maybe ^T^Z, make room on disk, resume, then ^S^X",
+    );
+    let st = stat_with_alloc(realname);
+    with_state_mut(|s| {
+        if let Some(ref mut of) = s.openfile {
+            of.statinfo = st;
+        }
+    });
+}
+
 pub fn write_file(
     name: impl AsRef<Path>,
     thefile: Option<File>,
@@ -4250,6 +4288,10 @@ pub fn write_file(
                 MessageType::Alert,
                 &format!("Error writing {}: {}", realname_str, e),
             );
+            #[cfg(not(feature = "tiny"))]
+            if normal && is_enospc_error(&e) {
+                warn_disk_full_and_refresh_statinfo(&realname);
+            }
             return false;
         }
 
@@ -4272,6 +4314,10 @@ pub fn write_file(
                 MessageType::Alert,
                 &format!("Error writing {}: {}", realname_str, e),
             );
+            #[cfg(not(feature = "tiny"))]
+            if normal && is_enospc_error(&e) {
+                warn_disk_full_and_refresh_statinfo(&realname);
+            }
             return false;
         }
 
@@ -4303,6 +4349,10 @@ pub fn write_file(
                         MessageType::Alert,
                         &format!("Error writing {}: {}", realname_str, e),
                     );
+                    #[cfg(not(feature = "tiny"))]
+                    if normal && is_enospc_error(&e) {
+                        warn_disk_full_and_refresh_statinfo(&realname);
+                    }
                     return false;
                 }
             }
@@ -4311,12 +4361,17 @@ pub fn write_file(
 
     // Flush the buffered writer and release its borrow on `the_file` before the
     // durability sync below (sync_all is a File method, not on the BufWriter).
-    if writer.flush().is_err() {
-        let e = io::Error::last_os_error();
+    // A full disk typically surfaces here: the 8 KB buffer's first spill to
+    // the file happens at this flush (issue #59).
+    if let Err(e) = writer.flush() {
         statusline(
             MessageType::Alert,
             &format!("Error writing {}: {}", realname_str, e),
         );
+        #[cfg(not(feature = "tiny"))]
+        if normal && is_enospc_error(&e) {
+            warn_disk_full_and_refresh_statinfo(&realname);
+        }
         return false;
     }
     drop(writer);
@@ -4328,12 +4383,15 @@ pub fn write_file(
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
-            if the_file.flush().is_err() || the_file.sync_all().is_err() {
-                let e = io::Error::last_os_error();
+            if let Err(e) = the_file.flush().and_then(|_| the_file.sync_all()) {
                 statusline(
                     MessageType::Alert,
                     &format!("Error writing {}: {}", realname_str, e),
                 );
+                #[cfg(not(feature = "tiny"))]
+                if normal && is_enospc_error(&e) {
+                    warn_disk_full_and_refresh_statinfo(&realname);
+                }
                 drop(the_file);
                 return false;
             }
@@ -4341,38 +4399,16 @@ pub fn write_file(
     }
 
     // Close the file
-    if the_file.flush().is_err() {
-        let e = io::Error::last_os_error();
+    if let Err(e) = the_file.flush() {
         statusline(
             MessageType::Alert,
             &format!("Error writing {}: {}", realname_str, e),
         );
 
-        // Check for ENOSPC
+        // Check for ENOSPC (shared with every fallible write above, issue #59)
         #[cfg(not(feature = "tiny"))]
-        {
-            #[cfg(unix)]
-            let is_enospc = e.raw_os_error() == Some(libc::ENOSPC);
-            #[cfg(not(unix))]
-            let is_enospc = false;
-
-            if is_enospc && normal {
-                napms(3200);
-                state_mut().lastmessage = MessageType::Vacuum;
-                statusline(MessageType::Alert, "File on disk has been truncated!");
-                napms(3200);
-                state_mut().lastmessage = MessageType::Vacuum;
-                statusline(
-                    MessageType::Alert,
-                    "Maybe ^T^Z, make room on disk, resume, then ^S^X",
-                );
-                let st = stat_with_alloc(&realname);
-                with_state_mut(|s| {
-                    if let Some(ref mut of) = s.openfile {
-                        of.statinfo = st;
-                    }
-                });
-            }
+        if normal && is_enospc_error(&e) {
+            warn_disk_full_and_refresh_statinfo(&realname);
         }
 
         return false;
@@ -5762,6 +5798,16 @@ mod tests {
         assert_eq!(separator_for_format(FormatType::DosFile), b"\r\n");
         assert_eq!(separator_for_format(FormatType::MacFile), b"\r");
         assert_eq!(separator_for_format(FormatType::Unspecified), b"\n");
+    }
+
+    #[cfg(not(feature = "tiny"))]
+    #[test]
+    fn enospc_is_recognized_from_any_write_site() {
+        // Issue #59: every fallible write now funnels through this check
+        // before deciding whether the disk-full warning applies.
+        let enospc = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        assert!(super::is_enospc_error(&enospc));
+        assert!(!super::is_enospc_error(&std::io::Error::other("nope")));
     }
 
     #[test]
