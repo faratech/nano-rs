@@ -1191,6 +1191,28 @@ pub fn check_and_download_update() -> UpdateStatus {
     }
 }
 
+/// Format the user-facing result of an explicit update check.
+fn format_update_report(current: &str, latest: &str) -> String {
+    if is_newer_version(latest, current) {
+        format!(
+            "nano-rs {latest} available (installed {current})\nRun 'nano --update' to install it."
+        )
+    } else {
+        format!("nano-rs {current} is up to date")
+    }
+}
+
+/// Query GitHub for the latest release and report it.  Never downloads an
+/// asset or stages a pending update; ignores the background-policy
+/// environment variables and --force entirely (explicit user intent).
+pub fn report_available_update() -> Result<(), Box<dyn std::error::Error>> {
+    let current = env!("CARGO_PKG_VERSION");
+    println!("Checking for updates...");
+    let (latest, _url, _checksums_url) = get_latest_release()?;
+    println!("{}", format_update_report(current, &latest));
+    Ok(())
+}
+
 /// Spawn a background thread to check and download updates
 /// Returns a receiver that will receive the update status
 pub fn spawn_update_check() -> std::sync::mpsc::Receiver<UpdateStatus> {
@@ -1250,6 +1272,40 @@ pub fn apply_pending_update() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_check_message_is_actionable() {
+        let newer = super::format_update_report("0.0.15", "0.0.16");
+        assert!(newer.contains("0.0.16 available"));
+        assert!(newer.contains("installed 0.0.15"));
+        assert!(newer.contains("--update"));
+
+        let current = super::format_update_report("0.0.16", "0.0.15");
+        assert_eq!(current, "nano-rs 0.0.16 is up to date");
+    }
+
+    #[test]
+    fn version_comparison_table() {
+        // (candidate, current) => is_newer?
+        let cases: &[(&str, &str, bool)] = &[
+            ("0.0.16", "0.0.15", true),
+            ("0.1.0", "0.0.99", true),
+            ("1.0.0", "0.9.9", true),
+            ("v0.0.16", "0.0.15", true),     // v prefix tolerated
+            ("0.0.15", "0.0.15", false),     // equal
+            ("0.0.14", "0.0.15", false),     // older
+            ("0.0", "0.0.15", false),        // malformed
+            ("abc", "0.0.15", false),        // garbage
+            ("0.0.16-rc1", "0.0.15", false), // prerelease tags unsupported
+        ];
+        for &(latest, installed, expect) in cases {
+            assert_eq!(
+                super::is_newer_version(latest, installed),
+                expect,
+                "{latest} vs {installed}"
+            );
+        }
+    }
+
     use super::{FetchError, classify_tool_exit, env_flag, resolve_updates_enabled};
 
     #[test]

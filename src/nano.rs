@@ -880,6 +880,11 @@ pub fn usage() {
     );
     print_opt(
         "",
+        "--check",
+        "Check GitHub for a newer release (no install)",
+    );
+    print_opt(
+        "",
         "--force",
         "With --install/--update: act even if up to date",
     );
@@ -2530,6 +2535,43 @@ fn short_option_is_available(option: char) -> bool {
     }
 }
 
+/// Actions that must wait until the whole command line has been validated
+/// before they run (`--install`, `--update`, `--check`).
+#[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
+enum DeferredAction {
+    #[default]
+    None,
+    Install,
+    Update,
+    Check,
+}
+
+/// Tracks installer-related options while walking argv.  `--force` only
+/// counts when it appears before the first FILE argument, so a file literally
+/// named "--force" can never trigger a forced reinstall.
+#[derive(Default)]
+struct ArgScan {
+    action: DeferredAction,
+    force: bool,
+    saw_positional: bool,
+}
+
+impl ArgScan {
+    fn note_positional(&mut self) {
+        self.saw_positional = true;
+    }
+
+    fn note_option(&mut self, opt: &str) {
+        match opt {
+            "force" if !self.saw_positional => self.force = true,
+            "install" => self.action = DeferredAction::Install,
+            "update" => self.action = DeferredAction::Update,
+            "check" => self.action = DeferredAction::Check,
+            _ => {}
+        }
+    }
+}
+
 fn reject_unavailable_option(argv0: &str, option: &str) -> ! {
     eprintln!("Option '{option}' is not available in this build.");
     eprintln!("Type '{argv0} -h' for a list of available options.");
@@ -2656,6 +2698,7 @@ pub fn nano_main() {
     let mut idx = 1usize;
     let mut file_args: Vec<std::ffi::OsString> = Vec::new();
     let mut done_with_options = false;
+    let mut scan = ArgScan::default();
 
     while idx < args.len() {
         let arg_os = &args[idx];
@@ -2663,6 +2706,7 @@ pub fn nano_main() {
         // End of options marker.
         if !done_with_options && arg_os == "--" {
             done_with_options = true;
+            scan.note_positional();
             idx += 1;
             continue;
         }
@@ -2674,6 +2718,7 @@ pub fn nano_main() {
         let looks_like_option = arg_os.to_string_lossy().starts_with('-') && arg_os != "-";
         if done_with_options || !looks_like_option {
             // Positional FILE arguments are preserved byte for byte.
+            scan.note_positional();
             file_args.push(arg_os.clone());
             idx += 1;
             continue;
@@ -3023,27 +3068,14 @@ pub fn nano_main() {
                             crate::global::flag_mask(SOLO_SIDESCROLL);
                     });
                 }
-                "install" => {
-                    let force = std::env::args_os().any(|a| a == "--force");
-                    match crate::installer::install_to_path(force) {
-                        Ok(()) => process::exit(0),
-                        Err(e) => {
-                            eprintln!("nano: install failed: {}", e);
-                            process::exit(1);
-                        }
-                    }
+                "install" | "update" | "check" => {
+                    // Deferred: run only after the whole command line has
+                    // been validated (see the post-loop dispatch below).
+                    scan.note_option(arg);
                 }
-                "update" => {
-                    let force = std::env::args_os().any(|a| a == "--force");
-                    match crate::installer::update_from_github(force) {
-                        Ok(()) => process::exit(0),
-                        Err(e) => {
-                            eprintln!("nano: update failed: {}", e);
-                            process::exit(1);
-                        }
-                    }
+                "force" => {
+                    scan.note_option("force");
                 }
-                "force" => { /* consumed by --install / --update via env scan */ }
                 "modernbindings" => {
                     SET!(MODERN_BINDINGS);
                 }
@@ -3404,6 +3436,33 @@ pub fn nano_main() {
             ci += 1;
         }
         idx += 1;
+    }
+
+    // Deferred installer actions: the whole command line has now been
+    // validated, and --force only counted before the first FILE argument.
+    match scan.action {
+        DeferredAction::Install => match crate::installer::install_to_path(scan.force) {
+            Ok(()) => process::exit(0),
+            Err(e) => {
+                eprintln!("nano: install failed: {}", e);
+                process::exit(1);
+            }
+        },
+        DeferredAction::Update => match crate::installer::update_from_github(scan.force) {
+            Ok(()) => process::exit(0),
+            Err(e) => {
+                eprintln!("nano: update failed: {}", e);
+                process::exit(1);
+            }
+        },
+        DeferredAction::Check => match crate::installer::report_available_update() {
+            Ok(()) => process::exit(0),
+            Err(e) => {
+                eprintln!("nano: check failed: {}", e);
+                process::exit(1);
+            }
+        },
+        DeferredAction::None => {}
     }
 
     // ----------------------------------------------------------------
@@ -4429,5 +4488,52 @@ mod margin_tests {
         crate::UNSET!(crate::definitions::LINE_NUMBERS);
         super::confirm_margin();
         assert_eq!(state().margin, 0);
+    }
+}
+
+#[cfg(test)]
+mod cli_scan_tests {
+    use super::{ArgScan, DeferredAction};
+
+    /// Walk args the way the real parse loop feeds the tracker for
+    /// option-shaped tokens and positionals.  Option-value consumption
+    /// (--tabsize 4) happens in the loop itself, so those cases are covered
+    /// by construction there rather than duplicated here.
+    fn scan(args: &[&str]) -> ArgScan {
+        let mut s = ArgScan::default();
+        for arg in args {
+            if *arg == "--" || !arg.starts_with('-') || *arg == "-" {
+                s.note_positional();
+            } else {
+                s.note_option(arg.trim_start_matches('-'));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn force_counts_only_before_the_first_file() {
+        assert!(scan(&["--force", "--install"]).force);
+        assert!(scan(&["--install", "--force"]).force);
+        // The bug being fixed: a FILE named --force must not trigger it.
+        assert!(!scan(&["file.txt", "--force", "--install"]).force);
+        assert!(!scan(&["-", "--force", "--install"]).force);
+        assert!(!scan(&["--", "file.txt", "--force", "--install"]).force);
+        // Bare --force stays a silent no-op action.
+        let bare = scan(&["--force"]);
+        assert!(bare.force);
+        assert_eq!(bare.action, DeferredAction::None);
+    }
+
+    #[test]
+    fn installer_actions_are_recorded() {
+        assert_eq!(scan(&["--install"]).action, DeferredAction::Install);
+        assert_eq!(scan(&["--update"]).action, DeferredAction::Update);
+        assert_eq!(
+            scan(&["--check"]).action,
+            DeferredAction::Check,
+            "--check must be recognized as a deferred action"
+        );
+        assert_eq!(scan(&[]).action, DeferredAction::None);
     }
 }
