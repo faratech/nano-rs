@@ -1370,6 +1370,9 @@ fn grab_and_store_build(
     let mut head: Option<Box<RegexListType>> = None;
     let mut tail: *mut Option<Box<RegexListType>> = &mut head;
 
+    // When a later entry of the command is malformed, the regexes that
+    // already compiled stay registered (like C's incremental grab_and_store)
+    // alongside the reported error.
     let mut remaining = ptr.trim_start_matches(|c: char| c == ' ' || c == '\t');
     while !remaining.is_empty() {
         // Each regex string must start with '"'
@@ -1378,12 +1381,12 @@ fn grab_and_store_build(
                 "Regex strings for '{}' must begin with a \" character",
                 kind
             ));
-            return None;
+            return Some(head);
         }
         remaining = &remaining[1..]; // skip opening '"'
 
         match parse_next_regex(remaining) {
-            None => return None,
+            None => return Some(head),
             Some((regex_str, rest)) => {
                 remaining = rest;
                 // compile happens OUTSIDE any STATE borrow
@@ -1401,7 +1404,7 @@ fn grab_and_store_build(
                 }
                 if !remaining.is_empty() && !remaining.starts_with('"') {
                     jot_error(&format!("Unexpected text after '{}' regex", kind));
-                    return None;
+                    return Some(head);
                 }
             }
         }
@@ -2851,6 +2854,71 @@ mod tests {
             }
         });
         assert!(matched, "the header regex must be registered on 'notes'");
+
+        crate::global::with_state_mut(|s| s.syntaxes = None);
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn failed_later_regex_keeps_earlier_ones_of_the_command() {
+        // Issue #73: one malformed regex used to discard the already
+        // compiled ones from the same command line.
+        crate::global::with_state_mut(|s| {
+            s.syntaxes = None;
+            s.startup_problem = None;
+        });
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_opensyntax(false);
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        let prologue = b"syntax notes \"\\.notes$\"\ncolor brightred \"TODO\"\n";
+        super::parse_rcfile(&mut std::io::BufReader::new(&prologue[..]), true, true);
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_opensyntax(false);
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        // The second header regex is unterminated: an error must be
+        // reported, yet the first regex must stay registered.
+        let body = b"extendsyntax notes header \"^Note:\" \"^Broken\n";
+        super::parse_rcfile(&mut std::io::BufReader::new(&body[..]), false, false);
+
+        assert!(
+            !super::ERROR_LIST.with(|errors| errors.borrow().is_empty()),
+            "the malformed second regex must be reported"
+        );
+
+        let (first_ok, broken_absent) = crate::global::with_state(|s| {
+            let mut cur = s.syntaxes.as_ref();
+            while let Some(sx) = cur {
+                if sx.name == "notes" {
+                    break;
+                }
+                cur = sx.next.as_ref();
+            }
+            match cur.and_then(|sx| sx.headers.as_deref()) {
+                Some(list) => {
+                    let mut first_ok = false;
+                    let mut broken_absent = true;
+                    let mut node = Some(list);
+                    while let Some(entry) = node {
+                        if let Some(rgx) = entry.one_rgx.as_ref() {
+                            let pattern = rgx.as_str();
+                            if pattern.contains("Note") {
+                                first_ok = true;
+                            }
+                            if pattern.contains("Broken") {
+                                broken_absent = false;
+                            }
+                        }
+                        node = entry.next.as_deref();
+                    }
+                    (first_ok, broken_absent)
+                }
+                None => (false, true),
+            }
+        });
+        assert!(first_ok, "the first regex must survive");
+        assert!(broken_absent, "the malformed regex must not be registered");
 
         crate::global::with_state_mut(|s| s.syntaxes = None);
     }
