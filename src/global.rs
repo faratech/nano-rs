@@ -1259,6 +1259,7 @@ void_marker!(
     get_newer_item
 );
 void_marker!(/* C: void flip_replace(void) {;} */ flip_replace);
+void_marker!(/* C: void flip_goto(void) {;} */ flip_goto);
 void_marker!(
     #[cfg(feature = "browser")]
     to_files
@@ -3992,6 +3993,7 @@ pub fn shortcut_init() {
     add_to_sclist(MWHEREIS | MREPLACE, "M-R", 0, regexp_void as FuncPtr, 0);
     add_to_sclist(MWHEREIS | MREPLACE, "M-B", 0, backwards_void as FuncPtr, 0);
     add_to_sclist(MWHEREIS | MREPLACE, "^R", 0, flip_replace as FuncPtr, 0);
+    add_to_sclist(MWHEREIS | MGOTOLINE, "^T", 0, flip_goto as FuncPtr, 0);
 
     #[cfg(feature = "histories")]
     {

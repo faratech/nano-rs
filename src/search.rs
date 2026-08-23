@@ -739,6 +739,11 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
             } else {
                 replacing = !replacing;
             }
+        } else if function == Some(crate::global::flip_goto as FuncPtr) {
+            // Switch to the Go-To-Line prompt, handing over the typed text.
+            let answer = state().answer.clone();
+            ask_for_line_and_column(&answer);
+            break;
         } else {
             break;
         }
@@ -1882,6 +1887,13 @@ pub fn ask_for_line_and_column(provided: &str) {
         "Enter line number, column number",
     );
 
+    // When switching to Search, retain what the user typed so far.
+    if crate::global::func_from_key(response) == Some(crate::global::flip_goto as FuncPtr) {
+        UNSET!(BACKWARDS_SEARCH);
+        search_init(false, true);
+        return;
+    }
+
     if response < 0 {
         statusbar("Cancelled");
         return;
@@ -2722,6 +2734,30 @@ mod ci_scan_tests {
         crate::UNSET!(USE_REGEXP);
         state_mut().search_regexp = None;
         state_mut().openfile = None;
+    }
+
+    #[test]
+    fn ctrl_t_maps_to_the_flip_in_both_prompt_menus() {
+        // Issue #68: nano's ^T toggle between Search and Go-To-Line was
+        // missing entirely.
+        crate::global::shortcut_init();
+        let saved_menu = state().currmenu;
+
+        state_mut().currmenu = crate::definitions::MWHEREIS;
+        assert_eq!(
+            crate::global::func_from_key(20),
+            Some(crate::global::flip_goto as crate::definitions::FuncPtr),
+            "^T must map to flip_goto from the Search prompt"
+        );
+
+        state_mut().currmenu = crate::definitions::MGOTOLINE;
+        assert_eq!(
+            crate::global::func_from_key(20),
+            Some(crate::global::flip_goto as crate::definitions::FuncPtr),
+            "^T must map to flip_goto from the Go-To-Line prompt"
+        );
+
+        state_mut().currmenu = saved_menu;
     }
 
     #[test]
