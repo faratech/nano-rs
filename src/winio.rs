@@ -6783,6 +6783,8 @@ mod tests {
         assert!(reached_match_end, "the walk never advanced past column 40");
     }
 
+    // The double-width placeholder branch only exists with UTF-8 support.
+    #[cfg(feature = "utf8")]
     #[test]
     fn display_string_placeholder_consumes_both_columns_of_a_straddle() {
         // Issue #54: when a double-width character straddles the left edge,
@@ -6844,8 +6846,12 @@ mod tests {
 
         // Classic top-left cells of the main menu, pinned so a later binding
         // change cannot silently desynchronize clicks from the display.
-        assert_eq!(walked.first(), Some(&7), "top-left cell must stay ^G Help");
-        assert_eq!(walked.get(1), Some(&24), "second cell must stay ^X Exit");
+        // Without the help feature Help is absent and Exit leads the menu.
+        #[cfg(feature = "help")]
+        {
+            assert_eq!(walked.first(), Some(&7), "top-left cell must stay ^G Help");
+            assert_eq!(walked.get(1), Some(&24), "second cell must stay ^X Exit");
+        }
         let number = crate::global::shown_entries_for(crate::definitions::MMAIN);
         assert!(
             number > 0 && walked.len() >= number,

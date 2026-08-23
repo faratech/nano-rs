@@ -28,3 +28,9 @@ nano-rs carries four local fixes:
    bytes so applications can preserve it and warn the user.
 
 The parser and event-source regression tests live beside the patched code.
+
+5. `rust-version` raised from upstream's 1.63.0 to 1.70.0: the dependency
+   graph this fork resolves against (notably newer `thiserror` point
+   releases) now uses APIs stabilized after 1.63, and the CI clippy gate
+   (`-D warnings`, including `clippy::incompatible_msrv`) enforces the
+   declared MSRV. nano-rs itself requires a much newer toolchain anyway.

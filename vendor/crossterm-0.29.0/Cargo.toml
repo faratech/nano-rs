@@ -11,7 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.63.0"
+# Raised from upstream 1.63: newer compatible dependencies (thiserror)
+# use APIs stabilized after 1.63, and -D warnings clippy gates enforce it.
+rust-version = "1.70.0"
 name = "crossterm"
 version = "0.29.0"
 authors = ["T. Post"]
