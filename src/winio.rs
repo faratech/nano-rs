@@ -3118,7 +3118,11 @@ pub fn display_string<T: AsRef<[u8]> + ?Sized>(
     let mut converted = String::with_capacity((cols + 20) * MAXCHARLEN);
     let bytes = text.as_ref();
     let mut pos = start_x;
-    let mut cur_col = start_col;
+    // C's running `column` starts at the REQUESTED column, not at the
+    // actual start column of the first character: when a wide character
+    // straddles the left edge its placeholder consumes the difference, and
+    // starting from start_col would emit one extra source character (#54).
+    let mut cur_col = column;
 
     let from_x_val = start_x;
     tl_set!(FROM_X, from_x_val);
@@ -6709,6 +6713,26 @@ mod tests {
             s.tabsize = saved_tabsize;
         });
         assert!(reached_match_end, "the walk never advanced past column 40");
+    }
+
+    #[test]
+    fn display_string_placeholder_consumes_both_columns_of_a_straddle() {
+        // Issue #54: when a double-width character straddles the left edge,
+        // its ']' placeholder must consume both of its columns -- C advances
+        // the running column past it -- so exactly `span` cells are produced.
+        let saved_utf8 = crate::chars::using_utf8();
+        crate::chars::remember_utf8(true);
+        let line = "A\u{6F22}BCDEFG"; // A(1) 漢(2) B C D E F G
+
+        // Requesting display from column 2 lands inside 漢 (it spans
+        // columns 1-2): show ']' for its right half, then span-1 more.
+        let out = display_string(line, 2, 5, false, false);
+        assert_eq!(out, "]BCDE", "got {out:?}");
+
+        // Without a straddle, span counts display columns: A(1)+漢(2)+B+C.
+        assert_eq!(display_string(line, 0, 5, false, false), "A\u{6F22}BC");
+
+        crate::chars::remember_utf8(saved_utf8);
     }
 
     #[test]
