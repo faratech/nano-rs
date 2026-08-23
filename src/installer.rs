@@ -886,9 +886,16 @@ pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::err
 
 fn published_checksum(text: &str, asset: &str) -> Option<String> {
     for line in text.lines() {
+        // Short lines (blank separators, stray tokens) must be skipped, not
+        // abort the whole scan: a `?` here returned None for the entire
+        // manifest before ever reaching this target's entry.
         let mut fields = line.split_whitespace();
-        let digest = fields.next()?;
-        let filename = fields.next()?;
+        let Some(digest) = fields.next() else {
+            continue;
+        };
+        let Some(filename) = fields.next() else {
+            continue;
+        };
         if fields.next().is_none()
             && filename.trim_start_matches('*') == asset
             && digest.len() == 64
@@ -1134,6 +1141,29 @@ pub fn apply_pending_update() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checksum_scan_survives_short_lines_before_the_entry() {
+        // Issue #77: a `?` on blank or one-token lines used to abort the
+        // whole manifest scan before reaching this target's entry.
+        let manifest = concat!(
+            "\n",
+            "# sha256 hashes\n",
+            "incomplete-line\n",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef nano-x86_64-pc-windows-msvc.zip\n",
+            "deadbeef deadbeef extra\n",
+            "FEDCBA9876543210fedcba9876543210FEDCBA9876543210fedcba9876543210 *nano-x86_64-unknown-linux-gnu.tar.gz\n",
+            "\n",
+        );
+        assert_eq!(
+            super::published_checksum(manifest, "nano-x86_64-unknown-linux-gnu.tar.gz"),
+            Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string())
+        );
+        assert_eq!(
+            super::published_checksum(manifest, "nano-aarch64-apple-darwin.tar.gz"),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]
