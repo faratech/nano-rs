@@ -605,7 +605,10 @@ pub fn search_init(replacing: bool, retain_answer: bool) {
     let thedefault: String = {
         let last = state().last_search.clone();
         if !last.is_empty() {
-            let cols = state().editwincols.max(1) as usize;
+            // C truncates against the full terminal width (COLS / 3), not
+            // the edit-window width; with margins active the port's
+            // editwincols cut the hint far too early.
+            let cols = crate::winio::get_cols().max(1);
             let disp = display_string(&last, 0, cols / 3, false, false);
             let is_long = breadth(&last) > cols / 3;
             format!(" [{}{}]", disp, if is_long { "..." } else { "" })
