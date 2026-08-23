@@ -952,13 +952,14 @@ impl AppState {
         if let Some(ref of) = self.openfile {
             if of.mark.is_some() {
                 let (top_lineno, _, bot_lineno, bot_x) = self.get_region_coords();
-                // Exclude the last line if the cursor is at its start.
-                let bot = if bot_x == 0 && bot_lineno > top_lineno {
-                    bot_lineno - 1
-                } else {
-                    bot_lineno
-                };
-                return (top_lineno, bot);
+                // Exclude the last line when the cursor sits at its start,
+                // unless an earlier operation already decided to include it;
+                // otherwise remember that inclusion (C utils.c:495-499).
+                if bot_x == 0 && bot_lineno > top_lineno && !self.also_the_last {
+                    return (top_lineno, bot_lineno - 1);
+                }
+                self.also_the_last = true;
+                return (top_lineno, bot_lineno);
             }
             if let Some(ref cur) = of.current {
                 let lineno = cur.borrow().lineno as usize;
