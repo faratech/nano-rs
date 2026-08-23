@@ -4831,14 +4831,17 @@ pub fn do_linter() {
         }
     };
 
-    let exit_code = output.status.code().unwrap_or(-1);
+    let exit_code = output.status.code();
     let combined = {
         let mut s = output.stdout.clone();
         s.extend_from_slice(&output.stderr);
         String::from_utf8_lossy(&s).to_string()
     };
 
-    if exit_code > 2 {
+    // A linter killed by a signal has no exit code; C's treat() treats that
+    // as an invocation error instead of parsing whatever partial output it
+    // left behind.
+    if exit_code.is_none() || exit_code > Some(2) {
         statusline(
             MessageType::Alert,
             &format!(tr!("Error invoking '{}'"), args[0]),
