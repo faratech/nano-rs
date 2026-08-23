@@ -1407,16 +1407,20 @@ mod tests {
         std::fs::write(&a, b"x").unwrap();
         assert!(super::paths_equivalent(&a, &b), "identical paths");
 
-        // A symlinked launch path collapses to the same target (this is how
-        // /usr/local/bin/nano -> ~/.local/bin/nano stays one location).
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&a, &link).unwrap();
-        assert!(super::paths_equivalent(&a, &link), "same file via symlink");
-        // A hard link is a distinct directory entry: an atomic rename over
-        // one must not be assumed to publish through the other.
-        let hard = dir.path().join("hard");
-        fs::hard_link(&a, &hard).unwrap();
-        assert!(!super::paths_equivalent(&a, &hard), "hard links diverge");
+        #[cfg(unix)]
+        {
+            // A symlinked launch path collapses to the same target (this is
+            // how /usr/local/bin/nano -> ~/.local/bin/nano stays one
+            // location).
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&a, &link).unwrap();
+            assert!(super::paths_equivalent(&a, &link), "same file via symlink");
+            // A hard link is a distinct directory entry: an atomic rename over
+            // one must not be assumed to publish through the other.
+            let hard = dir.path().join("hard");
+            fs::hard_link(&a, &hard).unwrap();
+            assert!(!super::paths_equivalent(&a, &hard), "hard links diverge");
+        }
 
         let other = dir.path().join("other");
         std::fs::write(&other, b"y").unwrap();
@@ -1477,7 +1481,9 @@ mod tests {
         }
     }
 
-    use super::{FetchError, classify_tool_exit, env_flag, resolve_updates_enabled};
+    #[cfg(unix)]
+    use super::classify_tool_exit;
+    use super::{FetchError, resolve_updates_enabled};
 
     #[test]
     fn fetch_error_is_display_and_std_error() {
@@ -1485,6 +1491,7 @@ mod tests {
         assert_eq!(err.to_string(), "nope");
     }
 
+    #[cfg(unix)]
     #[cfg(unix)]
     #[test]
     fn tool_exit_classification_matches_retry_policy() {

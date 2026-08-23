@@ -3071,7 +3071,7 @@ pub fn nano_main() {
                 "install" | "update" | "check" => {
                     // Deferred: run only after the whole command line has
                     // been validated (see the post-loop dispatch below).
-                    scan.note_option(arg);
+                    scan.note_option(&opt);
                 }
                 "force" => {
                     scan.note_option("force");
