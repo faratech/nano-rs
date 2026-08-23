@@ -140,6 +140,28 @@ impl PendingManifest {
     }
 }
 
+/// Why a release lookup failed.  The distinction decides the background
+/// check's retry policy: a transport failure (offline, DNS, timeout) must not
+/// arm the 24-hour throttle, while a definitive server answer should.
+#[derive(Debug)]
+pub(crate) enum FetchError {
+    /// No usable server answer: DNS/connect/timeout, tool missing, truncated read.
+    Transport(String),
+    /// The server answered definitively and refused us: non-2xx status,
+    /// unusable JSON body, missing asset.
+    Rejected(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Transport(msg) | FetchError::Rejected(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -272,13 +294,15 @@ fn load_valid_pending_update() -> Result<(PathBuf, PendingManifest), Box<dyn std
 }
 
 /// Stamp file recording when the background check last ran (for throttling).
-fn last_check_path() -> Option<PathBuf> {
-    cache_dir().map(|d| d.join("last-check"))
+fn last_attempt_path() -> Option<PathBuf> {
+    cache_dir().map(|d| d.join("last-check-attempt"))
 }
 
-/// Whether the background check ran within the last 24h.
+/// Whether a *completed* release lookup happened within the last 24h.
+/// Transport failures never write this stamp, so being offline does not
+/// silence every subsequent launch for a day.
 fn checked_recently() -> bool {
-    let Some(p) = last_check_path() else {
+    let Some(p) = last_attempt_path() else {
         return false;
     };
     if let Ok(md) = fs::metadata(&p) {
@@ -291,10 +315,11 @@ fn checked_recently() -> bool {
     false
 }
 
-/// Record that the background check ran now.
-fn stamp_check() {
-    if let Some(p) = last_check_path() {
-        let _ = fs::write(&p, b"");
+/// Record that a lookup reached its outcome; the mtime carries the time and
+/// the payload names the release version seen (diagnostics only).
+fn stamp(path: Option<PathBuf>, payload: &str) {
+    if let Some(p) = path {
+        let _ = fs::write(p, payload);
     }
 }
 
@@ -621,7 +646,7 @@ impl Drop for HandleGuard {
 
 /// Native HTTP GET using WinHTTP (no PowerShell, no extra deps)
 #[cfg(windows)]
-fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn native_http_get(url: &str) -> Result<Vec<u8>, FetchError> {
     use std::ffi::c_void;
 
     unsafe {
@@ -634,13 +659,16 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             0,
         );
         if session.is_null() {
-            return Err(format!("WinHttpOpen failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpOpen failed: {:?}",
+                GetLastError()
+            )));
         }
         let _session_guard = HandleGuard(session);
         // Keep manual update/install operations bounded.  WinHTTP expresses
         // these values in milliseconds (resolve, connect, send, receive).
         WinHttpSetTimeouts(session, 10_000, 10_000, 60_000, 60_000)
-            .map_err(|e| format!("WinHttpSetTimeouts failed: {e:?}"))?;
+            .map_err(|e| FetchError::Transport(format!("WinHttpSetTimeouts failed: {e:?}")))?;
 
         // 2. Crack URL
         let mut host_name = vec![0u16; 256];
@@ -657,7 +685,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         };
 
         if WinHttpCrackUrl(&url_wide, 0, &mut components).is_err() {
-            return Err(format!("WinHttpCrackUrl failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpCrackUrl failed: {:?}",
+                GetLastError()
+            )));
         }
 
         // 3. Connect
@@ -668,7 +699,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             0,
         );
         if connect.is_null() {
-            return Err(format!("WinHttpConnect failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpConnect failed: {:?}",
+                GetLastError()
+            )));
         }
         let _connect_guard = HandleGuard(connect);
 
@@ -688,18 +722,27 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             flags,
         );
         if request.is_null() {
-            return Err(format!("WinHttpOpenRequest failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpOpenRequest failed: {:?}",
+                GetLastError()
+            )));
         }
         let _request_guard = HandleGuard(request);
 
         // 5. Send Request
         if WinHttpSendRequest(request, None, None, 0, 0, 0).is_err() {
-            return Err(format!("WinHttpSendRequest failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpSendRequest failed: {:?}",
+                GetLastError()
+            )));
         }
 
         // 6. Receive Response
         if WinHttpReceiveResponse(request, std::ptr::null_mut()).is_err() {
-            return Err(format!("WinHttpReceiveResponse failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpReceiveResponse failed: {:?}",
+                GetLastError()
+            )));
         }
 
         // 6b. Check the HTTP status code. WinHTTP follows redirects by default, so this
@@ -718,10 +761,18 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         )
         .is_err()
         {
-            return Err(format!("WinHttpQueryHeaders failed: {:?}", GetLastError()).into());
+            return Err(FetchError::Transport(format!(
+                "WinHttpQueryHeaders failed: {:?}",
+                GetLastError()
+            )));
         }
         if !(200..300).contains(&status_code) {
-            return Err(format!("HTTP request failed with status {}", status_code).into());
+            // Definitive server answer: counts as a completed check even
+            // though it failed (e.g. rate limiting, asset not published).
+            return Err(FetchError::Rejected(format!(
+                "HTTP request failed with status {}",
+                status_code
+            )));
         }
 
         // 7. Read Data
@@ -734,9 +785,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             // a mid-stream failure must NOT be reported as a complete download, or a
             // corrupt partial .exe could be installed over the working one.
             if WinHttpQueryDataAvailable(request, &mut bytes_read).is_err() {
-                return Err(
-                    format!("WinHttpQueryDataAvailable failed: {:?}", GetLastError()).into(),
-                );
+                return Err(FetchError::Transport(format!(
+                    "WinHttpQueryDataAvailable failed: {:?}",
+                    GetLastError()
+                )));
             }
             if bytes_read == 0 {
                 break;
@@ -753,7 +805,10 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             )
             .is_err()
             {
-                return Err(format!("WinHttpReadData failed: {:?}", GetLastError()).into());
+                return Err(FetchError::Transport(format!(
+                    "WinHttpReadData failed: {:?}",
+                    GetLastError()
+                )));
             }
 
             if read_now == 0 {
@@ -767,6 +822,19 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     }
 }
 
+/// Classify a curl/wget exit into retry-policy terms: curl 22 / wget 8 mean
+/// the server answered with an HTTP error (definitive); anything else — DNS
+/// (6), connect failure (7), timeout (28), wget network (4), signal death
+/// (None) — is transport trouble worth retrying on the next launch.
+#[cfg(not(windows))]
+fn classify_tool_exit(tool: &str, code: Option<i32>) -> FetchError {
+    let detail = format!("{tool} failed fetching (exit {code:?})");
+    match (tool, code) {
+        ("curl", Some(22)) | ("wget", Some(8)) => FetchError::Rejected(detail),
+        _ => FetchError::Transport(detail),
+    }
+}
+
 /// HTTP GET on Unix via `curl` (falling back to `wget`).
 ///
 /// Both tools follow redirects and FAIL on HTTP 4xx/5xx (curl `-f`, wget's
@@ -774,10 +842,14 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 /// provides: an error page is never returned as a successful body. The output
 /// is captured as raw bytes, so binary assets download intact.
 #[cfg(not(windows))]
-fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn native_http_get(url: &str) -> Result<Vec<u8>, FetchError> {
     use std::process::Command;
 
     // curl -f (fail on HTTP error) -s (silent) -S (show error) -L (follow redirects).
+    let mut last_error = FetchError::Transport(format!(
+        "could not download {url}: neither `curl` nor `wget` is available on PATH"
+    ));
+
     // Bound connection setup to 10 seconds and the whole transfer to 60.
     match Command::new("curl")
         .args([
@@ -797,7 +869,7 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .output()
     {
         Ok(out) if out.status.success() => return Ok(out.stdout),
-        Ok(_) => { /* curl present but request failed; try wget */ }
+        Ok(out) => last_error = classify_tool_exit("curl", out.status.code()),
         Err(_) => { /* curl not installed; try wget */ }
     }
 
@@ -817,8 +889,8 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .output()
     {
         Ok(out) if out.status.success() => Ok(out.stdout),
-        Ok(_) => Err(format!("download failed (HTTP error fetching {})", url).into()),
-        Err(_) => Err("could not download: neither `curl` nor `wget` is available on PATH".into()),
+        Ok(out) => Err(classify_tool_exit("wget", out.status.code())),
+        Err(_) => Err(last_error),
     }
 }
 
@@ -847,7 +919,7 @@ fn target_asset_name() -> Result<&'static str, Box<dyn std::error::Error>> {
 
 /// Get the latest version info from GitHub
 /// Returns (version, download_url) or None if check fails
-pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::error::Error>> {
+pub fn get_latest_release() -> Result<(String, String, String), FetchError> {
     let url = format!(
         "https://api.github.com/repos/{}/releases/latest",
         GITHUB_REPO
@@ -855,7 +927,8 @@ pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::err
 
     // Fetch JSON from GitHub API
     let body = native_http_get(&url)?;
-    let json_text = String::from_utf8(body).map_err(|_| "GitHub API returned invalid UTF-8")?;
+    let json_text = String::from_utf8(body)
+        .map_err(|_| FetchError::Rejected("GitHub API returned invalid UTF-8".to_string()))?;
 
     // Parse JSON manually to avoid complex deps
     // We look for "tag_name": "vX.Y.Z"
@@ -865,15 +938,15 @@ pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::err
         .and_then(|s| s.split(':').nth(1))
         .and_then(|s| s.split("\"").nth(1))
         .ok_or_else(|| {
-            format!(
+            FetchError::Rejected(format!(
                 "Failed to parse tag_name from GitHub API response (body length: {} bytes)",
                 json_text.len()
-            )
+            ))
         })?
         .trim_start_matches('v')
         .to_string();
 
-    let target_suffix = target_asset_name()?;
+    let target_suffix = target_asset_name().map_err(|e| FetchError::Rejected(e.to_string()))?;
 
     // Find asset URL
     // Look for "browser_download_url": "..." that ends with target_suffix
@@ -899,11 +972,10 @@ pub fn get_latest_release() -> Result<(String, String, String), Box<dyn std::err
     }
 
     if version.is_empty() || download_url.is_empty() {
-        return Err(format!(
+        return Err(FetchError::Rejected(format!(
             "release {version} has no exact asset {target_suffix} for {}",
-            target_id()?
-        )
-        .into());
+            target_id().map_err(|e| FetchError::Rejected(e.to_string()))?
+        )));
     }
 
     Ok((version, download_url, checksums_url))
@@ -1060,12 +1132,11 @@ pub fn check_and_download_update() -> UpdateStatus {
     };
     let pending = temp_file.exists() || update_manifest_path().is_some_and(|path| path.exists());
 
-    // Throttle network checks to once per day, but always surface an
+    // Throttle *completed* checks to once per day, but always surface an
     // already-downloaded pending update immediately.
     if !pending && checked_recently() {
         return UpdateStatus::None;
     }
-    stamp_check();
 
     // A pending executable is usable only together with a valid manifest,
     // target match, newer version, executable header, owner, and digest.
@@ -1083,9 +1154,22 @@ pub fn check_and_download_update() -> UpdateStatus {
 
     let current_version = env!("CARGO_PKG_VERSION");
 
+    // The throttle stamps are written here — after the network round-trip —
+    // so an offline launch never arms the 24-hour backoff (issue: being on a
+    // train used to silence update checks for a full day).
     let (latest_version, download_url, checksums_url) = match get_latest_release() {
-        Ok(v) => v,
-        Err(_) => return UpdateStatus::None,
+        Ok(v) => {
+            stamp(last_attempt_path(), &v.0);
+            stamp(cache_dir().map(|d| d.join("last-check-success")), &v.0);
+            v
+        }
+        Err(FetchError::Rejected(reason)) => {
+            // Definitive answer (rate limit, missing asset): wait a cycle.
+            stamp(last_attempt_path(), "");
+            eprintln!("nano: update check skipped ({reason})");
+            return UpdateStatus::None;
+        }
+        Err(FetchError::Transport(_)) => return UpdateStatus::None,
     };
 
     if !is_newer_version(&latest_version, current_version) {
@@ -1166,7 +1250,38 @@ pub fn apply_pending_update() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{env_flag, resolve_updates_enabled};
+    use super::{FetchError, classify_tool_exit, env_flag, resolve_updates_enabled};
+
+    #[test]
+    fn fetch_error_is_display_and_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(FetchError::Rejected("nope".into()));
+        assert_eq!(err.to_string(), "nope");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_exit_classification_matches_retry_policy() {
+        // Definitive server answers arm the throttle...
+        assert!(matches!(
+            classify_tool_exit("curl", Some(22)),
+            FetchError::Rejected(_)
+        ));
+        assert!(matches!(
+            classify_tool_exit("wget", Some(8)),
+            FetchError::Rejected(_)
+        ));
+        // ...transport trouble never does.
+        for code in [Some(6), Some(7), Some(28), Some(4), None] {
+            assert!(matches!(
+                classify_tool_exit("curl", code),
+                FetchError::Transport(_)
+            ));
+            assert!(matches!(
+                classify_tool_exit("wget", code),
+                FetchError::Transport(_)
+            ));
+        }
+    }
 
     #[test]
     fn env_flag_tokens_parse_case_insensitively() {
