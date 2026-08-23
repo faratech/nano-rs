@@ -2744,35 +2744,54 @@ pub fn get_mouseinput(mouse_y: &mut i32, mouse_x: &mut i32) -> i32 {
                 return 2;
             }
 
-            let mut index = (foot_rel_x / width) * 2 + foot_rel_y + 1;
+            // Calculate the one-based index in the displayed list.  The help
+            // rows are footwin rows 1 and 2 (row 0, the prompt bar, was
+            // handled just above), so unlike C there is no extra +1 here.
+            let mut index = (foot_rel_x / width) * 2 + foot_rel_y;
 
             if index > number && foot_rel_x % width < cols_usize % width {
                 index -= 2;
             }
 
-            if index > number {
+            if index > number || index == 0 {
                 return 2;
             }
 
-            // Find the index-th shortcut in current menu
-            let mut count = 0usize;
-            let result = with_state(|s| {
-                for sc in &s.sclist {
-                    if (sc.menus as u32 & currmenu) == 0 {
+            // Walk the functions in the very order bottombars displays them
+            // (allfuncs order, first displayed shortcut per function), not
+            // the raw binding registration order, or every click selects a
+            // different shortcut than the one printed in that cell.
+            let result: Option<i32> = with_state(|s| {
+                for f in &s.allfuncs {
+                    if (f.menus as u32 & currmenu) == 0 {
                         continue;
                     }
-                    if sc.keystr.is_empty() {
+                    let Some(func) = f.func else {
                         continue;
+                    };
+                    // Inlined first_sc_for: with_state is not re-entrant.
+                    let mut keycode = None;
+                    for sc in &s.sclist {
+                        if (sc.menus as u32 & currmenu) != 0
+                            && sc.func == Some(func)
+                            && !sc.keystr.is_empty()
+                        {
+                            keycode = Some(sc.keycode);
+                            break;
+                        }
                     }
-                    count += 1;
-                    if count == index {
-                        return Some((sc.keycode, sc.keystr.len() > 1));
+                    let Some(keycode) = keycode else {
+                        continue;
+                    };
+                    index -= 1;
+                    if index == 0 {
+                        return Some(keycode);
                     }
                 }
                 None
             });
 
-            if let Some((kc, _is_special)) = result {
+            if let Some(kc) = result {
                 put_back(kc);
                 if kc >= 0x20 && kc <= 0x7E {
                     put_back(ESC);
@@ -6690,6 +6709,53 @@ mod tests {
             s.tabsize = saved_tabsize;
         });
         assert!(reached_match_end, "the walk never advanced past column 40");
+    }
+
+    #[test]
+    fn footer_click_walk_matches_displayed_shortcut_order() {
+        // Issue #53: clicks used to be resolved by walking raw sclist
+        // registration order, which differs from what bottombars displays,
+        // so every click fired a neighbouring shortcut.
+        crate::global::shortcut_init();
+        let saved_menu = state().currmenu;
+        state_mut().currmenu = crate::definitions::MMAIN;
+
+        // Exactly the sequence the fixed click handler walks: functions in
+        // allfuncs order, their first displayed shortcut per function.
+        let walked: Vec<i32> = with_state(|s| {
+            let mut v = Vec::new();
+            for f in &s.allfuncs {
+                if (f.menus as u32 & crate::definitions::MMAIN as u32) == 0 {
+                    continue;
+                }
+                let Some(func) = f.func else {
+                    continue;
+                };
+                for sc in &s.sclist {
+                    if (sc.menus as u32 & crate::definitions::MMAIN as u32) != 0
+                        && sc.func == Some(func)
+                        && !sc.keystr.is_empty()
+                    {
+                        v.push(sc.keycode);
+                        break;
+                    }
+                }
+            }
+            v
+        });
+
+        state_mut().currmenu = saved_menu;
+
+        // Classic top-left cells of the main menu, pinned so a later binding
+        // change cannot silently desynchronize clicks from the display.
+        assert_eq!(walked.first(), Some(&7), "top-left cell must stay ^G Help");
+        assert_eq!(walked.get(1), Some(&24), "second cell must stay ^X Exit");
+        let number = crate::global::shown_entries_for(crate::definitions::MMAIN);
+        assert!(
+            number > 0 && walked.len() >= number,
+            "every displayed cell must be reachable: {number} shown, {} walkable",
+            walked.len()
+        );
     }
 
     fn reset_input_buffer() {
