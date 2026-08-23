@@ -2699,7 +2699,15 @@ pub fn nano_main() {
             let next_val = |idx: &mut usize| -> String {
                 *idx += 1;
                 match args.get(*idx) {
-                    None => String::new(),
+                    None => {
+                        // C lets getopt_long reject this; silently continuing
+                        // with an empty value used to mask typos (#67).
+                        eprintln!("Option '--{opt}' requires an argument.");
+                        eprintln!(
+                            "Type '{argv0} -h' for a list of available options."
+                        );
+                        process::exit(1);
+                    }
                     Some(value) => match value.to_str() {
                         Some(value) => value.to_string(),
                         None => {
@@ -3074,7 +3082,15 @@ pub fn nano_main() {
                 } else {
                     *idx += 1;
                     match args.get(*idx) {
-                        None => String::new(),
+                        None => {
+                            // C lets getopt reject this; silently continuing
+                            // with an empty value used to mask typos (#67).
+                            eprintln!("Option '-{c}' requires an argument.");
+                            eprintln!(
+                                "Type '{argv0} -h' for a list of available options."
+                            );
+                            process::exit(1);
+                        }
                         Some(value) => match value.to_str() {
                             Some(value) => value.to_string(),
                             None => {
@@ -3778,6 +3794,9 @@ pub fn nano_main() {
     // every file named on the command line gets its own buffer.
     let read_them_all = cfg!(feature = "multibuffer");
 
+    // Whether '-' (redirected standard input) was consumed as a buffer.
+    let mut stdin_consumed = false;
+
     while file_idx < file_args_count {
         // Check we should keep reading.
         let has_openfile = state().openfile.is_some();
@@ -3896,6 +3915,7 @@ pub fn nano_main() {
             if !read_succeeded {
                 continue;
             }
+            stdin_consumed = true;
         } else {
             // Colon notation is only attempted for valid-UTF-8 names; a
             // non-UTF-8 name is opened exactly as given.
@@ -4010,6 +4030,11 @@ pub fn nano_main() {
     // Nano needs a keyboard: when standard input is not a terminal
     // (e.g. `seq 9 | nano -`), reattach it to /dev/tty like C does.
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // Without '-', a redirected stdin means there is no keyboard to
+        // drive the editor at all: die like GNU nano instead of limping on.
+        if !stdin_consumed {
+            die(crate::tr!("Standard input is not a terminal\n"));
+        }
         reconnect_and_store_state();
     }
 
