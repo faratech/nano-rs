@@ -347,6 +347,7 @@ impl SearchFlags {
     }
 }
 
+#[cfg(test)]
 fn unicode_ci_match_end_at(haystack: &str, start: usize, folded_needle: &str) -> Option<usize> {
     if folded_needle.is_empty() {
         return Some(start);
@@ -366,6 +367,7 @@ fn unicode_ci_match_end_at(haystack: &str, start: usize, folded_needle: &str) ->
     None
 }
 
+#[cfg(test)]
 fn unicode_ci_find(haystack: &str, needle: &str) -> Option<usize> {
     let folded_needle = needle.to_lowercase();
     if folded_needle.is_empty() {
@@ -386,6 +388,7 @@ fn unicode_ci_rfind(haystack: &str, needle: &str) -> Option<usize> {
     unicode_ci_rfind_at_or_before(haystack, needle, haystack.len())
 }
 
+#[cfg(test)]
 fn unicode_ci_rfind_at_or_before(haystack: &str, needle: &str, ceiling: usize) -> Option<usize> {
     let folded_needle = needle.to_lowercase();
     if folded_needle.is_empty() {
