@@ -2265,6 +2265,17 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
                         }
                     }
                     drop_open = true;
+                    // C reassigns keyword to the sub-command here so the
+                    // normal dispatch handles the line; the port has already
+                    // done everything inline, and falling through with
+                    // keyword still "extendsyntax" used to trigger the
+                    // spurious "Command not understood" error.  Close the
+                    // briefly-open syntax (as the drop_open tail would) and
+                    // move to the next line.
+                    if drop_open {
+                        set_opensyntax(false);
+                    }
+                    continue;
                 } else {
                     // Store for later processing
                     let nanorc_path = get_nanorc().unwrap_or_default();
@@ -2780,6 +2791,68 @@ mod tests {
                 .iter()
                 .any(|path| path.contains(".hidden"))
         );
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn extendsyntax_header_registers_on_the_named_syntax() {
+        // Issue #71: valid "extendsyntax X header ..." lines used to fall
+        // through with keyword still "extendsyntax" and trigger a spurious
+        // "Command not understood" error plus a persistent startup warning.
+        crate::global::with_state_mut(|s| {
+            s.syntaxes = None;
+            s.startup_problem = None;
+        });
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_opensyntax(false);
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        // Prologue pass registers the syntax declaration (a full parse
+        // stops at the first 'syntax' line, like C).
+        let prologue = b"syntax notes \"\\.notes$\"\ncolor brightred \"TODO\"\n";
+        super::parse_rcfile(&mut std::io::BufReader::new(&prologue[..]), true, true);
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_opensyntax(false);
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        // extendsyntax lives in the main nanorc (parsed with just_syntax
+        // false), pointing at a syntax loaded from an include.
+        let body = b"extendsyntax notes header \"^Note:\"\n";
+        super::parse_rcfile(&mut std::io::BufReader::new(&body[..]), false, false);
+
+        super::ERROR_LIST.with(|errors| {
+            assert!(
+                errors.borrow().is_empty(),
+                "no parse errors expected, got: {:?}",
+                errors.borrow()
+            );
+        });
+        assert!(
+            crate::global::state().startup_problem.is_none(),
+            "no startup problem expected"
+        );
+
+        let matched = crate::global::with_state(|s| {
+            let mut cur = s.syntaxes.as_ref();
+            while let Some(sx) = cur {
+                if sx.name == "notes" {
+                    break;
+                }
+                cur = sx.next.as_ref();
+            }
+            match cur {
+                Some(sx) => sx
+                    .headers
+                    .as_deref()
+                    .and_then(|list| list.one_rgx.as_ref())
+                    .map(|rgx| rgx.is_match(b"Note: hello"))
+                    .unwrap_or(false),
+                None => false,
+            }
+        });
+        assert!(matched, "the header regex must be registered on 'notes'");
+
+        crate::global::with_state_mut(|s| s.syntaxes = None);
     }
 
     #[cfg(feature = "color")]
