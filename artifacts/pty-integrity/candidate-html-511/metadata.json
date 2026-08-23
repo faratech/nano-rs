@@ -1,0 +1,54 @@
+{
+  "actual_bytes": 0,
+  "actual_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "case": "html-511",
+  "command": [
+    "/usr/lib/cargo/bin/coreutils/echo",
+    "-I",
+    "-L",
+    "-t",
+    "/tmp/nano-pty-paste-ki102iln/payload.bin"
+  ],
+  "details": {
+    "marker_chunks": [],
+    "marker_delay_seconds": 0.0,
+    "payload_chunks": [
+      1,
+      2,
+      511,
+      512,
+      1023,
+      4095,
+      4096,
+      8191,
+      8192
+    ]
+  },
+  "elapsed_seconds": 0.0037818499986315146,
+  "error": "editor did not enable bracketed paste",
+  "executable": {
+    "path": "/usr/lib/cargo/bin/coreutils/echo",
+    "sha256": "956b53a693650d61b2b4d3f035237de469b28522df27c58f7628d7d731e7f1e1",
+    "version": "echo (uutils coreutils) 0.8.0\n"
+  },
+  "expected_bytes": 511,
+  "expected_sha256": "92a650c0db6d5e4dbadccca2fa153ae8e56f9f55c149a25cf83952622165a973",
+  "input_bytes": 511,
+  "input_sha256": "92a650c0db6d5e4dbadccca2fa153ae8e56f9f55c149a25cf83952622165a973",
+  "platform": "linux",
+  "profile": "fast",
+  "python": "3.14.4 (main, Jun 18 2026, 14:25:02) [GCC 15.2.0]",
+  "returncode": 0,
+  "role": "candidate",
+  "seed": 1312902735,
+  "seed_hex": "0x4e414e4f",
+  "terminal_columns": 100,
+  "terminal_rows": 30,
+  "uname": [
+    "Linux",
+    "ANDROMEDA",
+    "7.2.0-microsoft-standard-WSL2",
+    "#1 SMP PREEMPT_DYNAMIC Mon Aug 17 01:23:57 EDT 2026",
+    "aarch64"
+  ]
+}
