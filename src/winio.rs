@@ -3773,6 +3773,8 @@ fn print_state_word(state: &str, statelen: usize, cols: usize, x: u16, y: u16) {
 }
 
 /// Compute the title bar string components.
+pub const TITLEBAR_PRODUCT: &str = "GNU nano-rs";
+
 fn compute_titlebar_strings(
     path: Option<&str>,
     currmenu: u32,
@@ -3808,7 +3810,7 @@ fn compute_titlebar_strings(
         }
         #[cfg(not(feature = "multibuffer"))]
         {
-            upperleft = "GNU nano".to_string();
+            upperleft = TITLEBAR_PRODUCT.to_string();
         }
         state = String::new();
         return (upperleft, prefix, state, caption);
@@ -3821,12 +3823,12 @@ fn compute_titlebar_strings(
             if more_than_one {
                 upperleft = format!("[{}/{}]", buffer_number(), buffer_count());
             } else {
-                upperleft = "GNU nano".to_string();
+                upperleft = TITLEBAR_PRODUCT.to_string();
             }
         }
         #[cfg(not(feature = "multibuffer"))]
         {
-            upperleft = "GNU nano".to_string();
+            upperleft = TITLEBAR_PRODUCT.to_string();
         }
 
         let (filename, modified, view_mode, stateflags, restricted) = with_state(|s| {
@@ -3860,7 +3862,7 @@ fn compute_titlebar_strings(
         prefix = String::new();
     } else {
         // In help viewer
-        upperleft = "GNU nano".to_string();
+        upperleft = TITLEBAR_PRODUCT.to_string();
         prefix = String::new();
         caption = path
             .map(|p| p.to_string())
@@ -6972,22 +6974,23 @@ mod tests {
 
     #[test]
     fn titlebar_layout_sacrifices_elements_in_gnu_order() {
-        let wide = calculate_titlebar_layout("GNU nano", "", "", "file", true, 80);
+        let wide = calculate_titlebar_layout(TITLEBAR_PRODUCT, "", "", "file", true, 80);
         assert!(wide.show_upperleft);
         assert_eq!(wide.pluglen, breadth("Modified") + 1);
         assert_eq!(wide.statelen, 2);
 
-        let without_version = calculate_titlebar_layout("GNU nano", "", "", "file", true, 25);
+        let without_version = calculate_titlebar_layout(TITLEBAR_PRODUCT, "", "", "file", true, 25);
         assert!(!without_version.show_upperleft);
         assert_eq!(without_version.pluglen, breadth("Modified") + 1);
         assert_eq!(without_version.statelen, 2);
 
-        let without_plug = calculate_titlebar_layout("GNU nano", "", "", "file", true, 15);
+        let without_plug = calculate_titlebar_layout(TITLEBAR_PRODUCT, "", "", "file", true, 15);
         assert!(!without_plug.show_upperleft);
         assert_eq!(without_plug.pluglen, 0);
         assert_eq!(without_plug.statelen, 2);
 
-        let without_side_spaces = calculate_titlebar_layout("GNU nano", "", "", "file", true, 5);
+        let without_side_spaces =
+            calculate_titlebar_layout(TITLEBAR_PRODUCT, "", "", "file", true, 5);
         assert!(!without_side_spaces.show_upperleft);
         assert_eq!(without_side_spaces.pluglen, 0);
         assert_eq!(without_side_spaces.statelen, 0);
@@ -6995,7 +6998,7 @@ mod tests {
 
     #[test]
     fn titlebar_layout_accounts_for_state_word_spacing() {
-        let layout = calculate_titlebar_layout("GNU nano", "", "Modified", "file", false, 80);
+        let layout = calculate_titlebar_layout(TITLEBAR_PRODUCT, "", "Modified", "file", false, 80);
         assert_eq!(layout.pathlen, breadth("file") + 1);
         assert_eq!(layout.statelen, breadth("Modified") + 2);
     }

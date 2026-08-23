@@ -1423,6 +1423,18 @@ mod tests {
     }
 
     #[test]
+    fn installed_version_probe_keys_on_nano_rs_token() {
+        // The titlebar may brand itself however it likes, but --version's
+        // second line is the updater's contract: "nano-rs X.Y.Z".
+        let real = " GNU nano, version 9.0.0\n nano-rs 0.0.15 (Rust port) \u{2014} https://github.com/faratech/nano-rs\n";
+        assert_eq!(
+            super::parse_installed_version(real),
+            Some("0.0.15".to_string())
+        );
+        assert_eq!(super::parse_installed_version("no version line here"), None);
+    }
+
+    #[test]
     fn update_check_message_is_actionable() {
         let newer = super::format_update_report("0.0.15", "0.0.16");
         assert!(newer.contains("0.0.16 available"));
