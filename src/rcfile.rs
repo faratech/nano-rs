@@ -2171,16 +2171,6 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
 
         LINENO.with(|l| *l.borrow_mut() += 1);
 
-        // A single line that is not valid UTF-8 is reported and skipped — not fatal
-        // to the rest of the file (C only rejects that argument and continues).
-        let raw_line = match std::str::from_utf8(&raw_bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                jot_error("Argument is not a valid multibyte string");
-                continue;
-            }
-        };
-
         let current_lineno = get_lineno();
 
         // If doing a full syntax parse, skip lines up to and including the 'syntax' command line
@@ -2188,6 +2178,42 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
         if just_syntax && !intros_only && current_lineno <= syntax_start_lineno {
             continue;
         }
+
+        // Blank lines and comments must load cleanly even when they contain
+        // stray non-UTF-8 bytes (an editor config edited in a legacy locale);
+        // C byte-scans them without any multibyte validation at all.
+        let mut trim_end = raw_bytes.len();
+        while trim_end > 0 && (raw_bytes[trim_end - 1] == b'\n' || raw_bytes[trim_end - 1] == b'\r')
+        {
+            trim_end -= 1;
+        }
+        let trimmed_bytes = &raw_bytes[..trim_end];
+        let blank_or_comment = {
+            let first_content = trimmed_bytes
+                .iter()
+                .find(|&&b| b != b' ' && b != b'\t');
+            match first_content {
+                None => true,
+                Some(&b'#') => true,
+                _ => false,
+            }
+        };
+
+        // A single line that is not valid UTF-8 is reported and skipped — not fatal
+        // to the rest of the file (C only rejects that argument and continues).
+        // Note: regex PATTERNS themselves must be UTF-8 because the regex
+        // crate only accepts UTF-8 patterns; C's byte-oriented regcomp has no
+        // equivalent here, so command lines with raw-byte arguments stay an
+        // unsupported corner.
+        let raw_line = match std::str::from_utf8(trimmed_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                if !blank_or_comment {
+                    jot_error("Argument is not a valid multibyte string");
+                }
+                continue;
+            }
+        };
 
         // Strip trailing CR/LF
         let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
@@ -2856,6 +2882,31 @@ mod tests {
         assert!(matched, "the header regex must be registered on 'notes'");
 
         crate::global::with_state_mut(|s| s.syntaxes = None);
+    }
+
+    #[test]
+    fn comment_lines_with_raw_bytes_load_silently() {
+        // Issue #72: a comment edited in a legacy locale used to trigger
+        // "Argument is not a valid multibyte string" and a startup warning,
+        // although C byte-scans comments without validation.
+        crate::global::with_state_mut(|s| s.startup_problem = None);
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_nanorc(Some("testrc".to_string()));
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        let mut rc: Vec<u8> = b"# set speller \"aspell\"\n".to_vec();
+        rc.extend_from_slice(b"# r\xe9sum\xe9 notes in ISO-8859-1 \xff\n");
+        rc.extend_from_slice(b" \t \n"); // blank line with stray-ish padding
+        super::parse_rcfile(&mut std::io::BufReader::new(&rc[..]), false, false);
+
+        super::ERROR_LIST.with(|errors| {
+            assert!(
+                errors.borrow().is_empty(),
+                "comment lines must not error, got {:?}",
+                errors.borrow()
+            );
+        });
+        assert!(crate::global::state().startup_problem.is_none());
     }
 
     #[cfg(feature = "color")]
