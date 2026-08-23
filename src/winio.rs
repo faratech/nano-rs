@@ -6209,7 +6209,7 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
     let (margin, midwin_x, midwin_y, editwinrows) =
         with_state(|s| (s.margin as u16, s.midwin.x, s.midwin.y, s.editwinrows));
 
-    let leftedge = leftedge_for(from_col, &current_data);
+    let mut leftedge = leftedge_for(from_col, &current_data);
     place_the_cursor();
     let mut row = with_state(|s| s.openfile.as_ref().map(|f| f.cursor_row).unwrap_or(0)) as i32;
     let mut cur_from = from_col;
@@ -6219,20 +6219,23 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
     let spot_pair = state().interface_color_pair[SPOTLIGHTED];
 
     while row < editwinrows {
-        let break_col = {
-            let mut bc =
-                get_softwrap_breakpoint(&current_data, leftedge, &mut kickoff, &mut end_of_line);
-            if bc >= to_col {
-                end_of_line = true;
-                bc = to_col;
-            }
-            bc
-        };
+        let mut break_col =
+            get_softwrap_breakpoint(&current_data, leftedge, &mut kickoff, &mut end_of_line);
 
-        let word = if break_col == cur_from {
-            " ".to_string()
+        // If the highlighting ends on this chunk, we can stop after it.
+        if break_col >= to_col {
+            end_of_line = true;
+            break_col = to_col;
+        }
+
+        // If the target text is of zero length, highlight a space instead.
+        let (word, break_col) = if break_col == cur_from {
+            (" ".to_string(), break_col + 1)
         } else {
-            display_string(&current_data, cur_from, break_col - cur_from, false, false)
+            (
+                display_string(&current_data, cur_from, break_col - cur_from, false, false),
+                break_col,
+            )
         };
 
         apply_interface_color(spot_pair);
@@ -6246,6 +6249,12 @@ pub fn spotlight_softwrapped(from_col: usize, to_col: usize) {
 
         row += 1;
         let _ = queue!(stdout, MoveTo(midwin_x + margin, midwin_y + row as u16));
+
+        // Continue from where this chunk ended: the resumed softwrap scan
+        // must stay inside the recomputed right side, or every later call
+        // returns the same breakpoint and paints spaces down the screen
+        // (C winio.c advances both edges here too).
+        leftedge = break_col;
         cur_from = break_col;
     }
 }
@@ -6626,6 +6635,61 @@ mod tests {
         footwin_waddstr("");
         flush_out();
         first.write_all(&[]).unwrap();
+    }
+
+    #[test]
+    fn softwrap_spotlight_chunks_progress_to_the_match_end() {
+        // Issue #52: the spotlight loop used to pass one fixed leftedge to
+        // every get_softwrap_breakpoint call; after the first chunk the
+        // resumed scan sat beyond its own rightside, returned a constant
+        // breakpoint forever, and painted highlight spaces down the screen.
+        // Mirror the fixed loop: each row continues from the last breakpoint.
+        let saved_cols = state().editwincols;
+        let saved_tabsize = state().tabsize;
+        with_state_mut(|s| {
+            s.editwincols = 40;
+            s.tabsize = 8;
+        });
+        crate::UNSET!(AT_BLANKS);
+
+        // A long line of plain words; a match spanning columns 30..60 must
+        // cross the first chunk boundary (column 40).
+        let line: String = "word ".repeat(40);
+        let to_col = 60usize;
+        assert!(line.len() > to_col);
+
+        let mut kickoff = true;
+        let mut end_of_line = false;
+        let mut leftedge = 0usize;
+        let mut cur_from = 30usize;
+        let mut reached_match_end = false;
+
+        for _row in 0..10 {
+            let raw =
+                get_softwrap_breakpoint(&line, leftedge, &mut kickoff, &mut end_of_line);
+            if end_of_line && raw < to_col {
+                // The line ended before the match did: fine in general, but
+                // impossible for this oversized test line.
+                panic!("line ended early at column {raw}");
+            }
+            let break_col = raw.min(to_col);
+            assert!(
+                break_col > cur_from || leftedge > 0 || break_col == to_col,
+                "stalled: break_col={break_col} cur_from={cur_from} leftedge={leftedge}"
+            );
+            if raw >= to_col {
+                reached_match_end = true;
+                break;
+            }
+            leftedge = break_col;
+            cur_from = break_col;
+        }
+
+        with_state_mut(|s| {
+            s.editwincols = saved_cols;
+            s.tabsize = saved_tabsize;
+        });
+        assert!(reached_match_end, "the walk never advanced past column 40");
     }
 
     fn reset_input_buffer() {
