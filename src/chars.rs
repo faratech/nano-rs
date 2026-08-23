@@ -835,19 +835,19 @@ pub fn mbrevstrcasestr<H: AsRef<[u8]> + ?Sized, N: AsRef<[u8]> + ?Sized>(
         let hay_bytes = raw(haystack);
         let tail_chars = mbstrlen(&hay_bytes[start_offset..]);
 
-        let mut ptr = if tail_chars < needle_chars {
-            let diff = needle_chars - tail_chars;
-            let mut off = start_offset;
-            for _ in 0..diff {
-                if off == 0 {
-                    break;
-                }
-                off = step_left(haystack, off);
-            }
-            off
-        } else {
-            start_offset
-        };
+        // C computes this rewind as `pointer -= (needle_len - tail_len)`:
+        // CHARACTER counts applied in raw BYTE pointer arithmetic, possibly
+        // landing mid-character; the comparison loop below then steps left
+        // by whole characters until things align.  Stepping back that many
+        // whole characters instead overshoots leftwards, and because the
+        // scan never moves right again, matches beginning between the two
+        // points are silently skipped.
+        let diff = needle_chars.saturating_sub(tail_chars);
+        if diff > start_offset {
+            // The rewind would reach before the start of the line.
+            return None;
+        }
+        let mut ptr = start_offset - diff;
 
         if ptr > hay_bytes.len() {
             return None;
@@ -1085,5 +1085,33 @@ mod byte_semantics_tests {
             assert!(!is_word_char(&[0xA9], false));
             STATE.with(|state| state.borrow_mut().word_chars = previous);
         });
+    }
+
+    #[test]
+    fn backward_ci_search_finds_match_ending_at_cursor() {
+        // Issue #76: the initial rewind used to step back whole characters
+        // where C rewinds that many raw bytes, so on multibyte lines the
+        // leftward-only scan skipped match positions in between.
+        let saved_utf8 = using_utf8();
+        remember_utf8(true);
+
+        // "ééabé": é(2) é(2) a b é(2) = 8 bytes, 5 chars.
+        let hay = "\u{e9}\u{e9}ab\u{e9}";
+
+        // Backward search for "abé" with the cursor at end of line: the
+        // match starts at byte 4 and ends exactly at the cursor.
+        assert_eq!(mbrevstrcasestr(hay, "ab\u{e9}", hay.len()), Some(4));
+
+        // A needle that fits in the tail is probed in place first: with the
+        // cursor before the 'a', "ab" matches right at the cursor.
+        assert_eq!(mbrevstrcasestr(hay, "ab", 4), Some(4));
+
+        // Absent needles stay absent.
+        assert_eq!(mbrevstrcasestr(hay, "xyz", hay.len()), None);
+
+        // A rewind that would reach before the line start fails like C.
+        assert_eq!(mbrevstrcasestr("\u{e9}a", "abc\u{e9}", 3), None);
+
+        remember_utf8(saved_utf8);
     }
 }

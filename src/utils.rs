@@ -300,37 +300,9 @@ pub fn revstrstr(haystack: &str, needle: &str, start_offset: usize) -> Option<us
 
 /* Helper: reverse case-insensitive strstr for multibyte strings. */
 pub fn mbrevstrcasestr(haystack: &str, needle: &str, start_offset: usize) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(start_offset);
-    }
-    let needle_chars: usize = crate::chars::mbstrlen(needle);
-    let tail_chars = crate::chars::mbstrlen(&haystack[start_offset..]);
-
-    // Compute starting position for backwards scan
-    let mut ptr_offset = if tail_chars < needle_chars {
-        // Go back enough characters
-        let diff = needle_chars - tail_chars;
-        let mut off = start_offset;
-        for _ in 0..diff {
-            if off == 0 {
-                break;
-            }
-            off = crate::chars::step_left(haystack, off);
-        }
-        off
-    } else {
-        start_offset
-    };
-
-    loop {
-        if crate::chars::mbstrncasecmp(&haystack[ptr_offset..], needle, needle_chars) == 0 {
-            return Some(ptr_offset);
-        }
-        if ptr_offset == 0 {
-            return None;
-        }
-        ptr_offset = crate::chars::step_left(haystack, ptr_offset);
-    }
+    // Single shared implementation lives in chars.rs (issue #76: the two
+    // copies had diverged from C's byte-based rewind).
+    crate::chars::mbrevstrcasestr(haystack, needle, start_offset)
 }
 
 /* C: void *nmalloc(size_t howmuch)
