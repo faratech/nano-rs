@@ -3948,118 +3948,160 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
 
     let backup_dir = state().backup_dir.clone();
 
-    let backupname: PathBuf = if backup_dir.is_none() {
-        // Byte-preserving "<name>~" so a non-UTF-8 file backs up beside itself.
-        let mut name = realname.as_os_str().to_os_string();
-        name.push("~");
-        PathBuf::from(name)
-    } else {
-        let bd = backup_dir.as_ref().unwrap();
-        let source_path = get_full_path_buf(realname).unwrap_or_else(|| realname.to_path_buf());
-        // backup_path_key hex-encodes the path bytes, so the result is plain
-        // ASCII and safe to handle as a string.
-        let thename = backup_path_key(&source_path);
-        let base = Path::new(bd).join(thename).to_string_lossy().into_owned();
-        let next = get_next_filename(&base, "~");
-        if next.is_empty() {
-            statusline(MessageType::Alert, "Too many existing backup files");
-            return false;
-        }
-        PathBuf::from(next)
+    // C tries the backup beside the original once; when that fails it
+    // retries inside the home directory before giving up (files.c:1653-1676).
+    let homedir = std::env::var_os("HOME").map(PathBuf::from);
+    let mut second_attempt = false;
+    let mut failure: Option<(String, Option<io::Error>)> = None;
+
+    let retry_in_home = || {
+        warn_and_briefly_pause("Cannot make regular backup");
+        warn_and_briefly_pause("Trying again in your home directory");
+        state_mut().currmenu = MMOST;
     };
 
-    let fail = |reason: &str| {
-        warn_and_briefly_pause("Cannot make backup");
-        warn_and_briefly_pause(reason);
-        if ask_user(
+    'attempt: loop {
+        let backupname: PathBuf = if second_attempt {
+            // mkstemp-style "<home>/<tail>~" (plus .N when taken), like C.
+            let home = match homedir.as_ref() {
+                Some(home) => home.clone(),
+                None => break,
+            };
+            let lossy = realname.to_string_lossy().into_owned();
+            let tail = crate::utils::tail(&lossy);
+            get_next_filename_path(home.join(tail), "~")
+        } else if backup_dir.is_none() {
+            // Byte-preserving "<name>~" so a non-UTF-8 file backs up beside itself.
+            let mut name = realname.as_os_str().to_os_string();
+            name.push("~");
+            PathBuf::from(name)
+        } else {
+            let bd = backup_dir.as_ref().unwrap();
+            let source_path = get_full_path_buf(realname).unwrap_or_else(|| realname.to_path_buf());
+            // backup_path_key hex-encodes the path bytes, so the result is plain
+            // ASCII and safe to handle as a string.
+            let thename = backup_path_key(&source_path);
+            let base = Path::new(bd).join(thename).to_string_lossy().into_owned();
+            let next = get_next_filename(&base, "~");
+            if next.is_empty() {
+                failure = Some(("Too many existing backup files".to_string(), None));
+                break;
+            }
+            PathBuf::from(next)
+        };
+
+        macro_rules! bail {
+            ($reason:expr) => {{
+                if !second_attempt && homedir.is_some() {
+                    retry_in_home();
+                    second_attempt = true;
+                    continue 'attempt;
+                }
+                failure = Some(($reason.to_string(), None));
+                break 'attempt;
+            }};
+            ($reason:expr, $error:expr) => {{
+                if !second_attempt && homedir.is_some() {
+                    retry_in_home();
+                    second_attempt = true;
+                    continue 'attempt;
+                }
+                failure = Some(($reason.to_string(), Some($error)));
+                break 'attempt;
+            }};
+        }
+
+        let mut original = match open_path(realname) {
+            Ok(file) => file,
+            Err(error) => bail!(format!("Cannot read original file: {}", error), error),
+        };
+
+        // Stage beside the destination so the final rename is atomic.  tempfile
+        // creates this path exclusively with mode 0600, and its Drop removes any
+        // incomplete candidate without disturbing an older complete backup.
+        let parent = usable_parent(&backupname);
+        let mut staging = match create_staging_file(parent, ".nano-backup.") {
+            Ok(file) => file,
+            Err(error) => bail!(format!("Cannot create staging file: {}", error), error),
+        };
+
+        if let Err(error) = io::copy(&mut original, staging.as_file_mut()) {
+            bail!(format!("Cannot copy original file: {}", error), error);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = staging.as_file().as_raw_fd();
+            let ownership = unsafe { libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid) };
+            if ownership != 0 {
+                let error = io::Error::last_os_error();
+                bail!("Cannot preserve backup ownership".to_string(), error);
+            }
+            let permissions = unsafe { libc::fchmod(fd, fileinfo.st_mode & 0o7777) };
+            if permissions != 0 {
+                let error = io::Error::last_os_error();
+                bail!("Cannot preserve backup permissions".to_string(), error);
+            }
+
+            let times = [
+                libc::timespec {
+                    tv_sec: fileinfo.st_atime,
+                    tv_nsec: fileinfo.st_atime_nsec,
+                },
+                libc::timespec {
+                    tv_sec: fileinfo.st_mtime,
+                    tv_nsec: fileinfo.st_mtime_nsec,
+                },
+            ];
+            if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
+                let error = io::Error::last_os_error();
+                bail!("Cannot preserve backup timestamps".to_string(), error);
+            }
+        }
+
+        if let Err(error) = staging.as_file_mut().flush() {
+            bail!(format!("Cannot flush backup: {}", error), error);
+        }
+        if let Err(error) = staging.as_file().sync_all() {
+            bail!(format!("Cannot sync backup: {}", error), error);
+        }
+
+        match staging.persist(&backupname) {
+            Ok(persisted) => drop(persisted),
+            Err(error) => bail!(format!("Cannot install backup: {}", error), error),
+        }
+
+        #[cfg(unix)]
+        if let Err(error) = sync_parent_of(&backupname) {
+            bail!(format!("Cannot sync backup directory: {}", error), error);
+        }
+
+        return true;
+    }
+
+    // Both attempts failed (or no home fallback was possible): report and,
+    // unless the disk is full -- where continuing cannot help but the save
+    // itself may still work -- ask whether to go on without a backup
+    // (C files.c:1678-1691).
+    let (reason, error) = failure.unwrap_or(("Unknown failure".to_string(), None));
+    let enospc = error.as_ref().map(|e| is_enospc_error(e)).unwrap_or(false);
+
+    warn_and_briefly_pause("Cannot make backup");
+    warn_and_briefly_pause(&reason);
+    state_mut().currmenu = MMOST;
+
+    if !enospc
+        && ask_user(
             YESORNO,
             "Cannot make backup; continue and save actual file? ",
         ) == YES
-        {
-            true
-        } else {
-            statusline(
-                MessageType::Hush,
-                &format!("Cannot make backup: {}", reason),
-            );
-            false
-        }
-    };
-
-    let mut original = match open_path(realname) {
-        Ok(file) => file,
-        Err(error) => return fail(&format!("Cannot read original file: {}", error)),
-    };
-
-    // Stage beside the destination so the final rename is atomic.  tempfile
-    // creates this path exclusively with mode 0600, and its Drop removes any
-    // incomplete candidate without disturbing an older complete backup.
-    let parent = usable_parent(&backupname);
-    let mut staging = match create_staging_file(parent, ".nano-backup.") {
-        Ok(file) => file,
-        Err(error) => return fail(&error.to_string()),
-    };
-
-    if let Err(error) = io::copy(&mut original, staging.as_file_mut()) {
-        return fail(&format!("Cannot copy original file: {}", error));
-    }
-
-    #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
-        let fd = staging.as_file().as_raw_fd();
-        let ownership = unsafe { libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid) };
-        if ownership != 0 {
-            return fail(&format!(
-                "Cannot preserve backup ownership: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        let permissions = unsafe { libc::fchmod(fd, fileinfo.st_mode & 0o7777) };
-        if permissions != 0 {
-            return fail(&format!(
-                "Cannot preserve backup permissions: {}",
-                io::Error::last_os_error()
-            ));
-        }
-
-        let times = [
-            libc::timespec {
-                tv_sec: fileinfo.st_atime,
-                tv_nsec: fileinfo.st_atime_nsec,
-            },
-            libc::timespec {
-                tv_sec: fileinfo.st_mtime,
-                tv_nsec: fileinfo.st_mtime_nsec,
-            },
-        ];
-        if unsafe { libc::futimens(fd, times.as_ptr()) } != 0 {
-            return fail(&format!(
-                "Cannot preserve backup timestamps: {}",
-                io::Error::last_os_error()
-            ));
-        }
+        return true;
     }
 
-    if let Err(error) = staging.as_file_mut().flush() {
-        return fail(&format!("Cannot flush backup: {}", error));
-    }
-    if let Err(error) = staging.as_file().sync_all() {
-        return fail(&format!("Cannot sync backup: {}", error));
-    }
-
-    let persisted = match staging.persist(&backupname) {
-        Ok(file) => file,
-        Err(error) => return fail(&format!("Cannot install backup: {}", error)),
-    };
-    drop(persisted);
-
-    #[cfg(unix)]
-    if let Err(error) = sync_parent_of(&backupname) {
-        return fail(&format!("Cannot sync backup directory: {}", error));
-    }
-
-    true
+    statusline(MessageType::Hush, &format!("Cannot make backup: {}", reason));
+    false
 }
 
 // ---------------------------------------------------------------------------
