@@ -954,12 +954,12 @@ fn open_lockfile_for_create(lockfilename: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(feature = "tiny"))]
-fn open_existing_lockfile(lockfilename: &Path) -> io::Result<File> {
+fn open_and_check_lockfile(lockfilename: &Path, write_access: bool) -> io::Result<File> {
     let file = open_path_with(
         lockfilename,
         PathOpenOptions {
             read: true,
-            write: true,
+            write: write_access,
             nofollow: true,
             ..PathOpenOptions::default()
         },
@@ -981,6 +981,21 @@ fn open_existing_lockfile(lockfilename: &Path) -> io::Result<File> {
         }
     }
     Ok(file)
+}
+
+/// Open an existing lock for inspection.  GNU nano reads it with O_RDONLY so
+/// that any readable lock still triggers the "open anyway?" prompt; requiring
+/// write access here would silently skip that prompt whenever the lock is not
+/// writable by us (say, foreign-owned in a shared directory).  A write-capable
+/// descriptor is still preferred so a takeover can reuse it; the flag reports
+/// which one we got.
+fn open_existing_lockfile(lockfilename: &Path) -> io::Result<(File, bool)> {
+    match open_and_check_lockfile(lockfilename, true) {
+        Ok(file) => Ok((file, true)),
+        Err(write_error) => open_and_check_lockfile(lockfilename, false)
+            .map(|file| (file, false))
+            .map_err(|_| write_error),
+    }
 }
 
 #[cfg(all(windows, not(feature = "tiny")))]
@@ -1268,8 +1283,10 @@ pub const SKIPTHISFILE: i32 = -2;
  * First check if a lock file already exists.  If so, and ask_the_user is TRUE,
  * ask whether to open the corresponding file anyway.  Return SKIPTHISFILE when
  * the user answers "No", return the lock filename on success, and return None on
- * failure.  Rust retains the exclusively acquired descriptor alongside the
- * pathname, and a special Err(()) means SKIPTHISFILE. */
+ * failure.  A readable-but-unwritable lock still gets the prompt; after an
+ * affirmative answer a failed takeover continues unlocked, as in C.  Rust
+ * retains the acquired descriptor alongside the pathname, and a special
+ * Err(()) means SKIPTHISFILE. */
 #[cfg(not(feature = "tiny"))]
 pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBuf, File)>, ()> {
     // Build lock filename: <dir>/.<basename>.swp — byte-preserving, so a
@@ -1294,10 +1311,12 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
         }
     };
     if lock_exists && !ask_the_user {
+        // GNU nano warns here and then still tries to take the lock; an early
+        // return used to leave this editor running with no lock at all while
+        // the stale lock kept claiming the file.
         blank_bottombars();
         statusline(MessageType::Alert, "Someone else is also editing this file");
         napms(1200);
-        return Ok(None);
     } else if lock_exists {
         // Read and parse the lock file
         match open_existing_lockfile(&lockfilename) {
@@ -1308,7 +1327,7 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
                 );
                 return Ok(None);
             }
-            Ok(mut f) => {
+            Ok((mut f, writable)) => {
                 let mut lockbuf = Vec::with_capacity(LOCKSIZE);
                 let readamt = match (&mut f)
                     .take((LOCKSIZE + 1) as u64)
@@ -1387,10 +1406,23 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
                 // Override the stale lock through the exact descriptor that we
                 // inspected.  A swapped directory entry is neither unlinked nor
                 // overwritten and causes the identity checks to fail closed.
-                if write_lockfile(&mut f, &lockfilename, filename, false) {
+                if writable && write_lockfile(&mut f, &lockfilename, filename, false) {
                     return Ok(Some((lockfilename, f)));
                 }
-                return Ok(None);
+                if !writable {
+                    // The lock was only readable (for instance a foreign-owned
+                    // one): reopen the same name for writing -- never creating,
+                    // never following links -- and re-run the identity checks.
+                    drop(f);
+                    if let Ok(mut takeover) = open_and_check_lockfile(&lockfilename, true) {
+                        if write_lockfile(&mut takeover, &lockfilename, filename, false) {
+                            return Ok(Some((lockfilename, takeover)));
+                        }
+                    }
+                }
+                // The user chose to open anyway but the lock could not be
+                // taken over: continue unlocked, like GNU nano when its
+                // write_lockfile fails after an affirmative answer.
             }
         }
     }
@@ -6076,6 +6108,26 @@ mod tests {
         assert!(open_lockfile_for_create(&link).is_err());
         assert!(open_existing_lockfile(&link).is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn existing_valid_lock_reopens_write_capable_for_takeover() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document");
+        std::fs::write(&target, b"content\n").unwrap();
+
+        // A well-formed lock must inspect as write-capable so an "open
+        // anyway?" answer can take it over through the same descriptor.
+        // (Issue #57: inspection used to demand write access up front, so a
+        // readable-but-unwritable lock skipped the prompt entirely.)
+        let (lock_path, held) = super::do_lockfile(&target, false)
+            .unwrap()
+            .expect("lock creation should succeed");
+        drop(held);
+
+        let (_file, writable) = open_existing_lockfile(&lock_path).unwrap();
+        assert!(writable);
     }
 
     #[cfg(all(unix, not(feature = "tiny")))]
