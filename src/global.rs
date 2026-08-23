@@ -874,6 +874,8 @@ impl AppState {
                 bot.borrow_mut().next = Some(new_line.clone());
             }
             of.filebot = Some(new_line);
+            // C's new_magicline() also counts the line's lone newline.
+            of.totsize += 1;
         }
     }
 
@@ -897,6 +899,8 @@ impl AppState {
                         }
                     }
                 }
+                // C's remove_magicline() also drops the counted newline.
+                of.totsize -= 1;
             }
         }
     }
@@ -1139,6 +1143,25 @@ mod multibuffer_ring_tests {
             s.exitfunc = None;
         });
         weak_lines
+    }
+
+    #[test]
+    fn magicline_ops_maintain_totsize() {
+        // Issue #69: C's new_magicline()/remove_magicline() also move totsize
+        // by one for the line's newline; the port skipped both adjustments.
+        let (buffer, _weak) = named_buffer("t");
+        let mut buffer = buffer;
+        buffer.totsize = 6; // "t line" plus its newline
+        with_state_mut(|s| {
+            s.buffer_ring.clear();
+            s.openfile = Some(buffer);
+        });
+
+        with_state_mut(|s| s.append_magicline());
+        assert_eq!(with_state(|s| s.openfile.as_ref().unwrap().totsize), 7);
+
+        with_state_mut(|s| s.remove_magicline_if_empty());
+        assert_eq!(with_state(|s| s.openfile.as_ref().unwrap().totsize), 6);
     }
 
     fn current_name() -> String {
