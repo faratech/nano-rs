@@ -2810,15 +2810,124 @@ fn append_pipe_text(output: &mut Vec<u8>, text: &[u8]) {
     );
 }
 
+/// Append the region between (top, top_x) and (bottom, bottom_x) to the
+/// piped input, recoding embedded newlines like the line walker does.
+#[cfg(not(feature = "tiny"))]
+fn append_marked_region(
+    output: &mut Vec<u8>,
+    top: &LinePtr,
+    top_x: usize,
+    bottom: &LinePtr,
+    bottom_x: usize,
+) {
+    let mut line = Some(top.clone());
+    while let Some(node) = line {
+        let is_top = node == *top;
+        let is_bottom = node == *bottom;
+        let (data, next) = {
+            let borrowed = node.borrow();
+            (borrowed.data.clone(), borrowed.next.clone())
+        };
+        let start = if is_top { top_x } else { 0 };
+        let end = if is_bottom { bottom_x } else { data.len() };
+        if let Some(segment) = data.get(start..end) {
+            append_pipe_text(output, segment);
+        }
+        if is_bottom {
+            break;
+        }
+        output.push(b'\n');
+        line = next;
+    }
+}
+
+/// Append the whole buffer (up to the final magic line) to the piped input.
+#[cfg(not(feature = "tiny"))]
+fn append_whole_buffer(output: &mut Vec<u8>, filetop: &LinePtr) {
+    let mut line = Some(filetop.clone());
+    while let Some(node) = line {
+        let (data, next) = {
+            let borrowed = node.borrow();
+            (borrowed.data.clone(), borrowed.next.clone())
+        };
+        if next.is_none() && data.is_empty() {
+            break;
+        }
+        append_pipe_text(output, &data);
+        if next.is_some() {
+            output.push(b'\n');
+        }
+        line = next;
+    }
+}
+
+/// Order two (line, x) positions: earlier line first, earlier column on a tie.
+#[cfg(all(not(feature = "tiny"), feature = "multibuffer"))]
+fn order_positions(
+    a: (LinePtr, usize),
+    b: (LinePtr, usize),
+) -> (LinePtr, usize, LinePtr, usize) {
+    let a_lineno = a.0.borrow().lineno;
+    let b_lineno = b.0.borrow().lineno;
+    if a_lineno < b_lineno || (a_lineno == b_lineno && a.1 <= b.1) {
+        (a.0, a.1, b.0, b.1)
+    } else {
+        (b.0, b.1, a.0, a.1)
+    }
+}
+
 #[cfg(not(feature = "tiny"))]
 fn command_input_snapshot() -> Vec<u8> {
+    let mut output = Vec::new();
+
+    // In multibuffer mode the current buffer is the fresh, blank output
+    // target that was just opened; C pipes the input from openfile->prev
+    // instead -- its marked region, or its whole text when unmarked
+    // (C files.c:1045-1053).
+    #[cfg(feature = "multibuffer")]
+    let from_prev = ISSET!(MULTIBUFFER);
+    #[cfg(not(feature = "multibuffer"))]
+    let from_prev = false;
+
+    #[cfg(feature = "multibuffer")]
+    if from_prev {
+        let source = with_state(|s| {
+            let prev = s.buffer_ring.back()?;
+            Some((
+                prev.mark.clone(),
+                prev.mark_x,
+                prev.current.clone(),
+                prev.current_x,
+                prev.filetop.clone(),
+            ))
+        });
+        let Some((mark, mark_x, current, current_x, filetop)) = source else {
+            return output;
+        };
+        let Some(filetop) = filetop else {
+            return output;
+        };
+
+        match mark {
+            None => append_whole_buffer(&mut output, &filetop),
+            Some(mark_line) => {
+                let Some(current) = current else {
+                    return output;
+                };
+                let (top, top_x, bottom, bottom_x) =
+                    order_positions((mark_line, mark_x), (current, current_x));
+                append_marked_region(&mut output, &top, top_x, &bottom, bottom_x);
+            }
+        }
+        return output;
+    }
+
     let marked = with_state(|s| {
         s.openfile
             .as_ref()
             .and_then(|buffer| buffer.mark.as_ref())
             .is_some()
     });
-    let mut output = Vec::new();
 
     if marked {
         let mut top = None;
@@ -2830,47 +2939,16 @@ fn command_input_snapshot() -> Vec<u8> {
             (Some(top), Some(bottom)) => (top, bottom),
             _ => return output,
         };
-
-        let mut line = Some(top.clone());
-        while let Some(node) = line {
-            let is_top = node == top;
-            let is_bottom = node == bottom;
-            let (data, next) = {
-                let borrowed = node.borrow();
-                (borrowed.data.clone(), borrowed.next.clone())
-            };
-            let start = if is_top { top_x } else { 0 };
-            let end = if is_bottom { bottom_x } else { data.len() };
-            if let Some(segment) = data.get(start..end) {
-                append_pipe_text(&mut output, segment);
-            }
-            if is_bottom {
-                break;
-            }
-            output.push(b'\n');
-            line = next;
-        }
+        append_marked_region(&mut output, &top, top_x, &bottom, bottom_x);
         return output;
     }
 
-    let mut line = with_state(|s| {
+    if let Some(filetop) = with_state(|s| {
         s.openfile
             .as_ref()
             .and_then(|buffer| buffer.filetop.clone())
-    });
-    while let Some(node) = line {
-        let (data, next) = {
-            let borrowed = node.borrow();
-            (borrowed.data.clone(), borrowed.next.clone())
-        };
-        if next.is_none() && data.is_empty() {
-            break;
-        }
-        append_pipe_text(&mut output, &data);
-        if next.is_some() {
-            output.push(b'\n');
-        }
-        line = next;
+    }) {
+        append_whole_buffer(&mut output, &filetop);
     }
     output
 }
@@ -6472,6 +6550,38 @@ mod tests {
         assert_eq!(command_input_snapshot(), b"pha\nbe");
     }
 
+    #[cfg(all(unix, not(feature = "tiny"), feature = "multibuffer"))]
+    #[test]
+    fn multibuffer_pipe_takes_input_from_the_previous_buffer() {
+        use super::{command_input_snapshot, make_new_buffer};
+        use crate::global::with_state_mut;
+
+        // Issue #58: under MULTIBUFFER the current buffer is the blank
+        // output target; the piped input must come from openfile->prev.
+        let nodes = install_test_buffer(&["original", ""]);
+        make_new_buffer();
+        crate::SET!(crate::definitions::MULTIBUFFER);
+
+        // Unmarked predecessor: its whole text is piped.
+        assert_eq!(command_input_snapshot(), b"original\n");
+
+        // A marked region in the predecessor is what gets piped.
+        with_state_mut(|s| {
+            let prev = s.buffer_ring.back_mut().unwrap();
+            prev.mark = Some(nodes[0].clone());
+            prev.mark_x = 2;
+            prev.current = Some(nodes[1].clone());
+            prev.current_x = 0;
+        });
+        // "original"[2..] is "iginal".
+        assert_eq!(command_input_snapshot(), b"iginal\n");
+
+        crate::UNSET!(crate::definitions::MULTIBUFFER);
+        with_state_mut(|s| {
+            s.buffer_ring.pop_back();
+        });
+    }
+
     #[cfg(all(unix, not(feature = "tiny")))]
     #[test]
     fn successful_filter_replaces_once_and_undo_restores_source() {
@@ -6545,3 +6655,4 @@ mod tests {
         assert_eq!(current_buffer_lines(), ["hello WORLD", ""]);
     }
 }
+
