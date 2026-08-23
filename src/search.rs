@@ -2095,10 +2095,11 @@ pub fn goto_line_and_column(mut line: isize, mut column: isize, hugfloor: bool) 
                     .as_ref()
                     .and_then(|f| {
                         f.current.as_ref().map(|l| {
-                            leftedge_for(
-                                s.openfile.as_ref().map(|of| of.placewewant).unwrap_or(0),
-                                l,
-                            )
+                            // C anchors on xplustabs(): the actual display
+                            // column of current_x, which is clamped when a
+                            // wide character straddles the target column --
+                            // placewewant can point mid-character.
+                            leftedge_for(xplustabs(), l)
                         })
                     })
                     .unwrap_or(0)
