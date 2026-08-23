@@ -2865,10 +2865,7 @@ fn append_whole_buffer(output: &mut Vec<u8>, filetop: &LinePtr) {
 
 /// Order two (line, x) positions: earlier line first, earlier column on a tie.
 #[cfg(all(not(feature = "tiny"), feature = "multibuffer"))]
-fn order_positions(
-    a: (LinePtr, usize),
-    b: (LinePtr, usize),
-) -> (LinePtr, usize, LinePtr, usize) {
+fn order_positions(a: (LinePtr, usize), b: (LinePtr, usize)) -> (LinePtr, usize, LinePtr, usize) {
     let a_lineno = a.0.borrow().lineno;
     let b_lineno = b.0.borrow().lineno;
     if a_lineno < b_lineno || (a_lineno == b_lineno && a.1 <= b.1) {
@@ -4100,7 +4097,10 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
         return true;
     }
 
-    statusline(MessageType::Hush, &format!("Cannot make backup: {}", reason));
+    statusline(
+        MessageType::Hush,
+        &format!("Cannot make backup: {}", reason),
+    );
     false
 }
 
@@ -5927,8 +5927,13 @@ mod tests {
     fn enospc_is_recognized_from_any_write_site() {
         // Issue #59: every fallible write now funnels through this check
         // before deciding whether the disk-full warning applies.
-        let enospc = std::io::Error::from_raw_os_error(libc::ENOSPC);
-        assert!(super::is_enospc_error(&enospc));
+        let kind_only = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(super::is_enospc_error(&kind_only));
+        #[cfg(unix)]
+        {
+            let enospc = std::io::Error::from_raw_os_error(libc::ENOSPC);
+            assert!(super::is_enospc_error(&enospc));
+        }
         assert!(!super::is_enospc_error(&std::io::Error::other("nope")));
     }
 
@@ -6699,4 +6704,3 @@ mod tests {
         assert_eq!(current_buffer_lines(), ["hello WORLD", ""]);
     }
 }
-

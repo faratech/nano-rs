@@ -2189,9 +2189,7 @@ pub fn parse_rcfile<R: BufRead>(mut reader: R, just_syntax: bool, intros_only: b
         }
         let trimmed_bytes = &raw_bytes[..trim_end];
         let blank_or_comment = {
-            let first_content = trimmed_bytes
-                .iter()
-                .find(|&&b| b != b' ' && b != b'\t');
+            let first_content = trimmed_bytes.iter().find(|&&b| b != b' ' && b != b'\t');
             match first_content {
                 None => true,
                 Some(&b'#') => true,
@@ -2830,7 +2828,10 @@ mod tests {
         // "Command not understood" error plus a persistent startup warning.
         crate::global::with_state_mut(|s| {
             s.syntaxes = None;
-            s.startup_problem = None;
+            #[cfg(any(feature = "nanorc", feature = "histories"))]
+            {
+                s.startup_problem = None;
+            }
         });
         super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
         super::set_opensyntax(false);
@@ -2856,6 +2857,7 @@ mod tests {
                 errors.borrow()
             );
         });
+        #[cfg(any(feature = "nanorc", feature = "histories"))]
         assert!(
             crate::global::state().startup_problem.is_none(),
             "no startup problem expected"
@@ -2889,6 +2891,7 @@ mod tests {
         // Issue #72: a comment edited in a legacy locale used to trigger
         // "Argument is not a valid multibyte string" and a startup warning,
         // although C byte-scans comments without validation.
+        #[cfg(any(feature = "nanorc", feature = "histories"))]
         crate::global::with_state_mut(|s| s.startup_problem = None);
         super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
         super::set_nanorc(Some("testrc".to_string()));
@@ -2906,6 +2909,7 @@ mod tests {
                 errors.borrow()
             );
         });
+        #[cfg(any(feature = "nanorc", feature = "histories"))]
         assert!(crate::global::state().startup_problem.is_none());
     }
 
@@ -2916,7 +2920,10 @@ mod tests {
         // compiled ones from the same command line.
         crate::global::with_state_mut(|s| {
             s.syntaxes = None;
-            s.startup_problem = None;
+            #[cfg(any(feature = "nanorc", feature = "histories"))]
+            {
+                s.startup_problem = None;
+            }
         });
         super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
         super::set_opensyntax(false);

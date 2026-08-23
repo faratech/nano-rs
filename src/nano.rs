@@ -2703,9 +2703,7 @@ pub fn nano_main() {
                         // C lets getopt_long reject this; silently continuing
                         // with an empty value used to mask typos (#67).
                         eprintln!("Option '--{opt}' requires an argument.");
-                        eprintln!(
-                            "Type '{argv0} -h' for a list of available options."
-                        );
+                        eprintln!("Type '{argv0} -h' for a list of available options.");
                         process::exit(1);
                     }
                     Some(value) => match value.to_str() {
@@ -3086,9 +3084,7 @@ pub fn nano_main() {
                             // C lets getopt reject this; silently continuing
                             // with an empty value used to mask typos (#67).
                             eprintln!("Option '-{c}' requires an argument.");
-                            eprintln!(
-                                "Type '{argv0} -h' for a list of available options."
-                            );
+                            eprintln!("Type '{argv0} -h' for a list of available options.");
                             process::exit(1);
                         }
                         Some(value) => match value.to_str() {

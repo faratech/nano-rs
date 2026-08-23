@@ -1104,8 +1104,7 @@ fn wipe_idle_bar() {
         if state().flag_isset(ZERO) && state().lastmessage > MessageType::Vacuum {
             // C: wredrawln(midwin, editwinrows - 1, 1) -- clear the squeezed
             // bottom edit row so the repaint below does not smear.
-            let (mid_x, mid_y, rows) =
-                with_state(|s| (s.midwin.x, s.midwin.y, s.editwinrows));
+            let (mid_x, mid_y, rows) = with_state(|s| (s.midwin.x, s.midwin.y, s.editwinrows));
             let mut stdout = out();
             let _ = execute!(
                 stdout,
@@ -1139,8 +1138,6 @@ pub fn read_keys_from() {
     // Flush any pending output before blocking
     let _ = stdout.flush();
 
-
-
     // Show cursor if appropriate
     let reveal = tl_get!(REVEAL_CURSOR);
     let spotlight = state().spotlighted;
@@ -1166,21 +1163,22 @@ pub fn read_keys_from() {
     // wipe/cancel it, refresh, and only then block for real (C winio.c:210-
     // 255: halfdelay(QUICK_BLANK ? 8 : 15)).
     #[cfg(not(feature = "tiny"))]
-    let mut idle_deadline: Option<std::time::Instant> =
-        if currmenu == MMAIN
-            && (((state().flag_isset(MINIBAR)
-                || state().flag_isset(ZERO)
-                || lines == 1)
-                && lastmessage > MessageType::Hush
-                && lastmessage < MessageType::Alert
-                && lastmessage != MessageType::Info)
-                || spotlight)
-        {
-            let tenths: u64 = if state().flag_isset(QUICK_BLANK) { 800 } else { 1500 };
-            Some(std::time::Instant::now() + Duration::from_millis(tenths))
+    let mut idle_deadline: Option<std::time::Instant> = if currmenu == MMAIN
+        && (((state().flag_isset(MINIBAR) || state().flag_isset(ZERO) || lines == 1)
+            && lastmessage > MessageType::Hush
+            && lastmessage < MessageType::Alert
+            && lastmessage != MessageType::Info)
+            || spotlight)
+    {
+        let tenths: u64 = if state().flag_isset(QUICK_BLANK) {
+            800
         } else {
-            None
+            1500
         };
+        Some(std::time::Instant::now() + Duration::from_millis(tenths))
+    } else {
+        None
+    };
 
     let first_event = loop {
         crate::nano::process_pending_signal_requests();
@@ -6759,8 +6757,7 @@ mod tests {
         let mut reached_match_end = false;
 
         for _row in 0..10 {
-            let raw =
-                get_softwrap_breakpoint(&line, leftedge, &mut kickoff, &mut end_of_line);
+            let raw = get_softwrap_breakpoint(&line, leftedge, &mut kickoff, &mut end_of_line);
             if end_of_line && raw < to_col {
                 // The line ended before the match did: fine in general, but
                 // impossible for this oversized test line.
@@ -6807,6 +6804,10 @@ mod tests {
     }
 
     #[test]
+    // Function-pointer identity is not stable under Miri's codegen, which
+    // shifts which sclist entry matches each allfuncs function; the memory
+    // soundness this suite checks does not depend on binding order.
+    #[cfg_attr(miri, ignore)]
     fn footer_click_walk_matches_displayed_shortcut_order() {
         // Issue #53: clicks used to be resolved by walking raw sclist
         // registration order, which differs from what bottombars displays,
