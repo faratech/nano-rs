@@ -1095,11 +1095,51 @@ pub fn get_input(frame: Option<()>) -> i32 {
 // ---------------------------------------------------------------------------
 
 /* C: void read_keys_from(WINDOW *frame) */
+/// The idle-timeout action for the half-delay read (#55): wipe a showing
+/// message / cancel a search highlight, repaint the affected rows, and put
+/// the cursor back (C winio.c:238-254).
+#[cfg(not(feature = "tiny"))]
+fn wipe_idle_bar() {
+    if state().spotlighted || state().flag_isset(ZERO) || screen_rows() == 1 {
+        if state().flag_isset(ZERO) && state().lastmessage > MessageType::Vacuum {
+            // C: wredrawln(midwin, editwinrows - 1, 1) -- clear the squeezed
+            // bottom edit row so the repaint below does not smear.
+            let (mid_x, mid_y, rows) =
+                with_state(|s| (s.midwin.x, s.midwin.y, s.editwinrows));
+            let mut stdout = out();
+            let _ = execute!(
+                stdout,
+                MoveTo(mid_x, mid_y + rows.saturating_sub(1) as u16),
+                Clear(ClearType::UntilNewLine)
+            );
+        }
+        state_mut().lastmessage = MessageType::Vacuum;
+        state_mut().spotlighted = false;
+        let current = with_state(|s| {
+            let line = s.openfile.as_ref().and_then(|f| f.current.clone());
+            let x = s.openfile.as_ref().map(|f| f.current_x).unwrap_or(0);
+            line.map(|line| (line, x))
+        });
+        if let Some((line, x)) = current {
+            update_line(&line, x);
+        }
+        let _ = execute!(out(), Show);
+    }
+    if state().flag_isset(MINIBAR) && !state().flag_isset(ZERO) && screen_rows() > 1 {
+        minibar();
+    }
+    state_mut().as_an_at = true;
+    place_the_cursor();
+    let _ = out().flush();
+}
+
 pub fn read_keys_from() {
     let mut stdout = out();
 
     // Flush any pending output before blocking
     let _ = stdout.flush();
+
+
 
     // Show cursor if appropriate
     let reveal = tl_get!(REVEAL_CURSOR);
@@ -1120,6 +1160,28 @@ pub fn read_keys_from() {
     // handler must not sit until the next keystroke (GNU nano dies promptly
     // on SIGTERM), so block in short poll slices and surface deferred signal
     // work between them.  Poll errors are EINTR from those same signals.
+    //
+    // Idle half-delay (#55): with a transient message or a search highlight
+    // showing on the main menu, stop waiting after nano's blank-delay period,
+    // wipe/cancel it, refresh, and only then block for real (C winio.c:210-
+    // 255: halfdelay(QUICK_BLANK ? 8 : 15)).
+    #[cfg(not(feature = "tiny"))]
+    let mut idle_deadline: Option<std::time::Instant> =
+        if currmenu == MMAIN
+            && (((state().flag_isset(MINIBAR)
+                || state().flag_isset(ZERO)
+                || lines == 1)
+                && lastmessage > MessageType::Hush
+                && lastmessage < MessageType::Alert
+                && lastmessage != MessageType::Info)
+                || spotlight)
+        {
+            let tenths: u64 = if state().flag_isset(QUICK_BLANK) { 800 } else { 1500 };
+            Some(std::time::Instant::now() + Duration::from_millis(tenths))
+        } else {
+            None
+        };
+
     let first_event = loop {
         crate::nano::process_pending_signal_requests();
         match event::poll(Duration::from_millis(100)) {
@@ -1128,7 +1190,16 @@ pub fn read_keys_from() {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => crate::nano::die("Too many errors from stdin"),
             },
-            Ok(false) => continue,
+            Ok(false) => {
+                #[cfg(not(feature = "tiny"))]
+                if let Some(deadline) = idle_deadline {
+                    if std::time::Instant::now() >= deadline {
+                        idle_deadline = None;
+                        wipe_idle_bar();
+                    }
+                }
+                continue;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => crate::nano::die("Too many errors from stdin"),
         }
