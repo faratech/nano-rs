@@ -2021,7 +2021,8 @@ pub fn mention_name_and_linecount() {
             let name = if filename.is_empty() {
                 "New Buffer"
             } else {
-                &filename
+                // C shows only the last path component here.
+                crate::utils::tail(&filename)
             };
             let format_name = if fmt == FormatType::DosFile {
                 "DOS"
@@ -2041,7 +2042,8 @@ pub fn mention_name_and_linecount() {
     let name = if filename.is_empty() {
         "New Buffer"
     } else {
-        &filename
+        // C shows only the last path component here.
+        crate::utils::tail(&filename)
     };
     let msg = if count == 1 {
         format!("{} -- {} line", name, count)
