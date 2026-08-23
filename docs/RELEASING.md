@@ -46,7 +46,25 @@ nano-rs ships with a cross-platform self-update capability:
   `~/.local/bin/nano` on Linux/Unix).
 - `nano --update` — query the GitHub Releases API and, if a newer release
   exists, download the matching asset and install it.
-- `nano --force` — with `--install`/`--update`, act even if already up to date.
+- `nano --check` — ask GitHub whether a newer release exists and print it.
+  Never downloads anything; ignores `NANO_UPDATE_CHECK`/`NANO_NO_UPDATE_CHECK`
+  and `--force`. Exit status: 0 (up to date or update available), 1 on fetch
+  failure. Only `--check`, `--install`, and `--update` count `--force`, and
+  only when it appears before the first FILE argument — a file named
+  `--force` is never mistaken for the flag.
+- **Rollback**: every install/update keeps the previous binary next to the
+  new one as `<name>.old` (e.g. `~/.local/bin/nano.old`). If a release misbehaves,
+  restore it manually:
+  ```sh
+  mv ~/.local/bin/nano.old ~/.local/bin/nano
+  ```
+  If an interrupted update ever leaves the target missing, the next launch
+  restores the `.old` automatically before doing anything else.
+- **Where updates land**: both the running executable (when its directory is
+  user-writable) and the managed install path, unless they are the same file.
+  A background download only happens when at least one of those applies, and
+  the statusbar notice says which model was used ("restart nano to apply"
+  versus "the installed copy was refreshed").
 - **Background check on launch**:
   - **On by default on every platform.** ~3 s after startup nano-rs checks for
     a newer release and, if one is found, downloads it and shows a status-bar
