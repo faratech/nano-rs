@@ -3700,14 +3700,21 @@ pub fn justify_text(whole_buffer: bool) {
         // false, so this branch is never taken; satisfy the compiler.
         #[cfg(feature = "tiny")]
         {
-            let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
-            startline = sl;
-            start_x = sx;
-            endline = el;
-            end_x = ex;
+            if let Some((sl, sx, el, ex)) = prepare_justify_region(whole_buffer, &mut linecount) {
+                startline = sl;
+                start_x = sx;
+                endline = el;
+                end_x = ex;
+            } else {
+                return;
+            }
         }
     } else {
-        let (sl, sx, el, ex) = prepare_justify_region(whole_buffer, &mut linecount);
+        let Some((sl, sx, el, ex)) = prepare_justify_region(whole_buffer, &mut linecount) else {
+            // No paragraph from the cursor to EOF: C just leaves the cursor
+            // at the end of the last line and skips the justification.
+            return;
+        };
         startline = sl;
         start_x = sx;
         endline = el;
@@ -3779,7 +3786,7 @@ fn get_region_as_lines() -> Option<(LinePtr, usize, LinePtr, usize)> {
 fn prepare_justify_region(
     whole_buffer: bool,
     linecount: &mut usize,
-) -> (LinePtr, usize, LinePtr, usize) {
+) -> Option<(LinePtr, usize, LinePtr, usize)> {
     if whole_buffer {
         let filetop = with_state(|s| {
             s.openfile
@@ -3843,14 +3850,9 @@ fn prepare_justify_region(
             discard_until(undotop_next);
         }
         state_mut().refresh_needed = true;
-        // Return dummy values; caller checks linecount.
-        let fl = with_state(|s| {
-            s.openfile
-                .as_ref()
-                .and_then(|f| f.filebot.clone())
-                .expect("a bottom line")
-        });
-        return (fl.clone(), 0, fl, 0);
+        // Nothing to justify: the caller must stop here (C returns without
+        // running the justification or touching the undo stack further).
+        return None;
     }
 
     with_state_mut(|s| {
@@ -3888,7 +3890,7 @@ fn prepare_justify_region(
         }
     };
 
-    (startline, start_x, endline, end_x)
+    Some((startline, start_x, endline, end_x))
 }
 
 #[cfg(feature = "justify")]
@@ -5887,6 +5889,50 @@ mod tests {
         assert_eq!(active_line.borrow().data, "hello");
         assert_eq!(state().buffer_ring.len(), 1);
         assert_eq!(state().openfile.as_ref().unwrap().current_x, 5);
+    }
+
+    #[cfg(all(feature = "justify", not(feature = "tiny")))]
+    #[test]
+    fn justify_without_paragraph_skips_the_work() {
+        // Issue #62: with no paragraph from the cursor onwards, ^J used to
+        // run a phantom justification and flag the buffer modified.
+        let undo_depth = || -> usize {
+            let s = state();
+            let buffer = s.openfile.as_ref().unwrap();
+            let mut n = 0usize;
+            let mut cursor: Option<&crate::definitions::UndoStruct> = buffer.undotop.as_deref();
+            while let Some(u) = cursor {
+                n += 1;
+                cursor = u.next.as_deref();
+            }
+            n
+        };
+
+        for data in ["", "   "] {
+            let line = install_buffer(data, 0);
+            let before_undos = undo_depth();
+            let was_modified = state().openfile.as_ref().unwrap().modified;
+
+            justify_text(false);
+
+            assert_eq!(
+                undo_depth(),
+                before_undos,
+                "a failed justify must leave no undo records (input {data:?})"
+            );
+            assert_eq!(
+                state().openfile.as_ref().unwrap().modified,
+                was_modified,
+                "a failed justify must not flag the buffer modified"
+            );
+            assert_eq!(
+                line.borrow().data.as_bytes().len(),
+                data.len(),
+                "line content must be untouched"
+            );
+            // The cursor lands at the end of the last line.
+            assert_eq!(state().openfile.as_ref().unwrap().current_x, data.len());
+        }
     }
 }
 
