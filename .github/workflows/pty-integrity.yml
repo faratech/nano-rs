@@ -42,13 +42,21 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-pty-broad-${{ hashFiles('Cargo.toml') }}
 
-      - name: Install GNU nano reference
+      - name: Build pinned GNU nano reference
+        # The runner image's nano moves underneath us (an image bump changes
+        # reference behavior and reds the suite). Build a fixed version from
+        # source so both sides of the comparison are reproducible.
         run: |
-          if [ ! -x /usr/bin/nano ]; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends nano
-          fi
-          /usr/bin/nano --version | grep -m1 'GNU nano'
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential ncurses-dev
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/nano.tar.xz" \
+            https://ftp.gnu.org/gnu/nano/nano-7.2.tar.xz
+          tar -xJ -C "$RUNNER_TEMP" -f "$RUNNER_TEMP/nano.tar.xz"
+          cd "$RUNNER_TEMP/nano-7.2"
+          ./configure --prefix="$RUNNER_TEMP/nano-ref" --disable-nls >/dev/null
+          make -j2 >/dev/null
+          make install >/dev/null
+          "$RUNNER_TEMP/nano-ref/bin/nano" --version | grep -m1 'GNU nano'
 
       - name: Build release candidate
         run: cargo build --release --verbose
@@ -61,7 +69,7 @@ jobs:
           seed="${REQUESTED_SEED:-0x4E414E4F}"
           python3 scripts/pty_integrity.py \
             --candidate ./target/release/nano \
-            --reference /usr/bin/nano \
+            --reference "$RUNNER_TEMP/nano-ref/bin/nano" \
             --profile broad \
             --seed "$seed" \
             --artifact-dir artifacts/pty-integrity
