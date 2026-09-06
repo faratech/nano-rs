@@ -123,6 +123,22 @@ jobs:
           MESSAGE=$(git tag -l --format='%(contents)' "$TAG")
           # Write to file to preserve newlines
           echo "$MESSAGE" > release_notes.md
+          cat >> release_notes.md << 'EOF'
+
+### Verification
+
+All release binaries are verified with GitHub artifact attestation:
+
+```bash
+# Windows
+gh attestation verify nano-amd64.exe --owner faratech
+gh attestation verify nano-arm64.exe --owner faratech
+
+# Linux
+gh attestation verify nano-linux-amd64 --owner faratech
+gh attestation verify nano-linux-arm64 --owner faratech
+```
+EOF
           echo "Generated release notes for $TAG"
 
       - name: Generate SHA-256 manifest
