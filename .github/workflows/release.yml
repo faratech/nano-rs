@@ -16,11 +16,43 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    name: Preflight validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Validate tag matches Cargo.toml version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d '"' -f 2)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          STRIPPED_TAG="${TAG#v}"
+          if [ "$STRIPPED_TAG" != "$VERSION" ]; then
+            echo "Error: Tag $TAG does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+          if ! echo "$STRIPPED_TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: Version must be SemVer MAJOR.MINOR.PATCH (got '$STRIPPED_TAG')"
+            exit 1
+          fi
+          echo "Validated: Tag $TAG matches Cargo.toml version $VERSION ($STRIPPED_TAG)"
+
   build:
+    needs: preflight
+    env:
+      __COMPAT_LAYER: RunAsInvoker
     strategy:
       fail-fast: false
       matrix:
