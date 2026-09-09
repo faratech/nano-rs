@@ -1,0 +1,19 @@
+{
+  "repository": "faratech/nano-rs",
+  "releases": {
+    "v0.0.16": [
+      {
+        "name": "nano-amd64.exe",
+        "sha256": "c3a0d797faa1f7f158b727695527b5f73d32761b7c075a33ec2258b5fff03eb0"
+      },
+      {
+        "name": "nano-arm64.exe",
+        "sha256": "1953095aff09f05b1467c26922de5121d86b0148e5e5f0a8cdc925ed733412fd"
+      },
+      {
+        "name": "nano-checksums.txt",
+        "sha256": "81e4c1ef6faa5d4d17572cf2f6e9cea2b45b9792583559e6eea4bebb4f3171a8"
+      }
+    ]
+  }
+}
