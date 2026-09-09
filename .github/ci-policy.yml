@@ -1,0 +1,4 @@
+version: 1
+workflows:
+  .github/workflows/ci.yml: fast
+  .github/workflows/pty-integrity.yml: deep

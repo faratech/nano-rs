@@ -1,10 +1,14 @@
 name: CI
 
 on:
-  push:
-    branches: [master, rust-port]
   pull_request:
     branches: [master, rust-port]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 1'
 
 permissions:
   contents: read
@@ -18,6 +22,7 @@ env:
 
 jobs:
   default:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     name: Default tests, Clippy, and release build
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -116,11 +121,13 @@ jobs:
           retention-days: 14
 
   feature-matrix:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Feature tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - name: no-default-features
@@ -162,6 +169,7 @@ jobs:
         run: cargo test --all-targets ${{ matrix.cargo_args }} --verbose
 
   vendored-crossterm:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Vendored Crossterm parser and event-source tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -202,6 +210,7 @@ jobs:
           cargo clippy --manifest-path vendor/crossterm-0.29.0/Cargo.toml --all-targets --no-default-features -- -D warnings
 
   windows-msvc:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Windows MSVC native tests
     runs-on: windows-latest
     timeout-minutes: 30
@@ -236,6 +245,7 @@ jobs:
         run: cargo check --all-targets --target x86_64-pc-windows-msvc --no-default-features --verbose
 
   miri:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Miri state, text, cut, multibuffer, rendering, and input soundness
     runs-on: ubuntu-latest
     timeout-minutes: 30
