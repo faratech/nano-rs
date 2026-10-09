@@ -1226,6 +1226,15 @@ pub fn do_prompt(
 
 const UNDECIDED: i32 = -2;
 
+/// The question as drawn on the prompt bar: cropped to the screen width, with
+/// control characters shown as ^X the way ncurses' waddnstr() rendered them
+/// for C nano.  Callers embed untrusted text in the question (the user and
+/// program fields of a lock file, filenames reported by a linter), so the
+/// raw bytes must never reach the terminal.
+fn yesno_question_text(question: &str, cols: usize) -> String {
+    display_string(question, 0, cols.saturating_sub(1), false, false)
+}
+
 /* C: int ask_user(bool withall, const char *question) */
 /// Ask a simple Yes/No (and optionally All) question on the status bar
 /// and return the choice — either YES or NO or ALL or CANCEL.
@@ -1285,8 +1294,7 @@ pub fn ask_user(withall: bool, question: &str) -> i32 {
         let cols = crate::winio::get_cols();
         crate::winio::footwin_wattron(prompt_bar_pair);
         crate::winio::footwin_mvwprintw_spaces(0, 0, cols);
-        let qlen = actual_x(question, cols.saturating_sub(1));
-        crate::winio::footwin_mvwaddnstr(0, 0, question, qlen);
+        crate::winio::footwin_mvwaddstr(0, 0, &yesno_question_text(question, cols));
         crate::winio::footwin_wattroff(prompt_bar_pair);
         crate::winio::footwin_wnoutrefresh();
 
@@ -1521,6 +1529,23 @@ mod tests {
 
     fn generic_prompt_action() {
         GENERIC_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn yesno_question_shows_control_bytes_as_carets() {
+        let question = "File .x.swp is being edited by \x1b]0;pwned\x07mallory \
+                        (with \u{9b}2J\x1b[8m, PID 1); open anyway?";
+        let shown = yesno_question_text(question, 200);
+
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(shown.starts_with("File .x.swp is being edited by ^[]0;pwned^Gmallory"));
+        assert!(shown.ends_with("open anyway?"));
+    }
+
+    #[test]
+    fn yesno_question_is_cropped_to_the_screen() {
+        let shown = yesno_question_text("Save modified buffer? ", 10);
+        assert_eq!(shown, "Save modi");
     }
 
     #[test]
