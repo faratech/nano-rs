@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Version bumping script for nano-rs.
-Updates version in Cargo.toml and media/nano.rc
+Updates version in Cargo.toml, Cargo.lock and media/nano.rc
 """
 
 import re
@@ -11,6 +11,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 CARGO_TOML = PROJECT_DIR / "Cargo.toml"
+CARGO_LOCK = PROJECT_DIR / "Cargo.lock"
 RESOURCE_FILE = PROJECT_DIR / "media" / "nano.rc"
 
 
@@ -62,6 +63,33 @@ def update_cargo_toml(old_version: str, new_version: str) -> bool:
 
     CARGO_TOML.write_text(new_content)
     print(f"  Updated Cargo.toml")
+    return True
+
+
+def update_cargo_lock(old_version: str, new_version: str) -> bool:
+    """Update the nano package entry in Cargo.lock.
+
+    Release builds use `cargo build --locked`, which fails if the lockfile's
+    own package version no longer matches Cargo.toml.
+    """
+    if not CARGO_LOCK.exists():
+        print(f"  Warning: {CARGO_LOCK} not found, skipping")
+        return False
+
+    content = CARGO_LOCK.read_text()
+    new_content = re.sub(
+        r'(\[\[package\]\]\nname = "nano"\nversion = )"[^"]+"',
+        f'\\1"{new_version}"',
+        content,
+        count=1
+    )
+
+    if content == new_content:
+        print(f"  Warning: Cargo.lock was not modified")
+        return False
+
+    CARGO_LOCK.write_text(new_content)
+    print(f"  Updated Cargo.lock")
     return True
 
 
@@ -152,6 +180,7 @@ def main():
 
     print()
     update_cargo_toml(current_version, new_version)
+    update_cargo_lock(current_version, new_version)
     update_resource_file(current_version, new_version)
 
     print(f"\nDone! Version bumped to {new_version}")
