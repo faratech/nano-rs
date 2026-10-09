@@ -6493,9 +6493,23 @@ mod tests {
 
         let mut staging = create_staging_file(&root_path, ".nano-test.").unwrap();
         staging.as_file_mut().write_all(b"candidate").unwrap();
-        let held_parent = super::OPERATING_ROOT
-            .with(|slot| slot.borrow().as_ref().unwrap().dir.open_dir("nested"))
-            .unwrap();
+        // cap-std opens directories without FILE_SHARE_DELETE, so while
+        // nano holds the parent nobody can rename it (ERROR_SHARING_VIOLATION).
+        // To stage the swap at all, hold this parent with delete sharing --
+        // the most permissive handle the rename could be given.
+        let held_parent = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .open(&nested)
+                .unwrap();
+            cap_std::fs::Dir::from_std_file(directory)
+        };
 
         // Issue #84: after the parent was resolved, its name is redirected
         // through a junction to a directory outside the operating root.
