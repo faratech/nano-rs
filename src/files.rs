@@ -4340,7 +4340,13 @@ pub fn write_file(
     if let Some(checked) = checked {
         block_sigwinch(true);
         install_handler_for_Ctrl_C();
-        let opened = open_checked_target(&realname, checked, method, ISSET!(MAKE_BACKUP));
+        // Read access only serves the backup, which is never made of a FIFO;
+        // O_RDWR would also stop the open from waiting for the FIFO's reader.
+        let readable = ISSET!(MAKE_BACKUP)
+            && !path_info(&realname)
+                .map(|info| info.is_fifo)
+                .unwrap_or(false);
+        let opened = open_checked_target(&realname, checked, method, readable);
         restore_handler_for_Ctrl_C();
         block_sigwinch(false);
         match opened {
@@ -4354,9 +4360,16 @@ pub fn write_file(
             }
         }
     }
+    // Truncate only what O_TRUNC would: a regular file.  The kernel ignores
+    // O_TRUNC on a FIFO or device, but ftruncate() fails there with EINVAL,
+    // which would refuse a save to a FIFO that upstream performs.
     #[cfg(not(feature = "tiny"))]
     let truncate_bound = method == KindOfWritingType::Overwrite
-        && matches!(checked, Some(CheckedTarget::Existing { .. }));
+        && matches!(checked, Some(CheckedTarget::Existing { .. }))
+        && bound_file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .is_none_or(|meta| meta.is_file());
 
     // Make backup if needed
     #[cfg(not(feature = "tiny"))]
@@ -6829,6 +6842,37 @@ mod tests {
             false
         ));
         assert_eq!(std::fs::read(&victim).unwrap(), b"not yours\n");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn checked_overwrite_still_writes_to_a_fifo() {
+        use super::{checked_target_of, remember_checked_target, write_file};
+        use crate::definitions::KindOfWritingType;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+
+        // Writing a buffer into a named pipe works upstream (O_TRUNC is
+        // ignored there); binding the save must not turn it into EINVAL from
+        // truncating a non-regular file.
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("pipe");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        install_new_contents_buffer();
+
+        let reader_path = fifo.clone();
+        let reader = std::thread::spawn(move || std::fs::read(reader_path).unwrap());
+        remember_checked_target(&fifo, checked_target_of(&fifo));
+        let saved = write_file(&fifo, None, true, KindOfWritingType::Overwrite, false);
+        if !saved {
+            // Give the blocked reader its writer so the test reports, not hangs.
+            drop(std::fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        let received = reader.join().unwrap();
+
+        assert!(saved);
+        assert_eq!(received, b"new contents\n");
     }
 
     #[cfg(all(unix, not(feature = "tiny")))]
