@@ -1430,6 +1430,45 @@ pub fn do_lockfile(filename: &Path, ask_the_user: bool) -> Result<Option<(PathBu
     Ok(create_lockfile(&lockfilename, filename, false).map(|lockfile| (lockfilename, lockfile)))
 }
 
+/// The FileStat of an already-open file (fstat), so that what is recorded or
+/// compared describes that object rather than whatever its name resolves to.
+#[cfg(not(feature = "tiny"))]
+fn file_stat_of(file: &File) -> Option<FileStat> {
+    file.metadata()
+        .ok()
+        .map(|meta| file_stat_from_metadata(&meta))
+}
+
+#[cfg(all(not(feature = "tiny"), not(unix)))]
+fn file_stat_from_metadata(meta: &std::fs::Metadata) -> FileStat {
+    FileStat {
+        st_mtime: meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        st_dev: 0,
+        st_ino: 0,
+    }
+}
+
+#[cfg(all(not(feature = "tiny"), unix))]
+fn file_stat_from_metadata(meta: &std::fs::Metadata) -> FileStat {
+    use std::os::unix::fs::MetadataExt;
+    FileStat {
+        st_mtime: meta.mtime(),
+        st_dev: meta.dev(),
+        st_ino: meta.ino(),
+        st_uid: meta.uid(),
+        st_gid: meta.gid(),
+        st_mode: meta.mode(),
+        st_atime: meta.atime(),
+        st_atime_nsec: meta.atime_nsec() as i64,
+        st_mtime_nsec: meta.mtime_nsec() as i64,
+    }
+}
+
 /* C: void stat_with_alloc(const char *filename, struct stat **pstat)
  * Perform a stat call on the given filename.  On success, *pstat points to
  * the stat's result.  On failure, *pstat is freed and made NULL. */
@@ -1438,7 +1477,6 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
     let filename = filename.as_ref();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         #[cfg(feature = "operatingdir")]
         if let Some(result) =
             with_operating_root(filename, |root, relative| root.dir.metadata(relative))
@@ -1459,20 +1497,9 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
         if operating_root_required_but_unavailable() {
             return None;
         }
-        match std::fs::metadata(filename) {
-            Ok(meta) => Some(FileStat {
-                st_mtime: meta.mtime(),
-                st_dev: meta.dev(),
-                st_ino: meta.ino(),
-                st_uid: meta.uid(),
-                st_gid: meta.gid(),
-                st_mode: meta.mode(),
-                st_atime: meta.atime(),
-                st_atime_nsec: meta.atime_nsec() as i64,
-                st_mtime_nsec: meta.mtime_nsec() as i64,
-            }),
-            Err(_) => None,
-        }
+        std::fs::metadata(filename)
+            .ok()
+            .map(|meta| file_stat_from_metadata(&meta))
     }
     #[cfg(not(unix))]
     {
@@ -1494,19 +1521,9 @@ pub fn stat_with_alloc(filename: impl AsRef<Path>) -> Option<FileStat> {
         if operating_root_required_but_unavailable() {
             return None;
         }
-        match std::fs::metadata(filename) {
-            Ok(meta) => Some(FileStat {
-                st_mtime: meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0),
-                st_dev: 0,
-                st_ino: 0,
-            }),
-            Err(_) => None,
-        }
+        std::fs::metadata(filename)
+            .ok()
+            .map(|meta| file_stat_from_metadata(&meta))
     }
 }
 
@@ -3941,6 +3958,14 @@ fn backup_path_key(path: &Path) -> String {
 
 #[cfg(not(feature = "tiny"))]
 pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
+    make_backup_from(realname, fileinfo, None)
+}
+
+/// As make_backup_of(), reading the original from `source` when given -- the
+/// descriptor write_file() already bound to the checked file -- instead of
+/// opening `realname` again.
+#[cfg(not(feature = "tiny"))]
+fn make_backup_from(realname: &Path, fileinfo: &FileStat, source: Option<&File>) -> bool {
     statusbar("Making backup...");
 
     let backup_dir = state().backup_dir.clone();
@@ -4008,7 +4033,13 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
             }};
         }
 
-        let mut original = match open_path(realname) {
+        let original = match source {
+            Some(file) => file
+                .try_clone()
+                .and_then(|mut file| file.seek(SeekFrom::Start(0)).map(|_| file)),
+            None => open_path(realname),
+        };
+        let mut original = match original {
             Ok(file) => file,
             Err(error) => bail!(format!("Cannot read original file: {}", error), error),
         };
@@ -4110,6 +4141,108 @@ pub fn make_backup_of(realname: &Path, fileinfo: &FileStat) -> bool {
 //                    kind_of_writing_type method, bool annotate)
 // ---------------------------------------------------------------------------
 
+/// What `write_it_out()` saw at the destination when the user confirmed the
+/// save -- and what its "File exists; OVERWRITE?" and "File was modified
+/// since you opened it" checks were about.  `write_file()` binds its open to
+/// this, so a name swapped for a symlink or another file in the meantime
+/// cannot redirect the truncate or append (#79).
+#[cfg(not(feature = "tiny"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckedTarget {
+    /// The name did not exist: create it exclusively.
+    Absent,
+    /// The name resolved (following symlinks, as the save itself does) to
+    /// this file.
+    Existing { dev: u64, ino: u64 },
+}
+
+#[cfg(not(feature = "tiny"))]
+thread_local! {
+    static CHECKED_TARGET: std::cell::RefCell<Option<(PathBuf, CheckedTarget)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Snapshot the destination.  A dangling symlink gives `None`, which keeps
+/// upstream's plain create-through-the-link behavior.
+#[cfg(not(feature = "tiny"))]
+fn checked_target_of(path: &Path) -> Option<CheckedTarget> {
+    match path_exists_nofollow(path) {
+        Ok(false) => Some(CheckedTarget::Absent),
+        Ok(true) => stat_with_alloc(path).map(|st| CheckedTarget::Existing {
+            dev: st.st_dev,
+            ino: st.st_ino,
+        }),
+        Err(_) => None,
+    }
+}
+
+#[cfg(not(feature = "tiny"))]
+fn remember_checked_target(path: &Path, checked: Option<CheckedTarget>) {
+    let entry = checked.map(|checked| (expand_leading_tilde_path(path), checked));
+    CHECKED_TARGET.with(|slot| *slot.borrow_mut() = entry);
+}
+
+#[cfg(not(feature = "tiny"))]
+fn take_checked_target(realname: &Path) -> Option<CheckedTarget> {
+    CHECKED_TARGET
+        .with(|slot| slot.borrow_mut().take())
+        .and_then(|(path, checked)| (path == realname).then_some(checked))
+}
+
+/// Open the destination of a normal overwrite or append as the object that
+/// was checked: create it exclusively if it was absent, otherwise open it
+/// without truncating and require its (dev, ino) to match before anything is
+/// written.  The caller truncates through the returned descriptor.
+#[cfg(not(feature = "tiny"))]
+fn open_checked_target(
+    path: &Path,
+    checked: CheckedTarget,
+    method: KindOfWritingType,
+    readable: bool,
+) -> io::Result<File> {
+    match checked {
+        CheckedTarget::Absent => open_path_with(
+            path,
+            PathOpenOptions {
+                write: true,
+                create_new: true,
+                mode: 0o666,
+                ..PathOpenOptions::default()
+            },
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "file appeared after it was checked; not overwritten",
+                )
+            } else {
+                error
+            }
+        }),
+        CheckedTarget::Existing { dev, ino } => {
+            let file = open_path_with(
+                path,
+                PathOpenOptions {
+                    read: readable,
+                    write: true,
+                    append: method == KindOfWritingType::Append,
+                    ..PathOpenOptions::default()
+                },
+            )?;
+            let opened = file_stat_of(&file)
+                .ok_or_else(|| io::Error::other("cannot stat the opened file"))?;
+            // Windows FileStat carries no file identity (both are 0).
+            if (opened.st_dev, opened.st_ino) != (dev, ino) {
+                return Err(io::Error::other(
+                    "file was replaced after it was checked; not saved",
+                ));
+            }
+            Ok(file)
+        }
+    }
+}
+
 /// Whether this error is the disk being full (C compares errno == ENOSPC).
 #[cfg(not(feature = "tiny"))]
 fn is_enospc_error(error: &io::Error) -> bool {
@@ -4189,6 +4322,42 @@ pub fn write_file(
     #[cfg(not(feature = "tiny"))]
     let is_existing_file = { normal && path_info(&realname).is_ok() };
 
+    // A normal overwrite or append of what write_it_out() checked is opened
+    // here, before the backup, and bound to that object; the backup is then
+    // read from the same descriptor.
+    #[cfg(not(feature = "tiny"))]
+    let checked = take_checked_target(&realname).filter(|_| {
+        normal
+            && thefile.is_none()
+            && matches!(
+                method,
+                KindOfWritingType::Overwrite | KindOfWritingType::Append
+            )
+    });
+    #[cfg(not(feature = "tiny"))]
+    let mut bound_file: Option<File> = None;
+    #[cfg(not(feature = "tiny"))]
+    if let Some(checked) = checked {
+        block_sigwinch(true);
+        install_handler_for_Ctrl_C();
+        let opened = open_checked_target(&realname, checked, method, ISSET!(MAKE_BACKUP));
+        restore_handler_for_Ctrl_C();
+        block_sigwinch(false);
+        match opened {
+            Ok(file) => bound_file = Some(file),
+            Err(e) => {
+                statusline(
+                    MessageType::Alert,
+                    &format!("Error writing {}: {}", realname_str, e),
+                );
+                return false;
+            }
+        }
+    }
+    #[cfg(not(feature = "tiny"))]
+    let truncate_bound = method == KindOfWritingType::Overwrite
+        && matches!(checked, Some(CheckedTarget::Existing { .. }));
+
     // Make backup if needed
     #[cfg(not(feature = "tiny"))]
     if ISSET!(MAKE_BACKUP) && is_existing_file {
@@ -4197,8 +4366,12 @@ pub fn write_file(
             .map(|info| info.is_fifo)
             .unwrap_or(false);
         if !is_fifo {
-            if let Some(st) = stat_with_alloc(&realname) {
-                if !make_backup_of(&realname, &st) {
+            let fileinfo = match bound_file.as_ref() {
+                Some(file) => file_stat_of(file),
+                None => stat_with_alloc(&realname),
+            };
+            if let Some(st) = fileinfo {
+                if !make_backup_from(&realname, &st, bound_file.as_ref()) {
                     return false;
                 }
             }
@@ -4284,6 +4457,8 @@ pub fn write_file(
     };
     #[cfg(feature = "tiny")]
     let staged_output: Option<File> = None;
+    #[cfg(not(feature = "tiny"))]
+    let staged_output = staged_output.or(bound_file);
 
     let mut the_file: File = match staged_output.or(thefile) {
         Some(f) => f,
@@ -4353,6 +4528,22 @@ pub fn write_file(
             }
         }
     };
+
+    // The checked file was opened without O_TRUNC; empty it only now that
+    // the descriptor is known to be that file (and the backup is taken).
+    #[cfg(not(feature = "tiny"))]
+    if truncate_bound {
+        if let Err(e) = the_file
+            .set_len(0)
+            .and_then(|_| the_file.seek(SeekFrom::Start(0)).map(|_| ()))
+        {
+            statusline(
+                MessageType::Alert,
+                &format!("Error writing {}: {}", realname_str, e),
+            );
+            return false;
+        }
+    }
 
     if normal {
         statusbar("Writing...");
@@ -4535,6 +4726,9 @@ pub fn write_file(
 
         return false;
     }
+    #[cfg(not(feature = "tiny"))]
+    #[allow(unused_mut)]
+    let mut written_stat = file_stat_of(&the_file);
     drop(the_file);
 
     #[cfg(not(feature = "tiny"))]
@@ -4602,7 +4796,7 @@ pub fn write_file(
         }
 
         match staging.persist(&realname) {
-            Ok(file) => drop(file),
+            Ok(file) => written_stat = file_stat_of(&file),
             Err(error) => {
                 statusline(
                     MessageType::Alert,
@@ -4710,9 +4904,10 @@ pub fn write_file(
             }
         }
 
+        // Record the file that was written, not whatever the name means now.
         #[cfg(not(feature = "tiny"))]
         {
-            let st = stat_with_alloc(&realname);
+            let st = written_stat.or_else(|| stat_with_alloc(&realname));
             with_state_mut(|s| {
                 if let Some(ref mut of) = s.openfile {
                     of.statinfo = st;
@@ -4901,6 +5096,8 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
 
     #[cfg(feature = "extra")]
     let mut did_credits = false;
+    #[cfg(not(feature = "tiny"))]
+    let mut checked: Option<CheckedTarget> = None;
 
     loop {
         let response: i32;
@@ -5110,6 +5307,18 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
             }
         }
 
+        // What the destination is right now, before any of the questions
+        // below are asked about it; write_file() refuses to write anything
+        // else (#79).
+        #[cfg(not(feature = "tiny"))]
+        {
+            checked = if method == KindOfWritingType::Prepend {
+                None
+            } else {
+                checked_target_of(&answer_target_path(&answer2))
+            };
+        }
+
         if method == KindOfWritingType::Overwrite {
             let full_answer = get_full_path(&answer2);
             let full_filename = with_state(|s| {
@@ -5230,6 +5439,7 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
                                             .unwrap_or_default()
                                     });
                                     if choice == YES {
+                                        remember_checked_target(&fname, checked);
                                         return write_file(
                                             &fname,
                                             None,
@@ -5261,17 +5471,9 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
     // when it names the buffer's own file, substitute the authoritative path so
     // a non-UTF-8 filename round-trips to the exact original byte sequence.
     let final_answer = state().answer.clone();
-    let target: PathBuf = with_state(|s| {
-        s.openfile.as_ref().and_then(|of| {
-            let path = openfile_filename_path(of)?;
-            if of.filename == final_answer {
-                Some(path.to_path_buf())
-            } else {
-                None
-            }
-        })
-    })
-    .unwrap_or_else(|| PathBuf::from(&final_answer));
+    let target = answer_target_path(&final_answer);
+    #[cfg(not(feature = "tiny"))]
+    remember_checked_target(&target, checked);
 
     #[cfg(not(feature = "tiny"))]
     {
@@ -5287,6 +5489,23 @@ pub fn write_it_out(exiting: bool, withprompt: bool) -> i32 {
     }
 
     write_file(&target, None, NORMAL, method, ANNOTATE) as i32
+}
+
+/// The path a save to `answer` writes: the buffer's own authoritative path
+/// when the answer names it (so a non-UTF-8 name round-trips), else the
+/// answer itself.
+fn answer_target_path(answer: &str) -> PathBuf {
+    with_state(|s| {
+        s.openfile.as_ref().and_then(|of| {
+            let path = openfile_filename_path(of)?;
+            if of.filename == answer {
+                Some(path.to_path_buf())
+            } else {
+                None
+            }
+        })
+    })
+    .unwrap_or_else(|| PathBuf::from(answer))
 }
 
 /* C: void do_writeout(void)
@@ -6537,6 +6756,126 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".nano-prepend.")
         }));
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    fn install_new_contents_buffer() {
+        use super::{make_new_buffer, make_new_node};
+        use crate::global::{state, state_mut, with_state_mut};
+
+        state_mut().flags = [0; 4];
+        make_new_buffer();
+        let first = state().openfile.as_ref().unwrap().filetop.clone().unwrap();
+        first.borrow_mut().data = "new contents".into();
+        let end = make_new_node(Some(first.clone()));
+        end.borrow_mut().lineno = 2;
+        first.borrow_mut().next = Some(end.clone());
+        with_state_mut(|editor| editor.openfile.as_mut().unwrap().filebot = Some(end));
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn checked_overwrite_and_append_refuse_a_destination_swapped_for_a_symlink() {
+        use super::{checked_target_of, remember_checked_target, write_file};
+        use crate::definitions::KindOfWritingType;
+        use std::os::unix::fs::symlink;
+
+        // write_file swaps the SIGINT handler around the open; keep the
+        // command tests (which raise SIGINT) from overlapping with that.
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+
+        // Issue #79: the prompts check the name, then the save re-opens it.
+        // A swap in between must not truncate or append to another file.
+        for method in [KindOfWritingType::Overwrite, KindOfWritingType::Append] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("document");
+            let victim = directory.path().join("victim");
+            std::fs::write(&target, b"old contents\n").unwrap();
+            std::fs::write(&victim, b"not yours\n").unwrap();
+            install_new_contents_buffer();
+
+            remember_checked_target(&target, checked_target_of(&target));
+            std::fs::rename(&target, directory.path().join("moved")).unwrap();
+            symlink(&victim, &target).unwrap();
+
+            assert!(!write_file(&target, None, true, method, false));
+            assert_eq!(std::fs::read(&victim).unwrap(), b"not yours\n");
+        }
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn checked_save_to_a_new_name_does_not_follow_a_planted_symlink() {
+        use super::{checked_target_of, remember_checked_target, write_file};
+        use crate::definitions::KindOfWritingType;
+        use std::os::unix::fs::symlink;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("new-document");
+        let victim = directory.path().join("victim");
+        std::fs::write(&victim, b"not yours\n").unwrap();
+        install_new_contents_buffer();
+
+        remember_checked_target(&target, checked_target_of(&target));
+        symlink(&victim, &target).unwrap();
+
+        assert!(!write_file(
+            &target,
+            None,
+            true,
+            KindOfWritingType::Overwrite,
+            false
+        ));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"not yours\n");
+    }
+
+    #[cfg(all(unix, not(feature = "tiny")))]
+    #[test]
+    fn checked_overwrite_writes_through_an_opened_symlink_and_backs_up_from_it() {
+        use super::{checked_target_of, remember_checked_target, write_file};
+        use crate::definitions::{KindOfWritingType, MAKE_BACKUP};
+        use crate::global::{flag_index, flag_mask, state, state_mut};
+        use std::os::unix::fs::MetadataExt;
+
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
+
+        // A deliberately edited symlink (dotfiles) keeps saving through the
+        // link: the check compares the identity after resolution.
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let link = directory.path().join("link");
+        std::fs::write(&real, b"old contents\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        install_new_contents_buffer();
+        state_mut().flags[flag_index(MAKE_BACKUP)] |= flag_mask(MAKE_BACKUP);
+        state_mut().backup_dir = None;
+
+        remember_checked_target(&link, checked_target_of(&link));
+        assert!(write_file(
+            &link,
+            None,
+            true,
+            KindOfWritingType::Overwrite,
+            true
+        ));
+        state_mut().flags = [0; 4];
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), b"new contents\n");
+        assert_eq!(
+            std::fs::read(directory.path().join("link~")).unwrap(),
+            b"old contents\n"
+        );
+        // statinfo describes the file that was written.
+        let recorded = state().openfile.as_ref().unwrap().statinfo.clone().unwrap();
+        assert_eq!(recorded.st_ino, std::fs::metadata(&real).unwrap().ino());
     }
 
     #[cfg(all(unix, not(feature = "tiny")))]
