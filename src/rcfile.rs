@@ -1983,13 +1983,48 @@ fn parse_includes(ptr: &str) {
 
     // Expand leading tilde
     let expanded = crate::files::expand_leading_tilde(pattern);
+    let anchored = anchor_include_pattern(&expanded, get_nanorc().as_deref());
 
     // Glob expansion
-    let glob_results = expand_glob(&expanded);
+    let glob_results = expand_glob(&anchored);
 
     for file_path in &glob_results {
         parse_one_include(file_path, false);
     }
+}
+
+/// Resolve a relative include pattern against the directory of the rc file
+/// that contains it, instead of against the current working directory.
+///
+/// GNU nano globs the raw pattern, so `include "syntax/*.nanorc"` picks up
+/// whatever the directory nano was started in provides -- including syntax
+/// files whose `linter`/`formatter` commands then run on ^T.  Anchoring at the
+/// rc file keeps absolute and `~/` patterns unchanged and makes relative ones
+/// mean what they appear to mean.  Glob metacharacters in the rc file's own
+/// directory are escaped so that only the user's pattern is a pattern.
+fn anchor_include_pattern(pattern: &str, rcfile: Option<&str>) -> String {
+    let as_path = Path::new(pattern);
+    if as_path.is_absolute() || as_path.has_root() {
+        return pattern.to_string();
+    }
+
+    let directory = match rcfile.and_then(|rc| Path::new(rc).parent()) {
+        Some(directory) if !directory.as_os_str().is_empty() => directory,
+        // An rc file given by a bare relative name lives in the current
+        // directory, so relative to it and relative to the CWD coincide.
+        _ => return pattern.to_string(),
+    };
+
+    let directory = directory.to_string_lossy();
+    let directory = if pattern.contains(['*', '?', '[']) {
+        glob::Pattern::escape(&directory)
+    } else {
+        directory.into_owned()
+    };
+    Path::new(&directory)
+        .join(pattern)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// POSIX-like glob expansion.  Literal separators and leading dots must be
@@ -2774,7 +2809,7 @@ pub fn do_rcfiles() {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "color")]
-    use super::{compile, expand_glob};
+    use super::{anchor_include_pattern, compile, expand_glob};
 
     #[cfg(feature = "nanorc")]
     fn reset_binding_test_state(menu: u32) {
@@ -2818,6 +2853,89 @@ mod tests {
                 .iter()
                 .any(|path| path.contains(".hidden"))
         );
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn relative_include_patterns_are_anchored_at_the_rc_file() {
+        assert_eq!(
+            anchor_include_pattern("/usr/share/nano/*.nanorc", Some("/etc/nanorc")),
+            "/usr/share/nano/*.nanorc"
+        );
+        assert_eq!(
+            anchor_include_pattern("syntax/*.nanorc", Some("/home/u/.config/nano/nanorc")),
+            "/home/u/.config/nano/syntax/*.nanorc"
+        );
+        assert_eq!(
+            anchor_include_pattern("c.nanorc", Some("/home/u/rc[1]/nanorc")),
+            "/home/u/rc[1]/c.nanorc"
+        );
+        assert_eq!(
+            anchor_include_pattern("*.nanorc", Some("/home/u/rc[1]/nanorc")),
+            "/home/u/rc[[]1[]]/*.nanorc"
+        );
+        // An rc file named relative to the CWD keeps CWD-relative includes.
+        assert_eq!(anchor_include_pattern("*.nanorc", Some("myrc")), "*.nanorc");
+        assert_eq!(anchor_include_pattern("*.nanorc", None), "*.nanorc");
+    }
+
+    #[cfg(feature = "color")]
+    #[test]
+    fn relative_includes_load_syntaxes_beside_the_rc_file_not_the_cwd() {
+        // Issue #82: a relative include used to be globbed against the
+        // process CWD, so starting nano in an untrusted directory let that
+        // directory define syntaxes (and their linter/formatter commands).
+        let root = tempfile::tempdir().unwrap();
+        let rcdir = root.path().join("conf [1]");
+        std::fs::create_dir_all(rcdir.join("syntax")).unwrap();
+        std::fs::write(
+            rcdir.join("syntax").join("anchored.nanorc"),
+            b"syntax anchored \"\\.anchored$\"\ncolor red \"x\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            rcdir.join("literal.nanorc"),
+            b"syntax literal \"\\.literal$\"\ncolor red \"x\"\n",
+        )
+        .unwrap();
+        let rcfile = rcdir.join("nanorc").to_string_lossy().into_owned();
+
+        crate::global::with_state_mut(|s| s.syntaxes = None);
+        super::ERROR_LIST.with(|errors| errors.borrow_mut().clear());
+        super::set_opensyntax(false);
+        super::set_nanorc(Some(rcfile.clone()));
+        super::LINENO.with(|l| *l.borrow_mut() = 0);
+
+        super::parse_includes("\"syntax/*.nanorc\"");
+        super::set_nanorc(Some(rcfile));
+        super::parse_includes("\"literal.nanorc\"");
+
+        super::ERROR_LIST.with(|errors| {
+            assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+        });
+        let loaded = crate::global::with_state(|s| {
+            let mut found = Vec::new();
+            let mut cur = s.syntaxes.as_ref();
+            while let Some(sx) = cur {
+                found.push((sx.name.clone(), sx.filename.clone()));
+                cur = sx.next.as_ref();
+            }
+            found
+        });
+        let expect = |name: &str, path: std::path::PathBuf| {
+            assert!(
+                loaded
+                    .iter()
+                    .any(|(n, f)| n == name && *f == path.to_string_lossy()),
+                "{name} not loaded from {}: {loaded:?}",
+                path.display()
+            );
+        };
+        expect("anchored", rcdir.join("syntax").join("anchored.nanorc"));
+        expect("literal", rcdir.join("literal.nanorc"));
+
+        crate::global::with_state_mut(|s| s.syntaxes = None);
+        super::set_opensyntax(false);
     }
 
     #[cfg(feature = "color")]
