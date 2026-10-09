@@ -37,6 +37,13 @@ git tag -a vX.Y.Z -m 'Release X.Y.Z'
 git push && git push --tags
 ```
 
+`bump-version.py` updates `Cargo.toml`, `Cargo.lock` and `media/nano.rc`.
+`Cargo.lock` is committed and the release workflow builds with
+`cargo build --locked`, so a release ships exactly the dependency versions
+recorded in the tagged commit. Dependency and action updates arrive as
+Dependabot PRs. A tag whose `Cargo.lock` is out of date with `Cargo.toml`
+fails the build instead of resolving new crate versions.
+
 ## Auto-update (Windows and Linux)
 
 nano-rs ships with a cross-platform self-update capability:

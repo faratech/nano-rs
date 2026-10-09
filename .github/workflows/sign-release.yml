@@ -8,9 +8,7 @@ on:
         required: true
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: sign-release-${{ github.ref }}-${{ inputs.tag }}
@@ -20,10 +18,14 @@ jobs:
   sign-windows-binaries:
     runs-on: windows-latest
     timeout-minutes: 15
+    permissions:
+      contents: write      # download and re-upload release assets
+      id-token: write      # sign the provenance attestation
+      attestations: write  # store the provenance attestation
     env:
       __COMPAT_LAYER: RunAsInvoker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download Windows binaries from release
         env:
@@ -40,7 +42,7 @@ jobs:
           Write-Host "Found $($files.Count) executable(s) to sign."
 
       - name: Sign with Fara Technologies LLC (primary)
-        uses: Azure/trusted-signing-action@v2.0.0
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -55,7 +57,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Append Mike Fara signature
-        uses: Azure/trusted-signing-action@v2.0.0
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -87,7 +89,7 @@ jobs:
           }
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         continue-on-error: true
         with:
           subject-path: 'binaries/*.exe'
