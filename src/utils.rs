@@ -208,10 +208,23 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<std::path::Path>,
 {
+    let file_name = executable_file_name(program);
     dirs.into_iter()
         .filter(|dir| dir.as_ref().is_absolute())
-        .map(|dir| dir.as_ref().join(program))
+        .map(|dir| dir.as_ref().join(&file_name))
         .find(|candidate| is_executable_file(candidate))
+}
+
+/// The file name `program` has on disk.  Like `Command::new()`'s own PATH
+/// search, an extensionless name means `name.exe` on Windows (EXE_SUFFIX is
+/// empty elsewhere), so `hunspell` keeps finding `hunspell.exe`.
+#[cfg(any(feature = "speller", not(windows)))]
+fn executable_file_name(program: &str) -> std::ffi::OsString {
+    let mut name = std::ffi::OsString::from(program);
+    if std::path::Path::new(program).extension().is_none() {
+        name.push(std::env::consts::EXE_SUFFIX);
+    }
+    name
 }
 
 #[cfg(any(feature = "speller", not(windows)))]
@@ -676,6 +689,26 @@ mod tests {
             find_in_path_value("hunspell", std::ffi::OsStr::new(":.:bin:")),
             None
         );
+    }
+
+    #[cfg(all(windows, feature = "speller"))]
+    #[test]
+    fn windows_lookup_finds_extensionless_names_as_exe() {
+        // Command::new("hunspell") finds hunspell.exe on PATH; the absolute
+        // lookup that replaced it must too, or the speller never runs.
+        let root = tempfile::tempdir().unwrap();
+        let wanted = root.path().join("hunspell.exe");
+        std::fs::write(&wanted, b"MZ").unwrap();
+
+        assert_eq!(
+            find_executable_in("hunspell", [root.path()]),
+            Some(wanted.clone())
+        );
+        assert_eq!(
+            find_executable_in("hunspell.exe", [root.path()]),
+            Some(wanted)
+        );
+        assert_eq!(find_executable_in("hunspell", ["."]), None);
     }
 
     #[test]
