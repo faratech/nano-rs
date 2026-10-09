@@ -937,6 +937,18 @@ fn classify_tool_exit(tool: &str, code: Option<i32>) -> FetchError {
     }
 }
 
+/// Directories the updater takes `curl` and `wget` from.  The background check
+/// runs unprompted on every launch, so it must not execute whatever a relative,
+/// empty or user-writable PATH entry provides; these locations are root-owned
+/// on every supported system (the last one is NixOS's system profile).
+#[cfg(not(windows))]
+const DOWNLOAD_TOOL_DIRS: [&str; 4] = [
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/run/current-system/sw/bin",
+];
+
 /// HTTP GET on Unix via `curl` (falling back to `wget`).
 ///
 /// Both tools follow redirects and FAIL on HTTP 4xx/5xx (curl `-f`, wget's
@@ -949,12 +961,18 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, FetchError> {
 
     // curl -f (fail on HTTP error) -s (silent) -S (show error) -L (follow redirects).
     let mut last_error = FetchError::Transport(format!(
-        "could not download {url}: neither `curl` nor `wget` is available on PATH"
+        "could not download {url}: neither `curl` nor `wget` is installed in {}",
+        DOWNLOAD_TOOL_DIRS.join(", ")
     ));
+    let tool = |name: &str| {
+        crate::utils::find_executable_in(name, DOWNLOAD_TOOL_DIRS)
+            .map(Command::new)
+            .ok_or(std::io::ErrorKind::NotFound)
+    };
 
     // Bound connection setup to 10 seconds and the whole transfer to 60.
-    match Command::new("curl")
-        .args([
+    match tool("curl").and_then(|mut curl| {
+        curl.args([
             "-fsSL",
             "--connect-timeout",
             "10",
@@ -969,15 +987,16 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, FetchError> {
             url,
         ])
         .output()
-    {
+        .map_err(|e| e.kind())
+    }) {
         Ok(out) if out.status.success() => return Ok(out.stdout),
         Ok(out) => last_error = classify_tool_exit("curl", out.status.code()),
         Err(_) => { /* curl not installed; try wget */ }
     }
 
     // wget -q (quiet) -O - (stdout); non-zero exit on server error by default.
-    match Command::new("wget")
-        .args([
+    match tool("wget").and_then(|mut wget| {
+        wget.args([
             "-q",
             "--connect-timeout=10",
             "--timeout=60",
@@ -989,7 +1008,8 @@ fn native_http_get(url: &str) -> Result<Vec<u8>, FetchError> {
             url,
         ])
         .output()
-    {
+        .map_err(|e| e.kind())
+    }) {
         Ok(out) if out.status.success() => Ok(out.stdout),
         Ok(out) => Err(classify_tool_exit("wget", out.status.code())),
         Err(_) => Err(last_error),
@@ -1218,6 +1238,14 @@ pub enum UpdateStatus {
 pub fn check_and_download_update() -> UpdateStatus {
     // Respect the opt-in/opt-out policy (Unix is opt-in; see the fn).
     if !background_updates_enabled() {
+        return UpdateStatus::None;
+    }
+    // Never fetch and stage binaries unprompted with root privileges: an
+    // elevated session may have inherited the invoking user's PATH and HOME
+    // (`su`, `sudo -E`), so it would act inside that user's environment.
+    // An explicit `nano --update` still works.
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
         return UpdateStatus::None;
     }
     // Don't download what we can't install anywhere (and avoid re-notifying

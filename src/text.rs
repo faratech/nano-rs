@@ -4520,6 +4520,22 @@ fn get_region_as_lines_coords() -> Option<(LinePtr, usize, LinePtr, usize)> {
     get_region_as_lines()
 }
 
+/// A speller helper, found the way C nano's execlp() finds it except that
+/// empty and relative PATH entries are skipped: spell checking a file inside
+/// an untrusted directory must not run a `sort` or `spell` planted there.
+#[cfg(feature = "speller")]
+fn speller_command(program: &str) -> std::io::Result<std::process::Command> {
+    std::env::var_os("PATH")
+        .and_then(|path| crate::utils::find_in_path_value(program, &path))
+        .map(std::process::Command::new)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{program} not found in an absolute PATH directory"),
+            )
+        })
+}
+
 /* C: void spell_check(const char *tempfile_name) */
 #[cfg(feature = "speller")]
 pub fn spell_check(tempfile_name: &str) {
@@ -4538,10 +4554,8 @@ pub fn spell_check(tempfile_name: &str) {
     // Run: cat tempfile | hunspell -l | sort -f | uniq
     // (C reports tempfile/pipe failures via statusline ALERT and aborts.)
     let hunspell_output = match std::fs::File::open(tempfile_name) {
-        Ok(f) => Command::new("hunspell")
-            .arg("-l")
-            .stdin(Stdio::from(f))
-            .output(),
+        Ok(f) => speller_command("hunspell")
+            .and_then(|mut hunspell| hunspell.arg("-l").stdin(Stdio::from(f)).output()),
         Err(e) => {
             statusline(
                 MessageType::Alert,
@@ -4566,7 +4580,9 @@ pub fn spell_check(tempfile_name: &str) {
                     return;
                 }
             };
-            match Command::new("spell").stdin(Stdio::from(infile)).output() {
+            match speller_command("spell")
+                .and_then(|mut spell| spell.stdin(Stdio::from(infile)).output())
+            {
                 Ok(o) => o.stdout,
                 Err(e) => {
                     statusline(
@@ -4582,12 +4598,12 @@ pub fn spell_check(tempfile_name: &str) {
     // Sort the misspelled words.
     let sort_output = {
         use std::io::Write;
-        let mut sort_proc = match Command::new("sort")
-            .arg("-f")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-        {
+        let mut sort_proc = match speller_command("sort").and_then(|mut sort| {
+            sort.arg("-f")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+        }) {
             Ok(p) => p,
             Err(e) => {
                 statusline(
@@ -4615,10 +4631,8 @@ pub fn spell_check(tempfile_name: &str) {
     // Unique the sorted list.
     let uniq_output = {
         use std::io::Write;
-        let mut uniq_proc = match Command::new("uniq")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
+        let mut uniq_proc = match speller_command("uniq")
+            .and_then(|mut uniq| uniq.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn())
         {
             Ok(p) => p,
             Err(e) => {
