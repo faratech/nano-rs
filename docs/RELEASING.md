@@ -86,7 +86,8 @@ nano-rs ships with a cross-platform self-update capability:
     failed/offline attempt never blocks the next launch from retrying — runs
     only when at least one applicable location is user-writable (so a system
     `/usr/bin/nano` alone never triggers a download), never blocks on the
-    network, and is silent on failure.
+    network, and is silent on failure. It is skipped entirely when nano-rs
+    runs as root (euid 0); `nano --update` still works there.
   - The manual `nano --check` probe ignores these environment variables: it
     always asks GitHub when you explicitly run it.
 
@@ -107,7 +108,10 @@ How downloads happen, with **no extra dependencies**:
   after redirects, and a truncated read is treated as failure, so a partial or
   error response is never installed as the executable.
 - **Linux/Unix**: shells out to `curl` (falling back to `wget`) — both follow
-  redirects and fail on HTTP 4xx/5xx, giving the same safety.
+  redirects and fail on HTTP 4xx/5xx, giving the same safety. The tools are
+  taken only from `/usr/bin`, `/bin`, `/usr/local/bin` or
+  `/run/current-system/sw/bin`, never from a `PATH` search, so a `curl` planted
+  in the current directory or another `PATH` entry is never run.
 
 The updater selects the asset matching the host OS and architecture:
 `nano-{amd64,arm64}.exe` on Windows, `nano-linux-{amd64,arm64}` on Linux.

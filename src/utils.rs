@@ -197,6 +197,57 @@ pub fn free_chararray(array: Vec<String>) {
     drop(array);
 }
 
+/// The first `dir/program` that is an executable regular file, considering
+/// only absolute directories.  Empty and relative directories (".", "bin",
+/// or the empty entry a leading, trailing or doubled ':' in PATH produces)
+/// would make the result depend on the current directory, which may be an
+/// untrusted tree, so they are skipped.
+#[cfg(any(feature = "speller", not(windows)))]
+pub fn find_executable_in<I, P>(program: &str, dirs: I) -> Option<std::path::PathBuf>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<std::path::Path>,
+{
+    let file_name = executable_file_name(program);
+    dirs.into_iter()
+        .filter(|dir| dir.as_ref().is_absolute())
+        .map(|dir| dir.as_ref().join(&file_name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// The file name `program` has on disk.  Like `Command::new()`'s own PATH
+/// search, an extensionless name means `name.exe` on Windows (EXE_SUFFIX is
+/// empty elsewhere), so `hunspell` keeps finding `hunspell.exe`.
+#[cfg(any(feature = "speller", not(windows)))]
+fn executable_file_name(program: &str) -> std::ffi::OsString {
+    let mut name = std::ffi::OsString::from(program);
+    if std::path::Path::new(program).extension().is_none() {
+        name.push(std::env::consts::EXE_SUFFIX);
+    }
+    name
+}
+
+#[cfg(any(feature = "speller", not(windows)))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        #[cfg(unix)]
+        Ok(meta) => {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        Ok(meta) => meta.is_file(),
+        Err(_) => false,
+    }
+}
+
+/// Look `program` up in a PATH value the way execlp() would, but only in its
+/// absolute directories (see `find_executable_in`).
+#[cfg(feature = "speller")]
+pub fn find_in_path_value(program: &str, path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    find_executable_in(program, std::env::split_paths(path))
+}
+
 /* C: bool is_separate_word(size_t position, size_t length, const char *text)
  * Return TRUE when the word starting at position (of the given length) in text
  * is a separate word — not part of a longer word. */
@@ -594,6 +645,70 @@ mod tests {
             let start = get_page_start(10);
             assert!(start <= 10, "width {width} produced {start}");
         }
+    }
+
+    #[cfg(unix)]
+    fn plant_executable(dir: &std::path::Path, name: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executables_are_found_only_in_absolute_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir(first.join("tool")).unwrap(); // a directory, not a program
+        plant_executable(&first, "plain", 0o644); // not executable
+        let wanted = plant_executable(&second, "tool", 0o755);
+
+        assert_eq!(find_executable_in("tool", [&first, &second]), Some(wanted));
+        assert_eq!(find_executable_in("plain", [&first, &second]), None);
+        // Relative directories are never consulted, whatever the CWD holds.
+        assert_eq!(find_executable_in("tool", [".", "second", ""]), None);
+    }
+
+    #[cfg(all(unix, feature = "speller"))]
+    #[test]
+    fn path_lookup_skips_empty_and_relative_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let wanted = plant_executable(root.path(), "hunspell", 0o755);
+        let path = format!(":.:bin::{}:", root.path().display());
+
+        assert_eq!(
+            find_in_path_value("hunspell", std::ffi::OsStr::new(&path)),
+            Some(wanted)
+        );
+        assert_eq!(
+            find_in_path_value("hunspell", std::ffi::OsStr::new(":.:bin:")),
+            None
+        );
+    }
+
+    #[cfg(all(windows, feature = "speller"))]
+    #[test]
+    fn windows_lookup_finds_extensionless_names_as_exe() {
+        // Command::new("hunspell") finds hunspell.exe on PATH; the absolute
+        // lookup that replaced it must too, or the speller never runs.
+        let root = tempfile::tempdir().unwrap();
+        let wanted = root.path().join("hunspell.exe");
+        std::fs::write(&wanted, b"MZ").unwrap();
+
+        assert_eq!(
+            find_executable_in("hunspell", [root.path()]),
+            Some(wanted.clone())
+        );
+        assert_eq!(
+            find_executable_in("hunspell.exe", [root.path()]),
+            Some(wanted)
+        );
+        assert_eq!(find_executable_in("hunspell", ["."]), None);
     }
 
     #[test]
