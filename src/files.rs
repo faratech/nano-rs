@@ -250,16 +250,10 @@ fn rename_path(from: &Path, to: &Path, source: &File) -> io::Result<()> {
 
 /// Atomically install an already-open staging file on Windows.
 ///
-/// `SetFileInformationByHandle(FileRenameInfo)` rejects a non-NULL
-/// `RootDirectory` with ERROR_INVALID_PARAMETER (that field is honored only
-/// by `NtSetInformationFile`), so a handle-relative rename is not available
-/// through the Win32 API.  Instead, both the source and the destination
-/// parent are resolved to their final pathnames *from already-open
-/// capability-confined handles*, and the rename uses those resolved names
-/// (`std::fs::rename` replaces existing files on Windows via
-/// MOVEFILE_REPLACE_EXISTING).  A directory swapped after resolution can at
-/// worst fail the rename; the names cannot come from re-walking an ambient,
-/// attacker-substitutable path.
+/// The destination's parent is opened beneath the capability root and the
+/// staging file is renamed *by handle* into that directory handle, so no
+/// pathname is walked after the capability check (see
+/// `rename_into_directory_on_windows`).
 #[cfg(all(windows, feature = "operatingdir"))]
 fn replace_capability_file_on_windows(
     root: &OperatingRoot,
@@ -277,10 +271,76 @@ fn replace_capability_file_on_windows(
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let parent = root.dir.open_dir(parent)?;
+    rename_into_directory_on_windows(source, &parent, basename)
+}
 
-    let source_path = final_path_from_handle(source)?;
-    let parent_path = final_path_from_handle(&parent.into_std_file())?;
-    std::fs::rename(source_path, parent_path.join(basename))
+/// Rename the open file `source` to `basename` inside the open directory
+/// `parent`, replacing an existing entry of that name.
+///
+/// `NtSetInformationFile(FileRenameInformation)` with `RootDirectory` set to
+/// the parent handle resolves the bare new name relative to that handle, so
+/// a junction planted in an ancestor after `parent` was opened cannot
+/// redirect the install outside the operating directory, and the file moved
+/// is the open staging file itself, whatever sits at its old name by now.
+/// (`SetFileInformationByHandle(FileRenameInfo)` rejects a non-NULL
+/// `RootDirectory` with ERROR_INVALID_PARAMETER, hence the native call.)
+#[cfg(all(windows, feature = "operatingdir"))]
+fn rename_into_directory_on_windows(
+    source: &File,
+    parent: &cap_std::fs::Dir,
+    basename: &std::ffi::OsStr,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FileRenameInformation, NtSetInformationFile,
+    };
+    use windows::Win32::Foundation::{HANDLE, RtlNtStatusToDosError};
+    use windows::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let name: Vec<u16> = basename.encode_wide().collect();
+    if name.is_empty()
+        || name
+            .iter()
+            .any(|&unit| unit == u16::from(b'\\') || unit == u16::from(b'/'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "replacement name must be a single path component",
+        ));
+    }
+    let name_bytes = std::mem::size_of_val(name.as_slice());
+    let length = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName) + name_bytes;
+    // u64 storage keeps the structure's HANDLE field aligned.
+    let mut buffer = vec![0u64; length.div_ceil(std::mem::size_of::<u64>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = HANDLE(parent.as_raw_handle());
+        (*info).FileNameLength = u32::try_from(name_bytes).map_err(io::Error::other)?;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
+            HANDLE(source.as_raw_handle()),
+            &mut status_block,
+            buffer.as_ptr().cast(),
+            u32::try_from(length).map_err(io::Error::other)?,
+            FileRenameInformation,
+        )
+    };
+    if status.0 >= 0 {
+        Ok(())
+    } else {
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        Err(io::Error::from_raw_os_error(code as i32))
+    }
 }
 
 /// Resolve an open handle to its final `\\?\`-prefixed pathname.
@@ -3678,11 +3738,15 @@ pub fn get_full_path_buf(origpath: &Path) -> Option<PathBuf> {
 
 pub fn get_full_path(origpath: &str) -> Option<String> {
     let full = get_full_path_buf(Path::new(origpath))?;
-    let mut display = printable_path(&full);
+    Some(full_path_display(&full))
+}
+
+fn full_path_display(full: &Path) -> String {
+    let mut display = printable_path(full);
     if full.is_dir() && full.parent().is_some() && !display.ends_with(std::path::MAIN_SEPARATOR) {
         display.push(std::path::MAIN_SEPARATOR);
     }
-    Some(display)
+    display
 }
 
 // ---------------------------------------------------------------------------
@@ -3756,40 +3820,155 @@ pub fn safe_tempfile() -> Option<(String, File)> {
 #[cfg(feature = "operatingdir")]
 pub fn init_operating_dir() {
     let od = state().operating_dir.clone().unwrap_or_default();
-    let target = get_full_path(&od);
 
-    match target {
-        None => {
+    // Canonicalize once, open that canonical name as the capability without
+    // letting any component be a link, and only then make the opened
+    // directory the CWD -- by handle, not by name -- so the retained root is
+    // always the directory that `display_path` names (#83).
+    let opened = canonical_operating_dir(&od).and_then(|canonical| {
+        let root = OperatingRoot {
+            display_path: PathBuf::from(full_path_display(&canonical)),
+            dir: open_canonical_dir(&canonical)?,
+        };
+        enter_operating_root(&root, &canonical)?;
+        Ok(root)
+    });
+
+    match opened {
+        Err(_) => {
             eprintln!("Invalid operating directory: {}", od);
             std::process::exit(1);
         }
-        Some(t) => {
-            if std::env::set_current_dir(&t).is_err() {
-                eprintln!("Invalid operating directory: {}", od);
-                std::process::exit(1);
-            }
-            // The process cwd itself identifies the directory selected by
-            // set_current_dir even if its old name is immediately replaced.
-            // Retain that exact object as the capability root, rather than
-            // reopening the attacker-mutable pathname a second time.
-            let directory =
-                match cap_std::fs::Dir::open_ambient_dir(".", cap_std::ambient_authority()) {
-                    Ok(directory) => directory,
-                    Err(_) => {
-                        eprintln!("Invalid operating directory: {}", od);
-                        std::process::exit(1);
-                    }
-                };
-            let display_path = PathBuf::from(&t);
+        Ok(root) => {
+            let display = root.display_path.to_string_lossy().into_owned();
             OPERATING_ROOT.with(|slot| {
-                *slot.borrow_mut() = Some(OperatingRoot {
-                    display_path,
-                    dir: directory,
-                });
+                *slot.borrow_mut() = Some(root);
             });
-            state_mut().operating_dir = Some(t);
+            state_mut().operating_dir = Some(display);
         }
     }
+}
+
+/// The canonical absolute form of the requested operating directory.
+///
+/// Not `get_full_path_buf()`: that refuses to resolve anything while an
+/// operating directory is configured but its capability is not open yet --
+/// precisely the state during `init_operating_dir()`, which therefore
+/// rejected every directory.
+#[cfg(feature = "operatingdir")]
+fn canonical_operating_dir(requested: &str) -> io::Result<PathBuf> {
+    if requested.is_empty() {
+        return Err(io::Error::from(io::ErrorKind::NotFound));
+    }
+    std::fs::canonicalize(expand_leading_tilde_path(Path::new(requested)))
+}
+
+/// Open `canonical` -- an absolute path that contained no symbolic links
+/// when it was canonicalized -- as the operating-directory capability.
+///
+/// The directory is reached one component at a time from `/` with
+/// O_NOFOLLOW, so a component that was swapped for a symlink after
+/// canonicalization makes the open fail instead of binding the capability to
+/// wherever the link points while nano keeps showing the intended path.
+/// Intermediate components are opened with O_PATH where available, so, as
+/// for an ordinary lookup, search permission on them suffices.
+#[cfg(all(feature = "operatingdir", unix))]
+fn open_canonical_dir(canonical: &Path) -> io::Result<cap_std::fs::Dir> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TRAVERSE: libc::c_int = libc::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const TRAVERSE: libc::c_int = libc::O_RDONLY;
+
+    fn open_at(dirfd: libc::c_int, name: &CStr, access: libc::c_int) -> io::Result<OwnedFd> {
+        let flags = access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let fd = unsafe { libc::openat(dirfd, name.as_ptr(), flags) };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    let not_canonical = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "operating directory is not a canonical absolute path",
+        )
+    };
+    if !canonical.is_absolute() {
+        return Err(not_canonical());
+    }
+    let mut names = Vec::new();
+    for component in canonical.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => names.push(CString::new(name.as_bytes())?),
+            _ => return Err(not_canonical()),
+        }
+    }
+
+    let access_for = |index: usize| {
+        if index == names.len() {
+            libc::O_RDONLY
+        } else {
+            TRAVERSE
+        }
+    };
+    let mut current = open_at(libc::AT_FDCWD, c"/", access_for(0))?;
+    for (index, name) in names.iter().enumerate() {
+        current = open_at(current.as_raw_fd(), name, access_for(index + 1))?;
+    }
+    Ok(cap_std::fs::Dir::from_std_file(File::from(current)))
+}
+
+/// Windows has no O_NOFOLLOW walk, but `canonical` came from
+/// `GetFinalPathNameByHandleW` (via `std::fs::canonicalize`): if a junction
+/// was swapped in since, the opened handle's final path no longer matches.
+#[cfg(all(feature = "operatingdir", windows))]
+fn open_canonical_dir(canonical: &Path) -> io::Result<cap_std::fs::Dir> {
+    let directory = cap_std::fs::Dir::open_ambient_dir(canonical, cap_std::ambient_authority())?;
+    let file = directory.into_std_file();
+    if final_path_from_handle(&file)? != canonical {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating directory changed while it was being opened",
+        ));
+    }
+    Ok(cap_std::fs::Dir::from_std_file(file))
+}
+
+/// Make the retained capability the process's current directory.
+#[cfg(all(feature = "operatingdir", unix))]
+fn enter_operating_root(root: &OperatingRoot, _canonical: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::fchdir(root.dir.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Windows can only change directory by name, so confirm afterwards that the
+/// new CWD is the retained directory.
+#[cfg(all(feature = "operatingdir", windows))]
+fn enter_operating_root(root: &OperatingRoot, canonical: &Path) -> io::Result<()> {
+    std::env::set_current_dir(canonical)?;
+    let cwd = cap_std::fs::Dir::open_ambient_dir(".", cap_std::ambient_authority())?;
+    let held = root.dir.try_clone()?;
+    if final_path_from_handle(&cwd.into_std_file())?
+        != final_path_from_handle(&held.into_std_file())?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "operating directory changed while it was being entered",
+        ));
+    }
+    Ok(())
 }
 
 /* C: bool outside_of_confinement(const char *somepath, bool tabbing)
@@ -6238,6 +6417,123 @@ mod tests {
         staging.persist(&target).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+    }
+
+    #[cfg(all(unix, feature = "operatingdir"))]
+    #[test]
+    fn operating_dir_init_refuses_components_swapped_after_canonicalization() {
+        use std::os::unix::fs::symlink;
+
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        let elsewhere = holder.path().join("elsewhere");
+        std::fs::create_dir_all(parent.join("root")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("root")).unwrap();
+        std::fs::write(parent.join("root").join("marker"), b"intended").unwrap();
+        std::fs::write(elsewhere.join("root").join("marker"), b"substitute").unwrap();
+
+        // Issue #83: canonicalize, then a parent component is exchanged for a
+        // symlink before the directory is opened.  The name now leads to the
+        // substitute -- which is what chdir(name) + open(".") used to bind.
+        let canonical =
+            super::canonical_operating_dir(parent.join("root").to_str().unwrap()).unwrap();
+        let parked = holder.path().join("parked");
+        std::fs::rename(&parent, &parked).unwrap();
+        symlink(&elsewhere, &parent).unwrap();
+        let by_name =
+            cap_std::fs::Dir::open_ambient_dir(&canonical, cap_std::ambient_authority()).unwrap();
+        assert_eq!(by_name.read("marker").unwrap(), b"substitute");
+        assert!(super::open_canonical_dir(&canonical).is_err());
+
+        // The same for the final component.
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::rename(&parked, &parent).unwrap();
+        std::fs::rename(parent.join("root"), parent.join("old-root")).unwrap();
+        symlink(elsewhere.join("root"), parent.join("root")).unwrap();
+        assert!(super::open_canonical_dir(&canonical).is_err());
+
+        // Undisturbed, the handle is the directory the canonical name shows.
+        std::fs::remove_file(parent.join("root")).unwrap();
+        std::fs::rename(parent.join("old-root"), parent.join("root")).unwrap();
+        let held = super::open_canonical_dir(&canonical).unwrap();
+        assert_eq!(held.read("marker").unwrap(), b"intended");
+        assert!(super::open_canonical_dir(Path::new("/")).is_ok());
+        assert!(super::open_canonical_dir(Path::new("relative/root")).is_err());
+    }
+
+    #[cfg(feature = "operatingdir")]
+    #[test]
+    fn operating_dir_resolves_while_its_capability_is_still_unopened() {
+        let directory = tempfile::tempdir().unwrap();
+        let requested = directory.path().to_string_lossy().into_owned();
+        let previous = crate::global::state().operating_dir.clone();
+        // The state during init_operating_dir: configured, not yet opened.
+        crate::global::state_mut().operating_dir = Some(requested.clone());
+
+        assert!(super::get_full_path_buf(directory.path()).is_none());
+        let canonical = super::canonical_operating_dir(&requested).unwrap();
+        assert!(super::open_canonical_dir(&canonical).is_ok());
+        assert!(super::canonical_operating_dir("").is_err());
+
+        crate::global::state_mut().operating_dir = previous;
+    }
+
+    #[cfg(all(windows, feature = "operatingdir"))]
+    #[test]
+    fn capability_rename_lands_in_the_held_parent_even_after_a_junction_swap() {
+        use super::{create_staging_file, rename_into_directory_on_windows};
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let nested = root_path.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let _guard = TestOperatingRoot::install(&root_path);
+
+        let mut staging = create_staging_file(&root_path, ".nano-test.").unwrap();
+        staging.as_file_mut().write_all(b"candidate").unwrap();
+        // cap-std opens directories without FILE_SHARE_DELETE, so while
+        // nano holds the parent nobody can rename it (ERROR_SHARING_VIOLATION).
+        // To stage the swap at all, hold this parent with delete sharing --
+        // the most permissive handle the rename could be given.
+        let held_parent = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .open(&nested)
+                .unwrap();
+            cap_std::fs::Dir::from_std_file(directory)
+        };
+
+        // Issue #84: after the parent was resolved, its name is redirected
+        // through a junction to a directory outside the operating root.
+        std::fs::rename(&nested, root_path.join("displaced")).unwrap();
+        let junction = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&nested)
+            .arg(outside.path())
+            .output()
+            .unwrap();
+        assert!(junction.status.success(), "{junction:?}");
+
+        rename_into_directory_on_windows(
+            staging.as_file(),
+            &held_parent,
+            std::ffi::OsStr::new("document"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root_path.join("displaced").join("document")).unwrap(),
+            b"candidate"
+        );
+        assert!(!outside.path().join("document").exists());
+        std::fs::remove_dir(&nested).unwrap();
     }
 
     #[cfg(all(unix, feature = "operatingdir"))]
