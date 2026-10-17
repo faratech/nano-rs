@@ -1,6 +1,7 @@
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"
 rustflags = [
+  "-C", "target-feature=+crt-static",
   "-Lnative=/opt/xwin/crt/lib/x86_64",
   "-Lnative=/opt/xwin/sdk/lib/um/x86_64",
   "-Lnative=/opt/xwin/sdk/lib/ucrt/x86_64",
@@ -9,6 +10,7 @@ rustflags = [
 [target.aarch64-pc-windows-msvc]
 linker = "lld-link"
 rustflags = [
+  "-C", "target-feature=+crt-static",
   "-Lnative=/opt/xwin-arm64/crt/lib/aarch64",
   "-Lnative=/opt/xwin-arm64/sdk/lib/um/aarch64",
   "-Lnative=/opt/xwin-arm64/sdk/lib/ucrt/aarch64",
