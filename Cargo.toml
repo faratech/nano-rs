@@ -13,7 +13,7 @@ cap-std = "4.0.2"
 regex = { version = "1.13", default-features = false, features = ["std", "unicode"] }
 libc = "0.2"
 unicode-width = "0.2"
-magic = { version = "0.16.7", optional = true }
+magic = { version = "0.17.0", optional = true }
 tempfile = "3"
 sha2 = "0.11"
 glob = "0.3"
