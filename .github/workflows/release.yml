@@ -99,7 +99,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: stable
+          toolchain: "1.100.0"
           targets: ${{ matrix.target }}
 
       - name: Install musl tools

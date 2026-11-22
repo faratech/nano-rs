@@ -29,8 +29,8 @@ nano-rs carries four local fixes:
 
 The parser and event-source regression tests live beside the patched code.
 
-5. `rust-version` raised from upstream's 1.63.0 to 1.70.0: the dependency
-   graph this fork resolves against (notably newer `thiserror` point
-   releases) now uses APIs stabilized after 1.63, and the CI clippy gate
-   (`-D warnings`, including `clippy::incompatible_msrv`) enforces the
-   declared MSRV. nano-rs itself requires a much newer toolchain anyway.
+The fork uses the same minimum Rust version as nano-rs (1.100.0).
+
+The fork updates its optional Base64 support, test serialization, mutex
+implementation, and Unix signal dependencies. Both static mutexes use
+`Mutex::new`, and the Mio event backend still uses the Mio 1.x integration.

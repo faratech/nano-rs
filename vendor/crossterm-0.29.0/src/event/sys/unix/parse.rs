@@ -38,7 +38,7 @@ pub(crate) fn incomplete_paste_bytes(buffer: &[u8]) -> Option<Vec<u8>> {
 //
 
 fn could_not_parse_event_error() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "Could not parse an event.")
+    io::Error::other("Could not parse an event.")
 }
 
 pub(crate) fn parse_event(

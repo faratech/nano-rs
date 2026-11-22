@@ -22,7 +22,7 @@ cargo build --release      # → target/release/nano
 ./target/release/nano file.txt
 ```
 
-Requires **Rust 1.85+** (2024 edition). The default build enables the full feature set; a `cargo build --release` yields a stripped, LTO'd binary under 1 MB (a `build-std` size pass takes it to ~580 KB).
+Requires **Rust 1.100.0+** (2024 edition). The default build enables the full feature set; a `cargo build --release` yields a stripped, LTO'd binary under 1 MB (a `build-std` size pass takes it to ~580 KB).
 
 ## Features & build flags
 
