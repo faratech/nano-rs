@@ -181,10 +181,10 @@ impl EventSource for UnixInternalEventSource {
                     }
                 }
                 Err(e) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("got unexpected error while polling: {:?}", e),
-                    ))
+                    return Err(std::io::Error::other(format!(
+                        "got unexpected error while polling: {:?}",
+                        e
+                    )))
                 }
                 Ok(_) => (),
             };
@@ -214,10 +214,7 @@ impl EventSource for UnixInternalEventSource {
                 return self.finish_at_eof();
             }
             if fds[0].revents & POLLERR != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "terminal input reported a poll error",
-                ));
+                return Err(io::Error::other("terminal input reported a poll error"));
             }
             if fds[1].revents & POLLIN != 0 {
                 #[cfg(feature = "libc")]

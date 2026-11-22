@@ -170,10 +170,7 @@ impl EventSource for UnixInternalEventSource {
                             return self.finish_at_eof();
                         }
                         if read_error {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                "terminal input reported a poll error",
-                            ));
+                            return Err(io::Error::other("terminal input reported a poll error"));
                         }
                         if let Some(event) = self.parser.next() {
                             return Ok(Some(event));

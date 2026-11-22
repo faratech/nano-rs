@@ -4238,6 +4238,7 @@ fn make_backup_from(realname: &Path, fileinfo: &FileStat, source: Option<&File>)
 
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
             use std::os::unix::io::AsRawFd;
             let fd = staging.as_file().as_raw_fd();
             let ownership = unsafe { libc::fchown(fd, fileinfo.st_uid, fileinfo.st_gid) };
@@ -4245,9 +4246,8 @@ fn make_backup_from(realname: &Path, fileinfo: &FileStat, source: Option<&File>)
                 let error = io::Error::last_os_error();
                 bail!("Cannot preserve backup ownership".to_string(), error);
             }
-            let permissions = unsafe { libc::fchmod(fd, fileinfo.st_mode & 0o7777) };
-            if permissions != 0 {
-                let error = io::Error::last_os_error();
+            let permissions = std::fs::Permissions::from_mode(fileinfo.st_mode & 0o7777);
+            if let Err(error) = staging.as_file().set_permissions(permissions) {
                 bail!("Cannot preserve backup permissions".to_string(), error);
             }
 
@@ -4935,6 +4935,7 @@ pub fn write_file(
 
         #[cfg(unix)]
         if let Some(info) = prepend_statinfo.as_ref() {
+            use std::os::unix::fs::PermissionsExt;
             use std::os::unix::io::AsRawFd;
             let fd = staging.as_file().as_raw_fd();
             if unsafe { libc::fchown(fd, info.st_uid, info.st_gid) } != 0 {
@@ -4948,13 +4949,13 @@ pub fn write_file(
                 );
                 return false;
             }
-            if unsafe { libc::fchmod(fd, info.st_mode & 0o7777) } != 0 {
+            let permissions = std::fs::Permissions::from_mode(info.st_mode & 0o7777);
+            if let Err(error) = staging.as_file().set_permissions(permissions) {
                 statusline(
                     MessageType::Alert,
                     &format!(
                         "Error preserving permissions of {}: {}",
-                        realname_str,
-                        io::Error::last_os_error()
+                        realname_str, error
                     ),
                 );
                 return false;
@@ -6499,6 +6500,8 @@ mod tests {
     #[cfg(all(unix, not(feature = "tiny")))]
     #[test]
     fn cancelled_read_does_not_ingraft_its_partial_chunk() {
+        // This reader sets the process-wide cancellation flag used by file I/O.
+        let _serial = COMMAND_TEST_LOCK.lock().unwrap();
         struct CancelAfterOneChunk(bool);
 
         impl Read for CancelAfterOneChunk {
