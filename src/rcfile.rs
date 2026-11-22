@@ -2858,22 +2858,28 @@ mod tests {
     #[cfg(feature = "color")]
     #[test]
     fn relative_include_patterns_are_anchored_at_the_rc_file() {
+        use std::path::Path;
+
         assert_eq!(
             anchor_include_pattern("/usr/share/nano/*.nanorc", Some("/etc/nanorc")),
             "/usr/share/nano/*.nanorc"
         );
-        assert_eq!(
-            anchor_include_pattern("syntax/*.nanorc", Some("/home/u/.config/nano/nanorc")),
-            "/home/u/.config/nano/syntax/*.nanorc"
-        );
-        assert_eq!(
-            anchor_include_pattern("c.nanorc", Some("/home/u/rc[1]/nanorc")),
-            "/home/u/rc[1]/c.nanorc"
-        );
-        assert_eq!(
-            anchor_include_pattern("*.nanorc", Some("/home/u/rc[1]/nanorc")),
-            "/home/u/rc[[]1[]]/*.nanorc"
-        );
+        for (pattern, rcfile, expected) in [
+            (
+                "syntax/*.nanorc",
+                "/home/u/.config/nano/nanorc",
+                "/home/u/.config/nano/syntax/*.nanorc",
+            ),
+            ("c.nanorc", "/home/u/rc[1]/nanorc", "/home/u/rc[1]/c.nanorc"),
+            (
+                "*.nanorc",
+                "/home/u/rc[1]/nanorc",
+                "/home/u/rc[[]1[]]/*.nanorc",
+            ),
+        ] {
+            let anchored = anchor_include_pattern(pattern, Some(rcfile));
+            assert_eq!(Path::new(&anchored), Path::new(expected), "{pattern}");
+        }
         // An rc file named relative to the CWD keeps CWD-relative includes.
         assert_eq!(anchor_include_pattern("*.nanorc", Some("myrc")), "*.nanorc");
         assert_eq!(anchor_include_pattern("*.nanorc", None), "*.nanorc");
