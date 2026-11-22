@@ -11,9 +11,8 @@
 
 [package]
 edition = "2021"
-# Raised from upstream 1.63: newer compatible dependencies (thiserror)
-# use APIs stabilized after 1.63, and -D warnings clippy gates enforce it.
-rust-version = "1.70.0"
+# Use the same minimum Rust version as nano-rs.
+rust-version = "1.100.0"
 name = "crossterm"
 version = "0.29.0"
 authors = ["T. Post"]
