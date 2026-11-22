@@ -30,3 +30,7 @@ nano-rs carries four local fixes:
 The parser and event-source regression tests live beside the patched code.
 
 The fork uses the same minimum Rust version as nano-rs (1.100.0).
+
+The fork updates its optional Base64 support, test serialization, mutex
+implementation, and Unix signal dependencies. Both static mutexes use
+`Mutex::new`, and the Mio event backend still uses the Mio 1.x integration.
